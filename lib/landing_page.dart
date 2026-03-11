@@ -33,7 +33,7 @@ class _LandingPageState extends State<LandingPage>
   void initState() {
     super.initState();
 
-    // Background rotation
+    // Background animation (now using progress for geometric patterns)
     _bgController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 30),
@@ -170,17 +170,17 @@ class _LandingPageState extends State<LandingPage>
     return Scaffold(
       body: Stack(
         children: [
-          // ── Animated background ──────────────────────────────────────
+          // ── Animated geometric background ─────────────────────────────
           _buildBackground(size),
 
-          // ── Geometric circuit decorations ────────────────────────────
+          // ── Circuit line decorations ─────────────────────────────────
           _buildCircuitLines(size),
 
           // ── Main content ─────────────────────────────────────────────
           SafeArea(
             child: Column(
               children: [
-                // ── Sponsor logos row (Makeblock left, Creotec right) ──
+                // ── Sponsor logos row ──
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
                   child: Row(
@@ -210,7 +210,7 @@ class _LandingPageState extends State<LandingPage>
                         children: [
                           const SizedBox(height: 12),
 
-                          // ── Main Philippine Robotics Cup logo ──
+                          // ── Main logo ──
                           AnimatedBuilder(
                             animation: _logoController,
                             builder: (_, __) => Opacity(
@@ -222,7 +222,6 @@ class _LandingPageState extends State<LandingPage>
                             ),
                           ),
 
-
                           const SizedBox(height: 28),
 
                           // Buttons
@@ -230,7 +229,7 @@ class _LandingPageState extends State<LandingPage>
                             animation: _buttonsController,
                             builder: (_, __) => Column(
                               children: [
-                                // ── REGISTRATION (Primary - largest, filled) ──
+                                // ── REGISTRATION ──
                                 _animatedButton(
                                   offset: _btn1Offset.value,
                                   opacity: _btn1Opacity.value,
@@ -245,7 +244,7 @@ class _LandingPageState extends State<LandingPage>
                                 ),
                                 const SizedBox(height: 12),
 
-                                // ── SCHEDULE + STANDINGS side by side ──
+                                // ── SCHEDULE + STANDINGS ──
                                 _animatedButton(
                                   offset: _btn2Offset.value,
                                   opacity: _btn2Opacity.value,
@@ -277,7 +276,7 @@ class _LandingPageState extends State<LandingPage>
                                 ),
                                 const SizedBox(height: 12),
 
-                                // ── TEAMS & PLAYERS (smallest, tertiary) ──
+                                // ── TEAMS & PLAYERS ──
                                 _animatedButton(
                                   offset: _btn4Offset.value,
                                   opacity: _btn4Opacity.value,
@@ -320,9 +319,9 @@ class _LandingPageState extends State<LandingPage>
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [
-            Color(0xFF0A0520),
-            Color(0xFF1A0A4A),
-            Color(0xFF0D1535),
+            Color.fromARGB(255, 33, 3, 108),
+            Color.fromARGB(255, 72, 55, 123),
+            Color.fromARGB(255, 114, 27, 5),
           ],
           stops: [0.0, 0.5, 1.0],
         ),
@@ -331,7 +330,7 @@ class _LandingPageState extends State<LandingPage>
         animation: _bgController,
         builder: (_, __) {
           return CustomPaint(
-            painter: _OrbitPainter(_bgController.value),
+            painter: _GeometricPainter(_bgController.value),
           );
         },
       ),
@@ -346,7 +345,6 @@ class _LandingPageState extends State<LandingPage>
       ),
     );
   }
-
 
   // ── Logo ─────────────────────────────────────────────────────────────────
   Widget _buildLogo() {
@@ -367,9 +365,9 @@ class _LandingPageState extends State<LandingPage>
         ],
       ),
       child: Image.asset(
-        'assets/images/CenterLogo.png',
-        width: 220,
-        height: 220,
+        'assets/images/MakeX_logo.png',
+        width: 300,
+        height: 300,
         fit: BoxFit.contain,
       ),
     );
@@ -380,7 +378,7 @@ class _LandingPageState extends State<LandingPage>
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
       child: Text(
-        '© 2025 RoboVenture • Powered by Creotec',
+        '© 2025 MakeX • Powered by Creotec',
         style: TextStyle(
           color: Colors.white.withOpacity(0.25),
           fontSize: 11,
@@ -457,6 +455,14 @@ class _NavButtonState extends State<_NavButton>
     super.dispose();
   }
 
+  Color _getDarkerColor(Color color) {
+    if (color == const Color(0xFF00CFFF)) return const Color(0xFF0099CC);
+    if (color == const Color(0xFF967BB6)) return const Color(0xFF6B4F8F);
+    if (color == const Color(0xFFFFD700)) return const Color(0xFFCCAC00);
+    if (color == const Color(0xFF00E5A0)) return const Color(0xFF00B37A);
+    return color.withOpacity(0.8);
+  }
+
   @override
   Widget build(BuildContext context) {
     final double height = widget.isPrimary
@@ -486,73 +492,40 @@ class _NavButtonState extends State<_NavButton>
                 height: height,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(widget.isPrimary ? 16 : 12),
-                  gradient: widget.isPrimary
-                      ? LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            widget.color,
-                            widget.color.withOpacity(0.75),
-                            const Color(0xFF0099CC),
-                          ],
-                        )
-                      : LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            widget.color.withOpacity(
-                                0.10 + 0.12 * _glowAnim.value),
-                            widget.color.withOpacity(
-                                0.04 + 0.06 * _glowAnim.value),
-                          ],
-                        ),
-                  border: widget.isPrimary
-                      ? null
-                      : Border.all(
-                          color: widget.color
-                              .withOpacity(0.5 + 0.4 * _glowAnim.value),
-                          width: widget.isTertiary ? 1.0 : 1.5,
-                        ),
-                  boxShadow: _hovered
-                      ? [
-                          BoxShadow(
-                            color: widget.color.withOpacity(
-                                widget.isPrimary ? 0.55 : 0.30),
-                            blurRadius: widget.isPrimary ? 32 : 20,
-                            spreadRadius: widget.isPrimary ? 4 : 1,
-                          ),
-                        ]
-                      : widget.isPrimary
-                          ? [
-                              BoxShadow(
-                                color: widget.color.withOpacity(0.30),
-                                blurRadius: 20,
-                                spreadRadius: 2,
-                              ),
-                            ]
-                          : [],
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      widget.color,
+                      widget.color.withOpacity(0.75),
+                      _getDarkerColor(widget.color),
+                    ],
+                  ),
+                  border: null,
+                  boxShadow: [
+                    BoxShadow(
+                      color: widget.color.withOpacity(_hovered ? 0.55 : 0.30),
+                      blurRadius: _hovered ? (widget.isPrimary ? 32 : 24) : 20,
+                      spreadRadius: _hovered ? (widget.isPrimary ? 4 : 2) : 2,
+                    ),
+                  ],
                 ),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    if (widget.isPrimary)
-                      Container(
-                        width: 40,
-                        height: 40,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Colors.white.withOpacity(0.2),
-                        ),
-                        child: Icon(widget.icon,
-                            color: Colors.white,
-                            size: 22),
-                      )
-                    else
-                      Icon(widget.icon,
-                          color: widget.isTertiary
-                              ? widget.color.withOpacity(0.8)
-                              : widget.color,
-                          size: widget.isTertiary ? 18 : 22),
+                    Container(
+                      width: widget.isTertiary ? 32 : 40,
+                      height: widget.isTertiary ? 32 : 40,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white.withOpacity(0.2),
+                      ),
+                      child: Icon(
+                        widget.icon,
+                        color: Colors.white,
+                        size: widget.isTertiary ? 18 : 22,
+                      ),
+                    ),
                     const SizedBox(width: 14),
                     Column(
                       mainAxisAlignment: MainAxisAlignment.center,
@@ -561,11 +534,7 @@ class _NavButtonState extends State<_NavButton>
                         Text(
                           widget.label,
                           style: TextStyle(
-                            color: widget.isPrimary
-                                ? Colors.white
-                                : _hovered
-                                    ? widget.color
-                                    : Colors.white,
+                            color: Colors.white,
                             fontSize: widget.isPrimary
                                 ? 18
                                 : widget.isTertiary
@@ -579,9 +548,7 @@ class _NavButtonState extends State<_NavButton>
                           Text(
                             widget.subtitle,
                             style: TextStyle(
-                              color: widget.isPrimary
-                                  ? Colors.white.withOpacity(0.75)
-                                  : widget.color.withOpacity(0.6),
+                              color: Colors.white.withOpacity(0.75),
                               fontSize: 11,
                               fontWeight: FontWeight.w400,
                               letterSpacing: 0.5,
@@ -600,48 +567,237 @@ class _NavButtonState extends State<_NavButton>
   }
 }
 
-// ── Orbit painter (rotating bg rings) ────────────────────────────────────────
-class _OrbitPainter extends CustomPainter {
+// ── Geometric Tech Painter (simplified, no moving lines) ─────────────────
+class _GeometricPainter extends CustomPainter {
   final double progress;
-  _OrbitPainter(this.progress);
+  _GeometricPainter(this.progress);
 
   @override
   void paint(Canvas canvas, Size size) {
-    final cx = size.width / 2;
-    final cy = size.height / 2;
+    // Draw static geometric patterns only
+    _drawHexagonGrid(canvas, size);
+    _drawTechNodes(canvas, size);
+    _drawGeometricShapes(canvas, size);
+    _drawCentralGlow(canvas, size);
+  }
 
-    for (int i = 0; i < 3; i++) {
-      final radius = 200.0 + i * 160;
-      final angle  = progress * 2 * math.pi + i * (math.pi / 3);
-      final paint  = Paint()
-        ..color = const Color(0xFF7B2FFF).withOpacity(0.04 - i * 0.01)
-        ..style       = PaintingStyle.stroke
-        ..strokeWidth = 1.5;
+  void _drawHexagonGrid(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2;
 
+    final hexSize = 70.0;
+    final cols = (size.width / (hexSize * 1.5)).ceil() + 2;
+    final rows = (size.height / (hexSize * 0.866)).ceil() + 2;
+    
+    // No movement - static grid
+    for (int row = -1; row < rows; row++) {
+      for (int col = -1; col < cols; col++) {
+        final x = col * hexSize * 1.5;
+        final y = row * hexSize * 0.866 + (col % 2) * hexSize * 0.433;
+        
+        // Calculate opacity based on distance from center
+        final distanceToCenter = Offset(x - size.width/2, y - size.height/2).distance;
+        final opacity = (0.25 * (1 - distanceToCenter / size.width)).clamp(0.1, 0.25);
+        
+        // Color shifts based on position
+        final colorIndex = (row + col) % 3;
+        Color color;
+        switch(colorIndex) {
+          case 0:
+            color = const Color(0xFF7B2FFF); // Purple
+            break;
+          case 1:
+            color = const Color(0xFF00CFFF); // Cyan
+            break;
+          default:
+            color = const Color(0xFFFFD700); // Gold
+        }
+        
+        paint.color = color.withOpacity(opacity);
+        
+        // Draw hexagon
+        final path = Path();
+        for (int i = 0; i < 6; i++) {
+          final angle = i * 60 * math.pi / 180;
+          final px = x + hexSize * math.cos(angle);
+          final py = y + hexSize * math.sin(angle);
+          if (i == 0) {
+            path.moveTo(px, py);
+          } else {
+            path.lineTo(px, py);
+          }
+        }
+        path.close();
+        canvas.drawPath(path, paint);
+      }
+    }
+  }
+
+  void _drawTechNodes(Canvas canvas, Size size) {
+    final nodeCount = 12;
+    
+    for (int i = 0; i < nodeCount; i++) {
+      // Position nodes in a grid pattern - static
+      final gridCol = i % 4;
+      final gridRow = (i / 4).floor();
+      
+      final x = size.width * (0.15 + 0.7 * gridCol / 3);
+      final y = size.height * (0.15 + 0.7 * gridRow / 3);
+      
+      // Static nodes (no pulsing)
+      final nodeSize = 6.0;
+
+      // Node glow
       canvas.drawCircle(
-        Offset(cx + math.cos(angle) * 30, cy + math.sin(angle) * 20),
-        radius,
+        Offset(x, y),
+        nodeSize * 2,
+        Paint()
+          ..color = const Color(0xFF00CFFF).withOpacity(0.2)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
+      );
+
+      // Node core
+      canvas.drawCircle(
+        Offset(x, y),
+        nodeSize,
+        Paint()
+          ..color = const Color(0xFF00CFFF).withOpacity(0.6)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
+      );
+
+      // Node center
+      canvas.drawCircle(
+        Offset(x, y),
+        nodeSize * 0.4,
+        Paint()..color = Colors.white.withOpacity(0.9),
+      );
+
+      // Draw connections between nearby nodes
+      if (i < nodeCount - 1 && i % 4 != 3) {
+        final nextCol = (i + 1) % 4;
+        final nextRow = ((i + 1) / 4).floor();
+        
+        final nextX = size.width * (0.15 + 0.7 * nextCol / 3);
+        final nextY = size.height * (0.15 + 0.7 * nextRow / 3);
+        
+        final paint = Paint()
+          ..color = const Color(0xFF967BB6).withOpacity(0.2)
+          ..strokeWidth = 1.0
+          ..style = PaintingStyle.stroke;
+
+        canvas.drawLine(
+          Offset(x, y),
+          Offset(nextX, nextY),
+          paint,
+        );
+      }
+    }
+  }
+
+  void _drawGeometricShapes(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+
+    // Static squares (very slow rotation only)
+    for (int i = 0; i < 3; i++) {
+      final squareSize = 180.0 + i * 120;
+      // Very slow rotation (barely noticeable)
+      final rotation = progress * 0.2 * math.pi + i * math.pi / 6;
+      
+      paint.color = const Color(0xFF7B2FFF).withOpacity(0.12 - i * 0.02);
+      
+      canvas.save();
+      canvas.translate(center.dx, center.dy);
+      canvas.rotate(rotation);
+      
+      // Draw square
+      canvas.drawRect(
+        Rect.fromCenter(center: Offset.zero, width: squareSize, height: squareSize),
         paint,
       );
+      
+      canvas.restore();
     }
 
-    final radial = RadialGradient(
-      colors: [
-        const Color(0xFF7B2FFF).withOpacity(0.15),
-        Colors.transparent,
-      ],
+    // Static triangles
+    for (int i = 0; i < 6; i++) {
+      final angle = i * 60 * math.pi / 180;
+      final distance = 220;
+      
+      final x = center.dx + distance * math.cos(angle);
+      final y = center.dy + distance * math.sin(angle) * 0.6;
+      
+      paint.color = const Color(0xFFFFD700).withOpacity(0.15);
+      
+      final path = Path();
+      for (int j = 0; j < 3; j++) {
+        final triAngle = j * 120 * math.pi / 180;
+        final px = x + 30 * math.cos(triAngle);
+        final py = y + 30 * math.sin(triAngle);
+        if (j == 0) {
+          path.moveTo(px, py);
+        } else {
+          path.lineTo(px, py);
+        }
+      }
+      path.close();
+      canvas.drawPath(path, paint);
+    }
+  }
+
+  void _drawCentralGlow(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    
+    // Multiple layers of glow
+    for (int i = 0; i < 3; i++) {
+      final rectSize = 350.0 + i * 120;
+      
+      final gradient = RadialGradient(
+        colors: [
+          const Color(0xFF7B2FFF).withOpacity(0.2 - i * 0.04),
+          Colors.transparent,
+        ],
+      );
+      
+      final rect = Rect.fromCenter(
+        center: center,
+        width: rectSize,
+        height: rectSize * 0.8,
+      );
+      
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..shader = gradient.createShader(
+            Rect.fromCircle(center: center, radius: rectSize / 2)
+          ),
+      );
+    }
+    
+    // Static center cross
+    final linePaint = Paint()
+      ..color = const Color(0xFF00CFFF).withOpacity(0.15)
+      ..strokeWidth = 2.0
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);
+    
+    canvas.drawLine(
+      Offset(center.dx - 100, center.dy),
+      Offset(center.dx + 100, center.dy),
+      linePaint,
     );
-    canvas.drawCircle(
-      Offset(cx, cy),
-      300,
-      Paint()
-        ..shader = radial.createShader(
-            Rect.fromCircle(center: Offset(cx, cy), radius: 300)),
+    
+    canvas.drawLine(
+      Offset(center.dx, center.dy - 100),
+      Offset(center.dx, center.dy + 100),
+      linePaint,
     );
   }
 
   @override
-  bool shouldRepaint(_OrbitPainter old) => old.progress != progress;
+  bool shouldRepaint(_GeometricPainter old) => old.progress != progress;
 }
 
 // ── Circuit painter (static decorative lines) ────────────────────────────────
@@ -649,9 +805,9 @@ class _CircuitPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color       = const Color(0xFF3D1A8C).withOpacity(0.25)
+      ..color = const Color(0xFF3D1A8C).withOpacity(0.25)
       ..strokeWidth = 1.0
-      ..style       = PaintingStyle.stroke;
+      ..style = PaintingStyle.stroke;
 
     final dotPaint = Paint()
       ..color = const Color(0xFF00CFFF).withOpacity(0.3)

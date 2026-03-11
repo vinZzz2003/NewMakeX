@@ -520,7 +520,7 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
           try {
             debugPrint('ROW ${row.rowNum}: mentor "${row.mentorName}" not found, auto-creating...');
             await conn.execute(
-              "INSERT INTO tbl_mentor (mentor_name, mentor_number, school_id) "
+              "INSERT INTO tbl_mentor (mentor_name, mentor_phone, school_id) "
               "VALUES (:name, :number, :schoolId)",
               {
                 "name":     row.mentorName.trim(),

@@ -84,7 +84,7 @@ class _Step2MentorState extends State<Step2Mentor> {
     try {
       final conn = await DBHelper.getConnection();
       await conn.execute(
-        "INSERT INTO tbl_mentor (mentor_name, mentor_number, school_id) VALUES (:name, :number, :schoolId)",
+        "INSERT INTO tbl_mentor (mentor_name, mentor_phone, school_id) VALUES (:name, :number, :schoolId)",
         {"name": _nameController.text.trim(), "number": contact, "schoolId": _selectedSchoolId},
       );
       final result   = await conn.execute("SELECT LAST_INSERT_ID() as id");

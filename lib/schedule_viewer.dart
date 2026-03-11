@@ -1703,7 +1703,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             const Text('Construct Your Dreams',
                 style: TextStyle(color: Colors.white38, fontSize: 13)),
           ]),
-          Image.asset('assets/images/CenterLogo.png', height: 72, fit: BoxFit.contain),
+          Image.asset('assets/images/MakeX_logo.png', height: 100, fit: BoxFit.contain),
           const Text('CREOTEC',
               style: TextStyle(color: Colors.white, fontSize: 20,
                   fontWeight: FontWeight.bold, letterSpacing: 3)),

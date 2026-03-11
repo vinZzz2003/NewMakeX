@@ -7,7 +7,7 @@ class DBHelper {
   static const int    _port         = 3306;
   static const String _userName     = "root";
   static const String _password     = "root";
-  static const String _databaseName = "roboventuredb";
+  static const String _databaseName = "make_x";
 
   // ── MIGRATIONS ───────────────────────────────────────────────────────────
   static Future<void> runMigrations() async {
