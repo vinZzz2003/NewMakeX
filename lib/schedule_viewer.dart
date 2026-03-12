@@ -1,10 +1,11 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'db_helper.dart';
+import 'generate_schedule.dart'; // Add this import
 
 // ── Match status enum ────────────────────────────────────────────────────────
 enum MatchStatus { pending, inProgress, done }
@@ -181,146 +182,205 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   }
 
   // ── main data load ────────────────────────────────────────────────────────
-  Future<void> _loadData({bool initial = false}) async {
-    if (initial) setState(() => _isLoading = true);
-    try {
-      final categories = await DBHelper.getCategories();
-      final conn       = await DBHelper.getConnection();
+  // In schedule_viewer.dart, update the _loadData function around line 150-200
 
-      final result = await conn.execute("""
-        SELECT c.category_id, c.category_type,
-               ts.teamschedule_id, ts.match_id, ts.round_id, ts.arena_number,
-               t.team_id, t.team_name,
-               s.schedule_start, s.schedule_end, r.round_type
-        FROM tbl_teamschedule ts
-        JOIN tbl_team t     ON ts.team_id    = t.team_id
-        JOIN tbl_category c ON t.category_id = c.category_id
-        JOIN tbl_match m    ON ts.match_id   = m.match_id
-        JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
-        JOIN tbl_round r    ON ts.round_id   = r.round_id
-        ORDER BY c.category_id, s.schedule_start, ts.match_id, ts.arena_number
-      """);
+Future<void> _loadData({bool initial = false}) async {
+  if (initial) setState(() => _isLoading = true);
+  try {
+    final categories = await DBHelper.getCategories();
+    final conn = await DBHelper.getConnection();
 
-      final rows = result.rows.map((r) => r.assoc()).toList();
-      _lastDataSignature = _buildSignature(rows);
+    // Get all schedule data with clear ordering
+    final result = await conn.execute("""
+      SELECT 
+        c.category_id, 
+        c.category_type,
+        ts.match_id, 
+        ts.round_id,
+        s.schedule_id,
+        s.schedule_start,
+        s.schedule_end,
+        ts.arena_number,
+        t.team_id,
+        t.team_name
+      FROM tbl_teamschedule ts
+      JOIN tbl_team t ON ts.team_id = t.team_id
+      JOIN tbl_category c ON t.category_id = c.category_id
+      JOIN tbl_match m ON ts.match_id = m.match_id
+      JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
+      ORDER BY c.category_id, s.schedule_start, ts.match_id, ts.arena_number
+    """);
 
-      final Map<int, Map<int, Map<String, dynamic>>> grouped      = {};
-      final Map<int, int>                            arenaCounter = {};
+    final rows = result.rows.map((r) => r.assoc()).toList();
+    _lastDataSignature = _buildSignature(rows);
 
-      int? soccerCatId;
-      for (final cat in categories) {
-        if ((cat['category_type'] ?? '').toString().toLowerCase().contains('soccer')) {
-          soccerCatId = int.tryParse(cat['category_id'].toString());
-          break;
-        }
+    print("=== TOTAL ROWS FETCHED: ${rows.length} ===");
+    
+    // Group by category first
+    final Map<int, List<Map<String, dynamic>>> rowsByCategory = {};
+    for (final row in rows) {
+      final catId = int.tryParse(row['category_id'].toString()) ?? 0;
+      rowsByCategory.putIfAbsent(catId, () => []).add(row);
+      print("Row: Cat=$catId, MatchID=${row['match_id']}, Arena=${row['arena_number']}, Team=${row['team_name']}");
+    }
+
+    final Map<int, List<Map<String, dynamic>>> scheduleByCategory = {};
+
+    // Process each category
+    for (final cat in categories) {
+      final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
+      final catRows = rowsByCategory[catId] ?? [];
+      
+      print("\n--- Processing Category: ${cat['category_type']} (ID: $catId) ---");
+      print("Rows in category: ${catRows.length}");
+      
+      if (catRows.isEmpty) {
+        scheduleByCategory[catId] = [];
+        continue;
       }
 
-      for (final row in rows) {
-        final catId   = int.tryParse(row['category_id'].toString()) ?? 0;
-        final matchId = int.tryParse(row['match_id'].toString())    ?? 0;
-        int arenaNum  = int.tryParse(row['arena_number']?.toString() ?? '0') ?? 0;
-        if (arenaNum <= 0) {
-          arenaCounter[matchId] = (arenaCounter[matchId] ?? 0) + 1;
-          arenaNum = arenaCounter[matchId]!;
-        }
-        grouped.putIfAbsent(catId, () => {});
-        if (!grouped[catId]!.containsKey(matchId)) {
-          grouped[catId]![matchId] = {
-            'match_id':       matchId,
-            'schedule':       '${_fmt(row['schedule_start'])} - ${_fmt(row['schedule_end'])}',
-            'schedule_start': row['schedule_start'] ?? '',
-            'arenas':         <int, Map<String, String>>{},
-            'teams_list':     <Map<String, String>>[],
+      // Group by match_id within this category
+      final Map<int, Map<String, dynamic>> matchesByMatchId = {};
+
+      for (final row in catRows) {
+        final matchId = int.tryParse(row['match_id'].toString()) ?? 0;
+        final arenaNum = int.tryParse(row['arena_number']?.toString() ?? '1') ?? 1;
+        final teamId = row['team_id']?.toString() ?? '';
+        final teamName = row['team_name']?.toString() ?? '';
+        final scheduleStart = row['schedule_start']?.toString() ?? '';
+        final scheduleEnd = row['schedule_end']?.toString() ?? '';
+        final roundId = int.tryParse(row['round_id'].toString()) ?? 0;
+        final scheduleId = int.tryParse(row['schedule_id'].toString()) ?? 0;
+
+        // Create match entry if it doesn't exist
+        if (!matchesByMatchId.containsKey(matchId)) {
+          matchesByMatchId[matchId] = {
+            'match_id': matchId,
+            'schedule_id': scheduleId,
+            'round_id': roundId,
+            'schedule_start': scheduleStart,
+            'schedule_end': scheduleEnd,
+            'schedule': '${_fmt(scheduleStart)} - ${_fmt(scheduleEnd)}',
+            'arena1_teams': <Map<String, String>>[],
+            'arena2_teams': <Map<String, String>>[],
           };
+          print("Created new match entry for Match ID: $matchId at $scheduleStart");
         }
-        (grouped[catId]![matchId]!['arenas'] as Map<int, Map<String, String>>)[arenaNum] = {
-          'team_name':  row['team_name']  ?? '',
-          'round_type': row['round_type'] ?? '',
-          'team_id':    row['team_id']?.toString() ?? '',
+
+        final match = matchesByMatchId[matchId]!;
+        final teamInfo = {
+          'team_id': teamId,
+          'team_name': teamName,
         };
-        (grouped[catId]![matchId]!['teams_list'] as List<Map<String, String>>).add({
-          'team_name':  row['team_name']  ?? '',
-          'round_type': row['round_type'] ?? '',
-          'team_id':    row['team_id']?.toString() ?? '',
-        });
-      }
 
-      final Map<int, List<Map<String, dynamic>>> scheduleByCategory = {};
-      for (final cat in categories) {
-        final catId    = int.tryParse(cat['category_id'].toString()) ?? 0;
-        final matchMap = grouped[catId] ?? {};
-        final matches  = matchMap.values.map((m) {
-          final am        = m['arenas']    as Map<int, Map<String, String>>;
-          final teamsList = m['teams_list'] as List<Map<String, String>>;
-          final maxArena  = am.keys.isEmpty ? 0 : am.keys.reduce((a, b) => a > b ? a : b);
-          List<Map<String, String>?> arenaList;
-          if (maxArena <= 1 && teamsList.length >= 2) {
-            arenaList = teamsList.take(2).map((t) => t).toList();
-          } else {
-            arenaList = List.generate(maxArena, (i) => am[i + 1]);
-          }
-          return {
-            'match_id':       m['match_id'],
-            'schedule':       m['schedule'],
-            'schedule_start': m['schedule_start'],
-            'arenaCount':     arenaList.length,
-            'arenas':         arenaList,
-          };
-        }).toList();
-        matches.sort((a, b) =>
-            (a['schedule_start'] as String).compareTo(b['schedule_start'] as String));
-        for (int i = 0; i < matches.length; i++) matches[i]['matchNumber'] = i + 1;
-        scheduleByCategory[catId] = matches;
-      }
-
-      // Load soccer teams + last end time
-      List<Map<String, dynamic>> soccerTeams = [];
-      String? lastSoccerEndTime;
-      if (soccerCatId != null) {
-        soccerTeams = await DBHelper.getTeamsByCategory(soccerCatId);
-        final soccerMatches = scheduleByCategory[soccerCatId] ?? [];
-        if (soccerMatches.isNotEmpty) {
-          final lastMatch = rows
-              .where((r) =>
-                  int.tryParse(r['category_id'].toString()) == soccerCatId)
-              .toList();
-          if (lastMatch.isNotEmpty) {
-            lastMatch.sort((a, b) =>
-                (a['schedule_end'] ?? '').toString()
-                    .compareTo((b['schedule_end'] ?? '').toString()));
-            final raw = lastMatch.last['schedule_end']?.toString() ?? '';
-            if (raw.isNotEmpty) {
-              final parts = raw.split(':');
-              lastSoccerEndTime =
-                  parts.length >= 2 ? '${parts[0]}:${parts[1]}' : raw;
-            }
-          }
+        // Add to appropriate arena list
+        if (arenaNum == 1) {
+          (match['arena1_teams'] as List).add(teamInfo);
+          print("  Added ${teamName} to RED ALLIANCE (Arena 1) for Match $matchId");
+        } else {
+          (match['arena2_teams'] as List).add(teamInfo);
+          print("  Added ${teamName} to BLUE ALLIANCE (Arena 2) for Match $matchId");
         }
       }
 
-      final prevIdx = _tabController?.index ?? 0;
-      _tabController?.dispose();
-      _tabController = TabController(
-        length: categories.length,
-        vsync:  this,
-        initialIndex: prevIdx.clamp(0, (categories.length - 1).clamp(0, 9999)),
-      );
-
-      setState(() {
-        _categories         = categories;
-        _scheduleByCategory = scheduleByCategory;
-        _soccerCategoryId   = soccerCatId;
-        _soccerTeams        = soccerTeams;
-        _lastSoccerEndTime  = lastSoccerEndTime;
-        _isLoading          = false;
-        _lastUpdated        = DateTime.now();
+      // Convert to list
+      var matchesList = matchesByMatchId.values.toList();
+      
+      print("\nMatches found for ${cat['category_type']}: ${matchesList.length}");
+      
+      // Sort by schedule_start
+      matchesList.sort((a, b) {
+        final aTime = a['schedule_start'] as String;
+        final bTime = b['schedule_start'] as String;
+        return aTime.compareTo(bTime);
       });
-    } catch (e) {
-      setState(() => _isLoading = false);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('❌ Failed to load: $e'), backgroundColor: Colors.red));
+
+      // Add match numbers and verify each match
+      for (int i = 0; i < matchesList.length; i++) {
+        matchesList[i]['matchNumber'] = i + 1;
+        
+        final arena1Teams = matchesList[i]['arena1_teams'] as List;
+        final arena2Teams = matchesList[i]['arena2_teams'] as List;
+        
+        print("Match ${i+1}: ${arena1Teams.length} RED teams, ${arena2Teams.length} BLUE teams at ${matchesList[i]['schedule_start']}");
+        
+        // Print team names
+        if (arena1Teams.isNotEmpty) {
+          final redNames = arena1Teams.map((t) => t['team_name']).join(', ');
+          print("  RED: $redNames");
+        }
+        if (arena2Teams.isNotEmpty) {
+          final blueNames = arena2Teams.map((t) => t['team_name']).join(', ');
+          print("  BLUE: $blueNames");
+        }
+      }
+
+      scheduleByCategory[catId] = matchesList;
+    }
+
+    // Find soccer category
+    int? soccerCatId;
+    for (final cat in categories) {
+      final type = (cat['category_type'] ?? '').toString().toLowerCase();
+      if (type.contains('soccer')) {
+        soccerCatId = int.tryParse(cat['category_id'].toString());
+        break;
+      }
+    }
+
+    // Load soccer teams
+    List<Map<String, dynamic>> soccerTeams = [];
+    String? lastSoccerEndTime;
+    if (soccerCatId != null) {
+      soccerTeams = await DBHelper.getTeamsByCategory(soccerCatId);
+      final soccerMatches = scheduleByCategory[soccerCatId] ?? [];
+      if (soccerMatches.isNotEmpty) {
+        final lastMatch = soccerMatches.last;
+        lastSoccerEndTime = lastMatch['schedule_end'] as String?;
+      }
+    }
+
+    // Setup tab controller
+    final prevIdx = _tabController?.index ?? 0;
+    _tabController?.dispose();
+    _tabController = TabController(
+      length: categories.length,
+      vsync: this,
+      initialIndex: prevIdx.clamp(0, categories.length - 1),
+    );
+
+    setState(() {
+      _categories = categories;
+      _scheduleByCategory = scheduleByCategory;
+      _soccerCategoryId = soccerCatId;
+      _soccerTeams = soccerTeams;
+      _lastSoccerEndTime = lastSoccerEndTime;
+      _isLoading = false;
+      _lastUpdated = DateTime.now();
+    });
+
+    // Final summary
+    print("\n=== FINAL SCHEDULE SUMMARY ===");
+    for (final cat in categories) {
+      final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
+      final catName = cat['category_type'] ?? 'Unknown';
+      final matches = scheduleByCategory[catId] ?? [];
+      print("$catName: ${matches.length} matches");
+    }
+
+  } catch (e) {
+    print("Error loading schedule: $e");
+    setState(() => _isLoading = false);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Failed to load: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
+}
 
   int _bracketSize(int teamCount) {
     if (teamCount >= 16) return 16;
@@ -692,6 +752,21 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       ),
     ));
     await Printing.layoutPdf(onLayout: (fmt) async => doc.save());
+  }
+
+  // ── NEW: Navigate to schedule generator ────────────────────────────────────
+  void _goToGenerateSchedule() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => GenerateSchedule(
+          onBack: () => Navigator.of(context).pop(),
+          onGenerated: () {
+            Navigator.of(context).pop();
+            _loadData(initial: true); // Refresh schedule data after generation
+          },
+        ),
+      ),
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1538,6 +1613,56 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
     return Column(children: [
       _buildCategoryTitleBar(category, categoryName, matches),
+      
+      // ── NEW: Generate Schedule Button ─────────────────────────────────────
+      Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: ElevatedButton(
+          onPressed: _goToGenerateSchedule,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.transparent,
+            shadowColor: Colors.transparent,
+            padding: EdgeInsets.zero,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+          child: Ink(
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF00CFFF), Color(0xFF0099CC)],
+              ),
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF00CFFF).withOpacity(0.4),
+                  blurRadius: 20,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.auto_awesome_rounded, color: Colors.white, size: 20),
+                  SizedBox(width: 10),
+                  Text(
+                    'GENERATE SCHEDULE',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                      letterSpacing: 2,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+      
       Expanded(child: _buildScheduleTable(category, catId, matches)),
     ]);
   }
@@ -1577,111 +1702,380 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       ]),
     );
   }
-
-  Widget _buildScheduleTable(
-      Map<String, dynamic> category, int catId,
-      List<Map<String, dynamic>> matches) {
-    int maxArenas = 1;
-    for (final m in matches) {
-      final count = m['arenaCount'] as int? ?? 1;
-      if (count > maxArenas) maxArenas = count;
-    }
-    return Column(children: [
-      Container(
-        decoration: const BoxDecoration(
-            gradient: LinearGradient(colors: [Color(0xFF4A22AA), Color(0xFF3A1880)])),
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
-        child: Row(children: [
-          _headerCell('MATCH',    flex: 1),
-          _headerCell('SCHEDULE', flex: 2),
-          if (maxArenas == 1) const Spacer(flex: 2),
-          ...List.generate(maxArenas, (i) => _headerCell('ARENA ${i + 1}', flex: 3, center: true)),
-          if (maxArenas == 1) const Spacer(flex: 2),
-          _headerCell('STATUS', flex: 2, center: true),
-        ]),
-      ),
-      Expanded(
-        child: matches.isEmpty
-            ? const Center(child: Text('No matches scheduled.',
-                style: TextStyle(color: Colors.white38, fontSize: 16)))
-            : ListView.builder(
-                itemCount: matches.length,
-                itemBuilder: (context, index) {
-                  final match    = matches[index];
-                  final matchNum = match['matchNumber'] as int;
-                  final schedule = match['schedule'] as String;
-                  final arenas   = match['arenas'] as List;
-                  final isEven   = index % 2 == 0;
-                  final status   = _getStatus(catId, matchNum);
-                  return Container(
-                    color: isEven ? const Color(0xFF160C40) : const Color(0xFF100830),
-                    padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 24),
-                    child: Row(children: [
-                      Expanded(flex: 1, child: Text('$matchNum',
-                          style: const TextStyle(color: Colors.white,
-                              fontWeight: FontWeight.bold, fontSize: 17))),
-                      Expanded(flex: 2, child: Text(schedule,
-                          style: TextStyle(
-                              color: Colors.white.withOpacity(0.75), fontSize: 16))),
-                      if (maxArenas == 1) const Spacer(flex: 2),
-                      ...List.generate(maxArenas, (ai) {
-                        final team = ai < arenas.length
-                            ? arenas[ai] as Map<String, dynamic>? : null;
-                        if (team != null) {
-                          final rawId     = team['team_id']?.toString() ?? '';
-                          final displayId = rawId.isNotEmpty ? 'C${rawId}R' : '';
-                          return Expanded(flex: 3, child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.center,
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              if (displayId.isNotEmpty)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF00CFFF).withOpacity(0.15),
-                                    borderRadius: BorderRadius.circular(4),
-                                    border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.5), width: 1),
-                                  ),
-                                  child: Text(displayId,
-                                      textAlign: TextAlign.center,
-                                      style: const TextStyle(
-                                          color: Color(0xFF00CFFF), fontSize: 11,
-                                          fontWeight: FontWeight.bold, letterSpacing: 1.2)),
-                                ),
-                              const SizedBox(height: 4),
-                              Text(team['team_name']?.toString() ?? '',
-                                  style: const TextStyle(color: Colors.white,
-                                      fontSize: 16, fontWeight: FontWeight.w600),
-                                  textAlign: TextAlign.center),
-                            ],
-                          ));
-                        }
-                        return const Expanded(flex: 3, child: Text('—',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.white24, fontSize: 16)));
-                      }),
-                      if (maxArenas == 1) const Spacer(flex: 2),
-                      Expanded(flex: 2, child: GestureDetector(
-                        onTap: () => _cycleStatus(catId, matchNum),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                          decoration: BoxDecoration(
-                            color: status.color.withOpacity(0.12),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: status.color, width: 1.5),
-                          ),
-                          child: Text(status.label,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: status.color,
-                                  fontWeight: FontWeight.bold, fontSize: 13)),
-                        ),
-                      )),
-                    ]),
-                  );
-                }),
-      ),
-    ]);
+  
+  // ── NEW: Build team card with color indicators ────────────────────────────
+  Widget _buildTeamWithColor(String teamName, String teamId, int arenaNumber) {
+    final bool isRed = arenaNumber == 1;
+    final Color teamColor = isRed ? Colors.red : Colors.blue;
+    final String colorName = isRed ? 'RED' : 'BLUE';
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        // Team ID with color badge
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 12, height: 12,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: teamColor,
+                boxShadow: [
+                  BoxShadow(
+                    color: teamColor.withOpacity(0.5),
+                    blurRadius: 4,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 4),
+            if (teamId.isNotEmpty && teamId != '0')
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                decoration: BoxDecoration(
+                  color: teamColor.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: teamColor.withOpacity(0.5), width: 1),
+                ),
+                child: Text(
+                  'C${teamId}R',
+                  style: TextStyle(
+                    color: teamColor,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        // Team name
+        Text(
+          teamName,
+          style: TextStyle(
+            color: teamColor.withOpacity(0.9),
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+          ),
+          textAlign: TextAlign.center,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
+        // Color label
+        Container(
+          margin: const EdgeInsets.only(top: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: teamColor.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Text(
+            colorName,
+            style: TextStyle(
+              color: teamColor,
+              fontSize: 9,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 1,
+            ),
+          ),
+        ),
+      ],
+    );
   }
+  
+  Widget _buildScheduleTable(
+  Map<String, dynamic> category, int catId,
+  List<Map<String, dynamic>> matches) {
+  
+  return Column(children: [
+    Container(
+      decoration: const BoxDecoration(
+          gradient: LinearGradient(colors: [Color(0xFF4A22AA), Color(0xFF3A1880)])),
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
+      child: Row(children: [
+        _headerCell('MATCH', flex: 1),
+        _headerCell('SCHEDULE', flex: 2),
+        _headerCell('RED ALLIANCE (Arena 1)', flex: 4, center: true),
+        _headerCell('BLUE ALLIANCE (Arena 2)', flex: 4, center: true),
+        _headerCell('STATUS', flex: 2, center: true),
+      ]),
+    ),
+    Expanded(
+      child: matches.isEmpty
+          ? const Center(child: Text('No matches scheduled.',
+              style: TextStyle(color: Colors.white38, fontSize: 16)))
+          : ListView.builder(
+              itemCount: matches.length,
+              itemBuilder: (context, index) {
+                final match = matches[index];
+                final matchNum = match['matchNumber'] as int;
+                final schedule = match['schedule'] as String;
+                final arena1Teams = match['arena1_teams'] as List; // RED teams
+                final arena2Teams = match['arena2_teams'] as List; // BLUE teams
+                final isEven = index % 2 == 0;
+                final status = _getStatus(catId, matchNum);
+                
+                return Container(
+                  color: isEven ? const Color(0xFF160C40) : const Color(0xFF100830),
+                  padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 24),
+                  child: Row(children: [
+                    Expanded(flex: 1, child: Text('$matchNum',
+                        style: const TextStyle(color: Colors.white,
+                            fontWeight: FontWeight.bold, fontSize: 17))),
+                    Expanded(flex: 2, child: Text(schedule,
+                        style: TextStyle(
+                            color: Colors.white.withOpacity(0.75), fontSize: 16))),
+                    
+                    // RED ALLIANCE (Arena 1)
+                    Expanded(
+                      flex: 4,
+                      child: arena1Teams.isEmpty
+                          ? const Text('—',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.white24, fontSize: 14))
+                          : Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                ...arena1Teams.asMap().entries.map((e) {
+                                  final team = e.value as Map<String, dynamic>;
+                                  final teamName = team['team_name']?.toString() ?? '';
+                                  final teamId = team['team_id']?.toString() ?? '';
+                                  return Padding(
+                                    padding: const EdgeInsets.symmetric(vertical: 2),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Container(
+                                          width: 8, height: 8,
+                                          decoration: const BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: Colors.red,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Flexible(
+                                          child: Text(
+                                            teamName,
+                                            style: const TextStyle(
+                                              color: Colors.red,
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 13,
+                                            ),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                        if (teamId.isNotEmpty)
+                                          Padding(
+                                            padding: const EdgeInsets.only(left: 4),
+                                            child: Text(
+                                              '(C${teamId}R)',
+                                              style: TextStyle(
+                                                color: Colors.red.withOpacity(0.6),
+                                                fontSize: 10,
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  );
+                                }).toList(),
+                              ],
+                            ),
+                    ),
+                    
+                    // BLUE ALLIANCE (Arena 2)
+                    Expanded(
+                      flex: 4,
+                      child: arena2Teams.isEmpty
+                          ? const Text('—',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.white24, fontSize: 14))
+                          : Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                ...arena2Teams.asMap().entries.map((e) {
+                                  final team = e.value as Map<String, dynamic>;
+                                  final teamName = team['team_name']?.toString() ?? '';
+                                  final teamId = team['team_id']?.toString() ?? '';
+                                  return Padding(
+                                    padding: const EdgeInsets.symmetric(vertical: 2),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Container(
+                                          width: 8, height: 8,
+                                          decoration: const BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: Colors.blue,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Flexible(
+                                          child: Text(
+                                            teamName,
+                                            style: const TextStyle(
+                                              color: Colors.blue,
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 13,
+                                            ),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                        if (teamId.isNotEmpty)
+                                          Padding(
+                                            padding: const EdgeInsets.only(left: 4),
+                                            child: Text(
+                                              '(C${teamId}R)',
+                                              style: TextStyle(
+                                                color: Colors.blue.withOpacity(0.6),
+                                                fontSize: 10,
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  );
+                                }).toList(),
+                              ],
+                            ),
+                    ),
+                    
+                    Expanded(flex: 2, child: GestureDetector(
+                      onTap: () => _cycleStatus(catId, matchNum),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                        decoration: BoxDecoration(
+                          color: status.color.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: status.color, width: 1.5),
+                        ),
+                        child: Text(status.label,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: status.color,
+                                fontWeight: FontWeight.bold, fontSize: 13)),
+                      ),
+                    )),
+                  ]),
+                );
+              }),
+    ),
+  ]);
+}
+
+Widget _buildTeamBadge(Map<String, dynamic> team) {
+  final teamName = team['team_name']?.toString() ?? '';
+  final arenaNum = int.tryParse(team['arena_number']?.toString() ?? '1') ?? 1;
+  final bool isRed = arenaNum == 1;
+  final Color teamColor = isRed ? Colors.red : Colors.blue;
+  final String colorName = isRed ? 'RED' : 'BLUE';
+  
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: teamColor.withOpacity(0.15),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: teamColor.withOpacity(0.3)),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 6, height: 6,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: teamColor,
+            boxShadow: [BoxShadow(color: teamColor.withOpacity(0.5), blurRadius: 4)],
+          ),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          teamName,
+          style: TextStyle(
+            color: teamColor,
+            fontWeight: FontWeight.bold,
+            fontSize: 11,
+          ),
+        ),
+        const SizedBox(width: 2),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+          decoration: BoxDecoration(
+            color: teamColor.withOpacity(0.2),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Text(
+            colorName,
+            style: TextStyle(
+              color: teamColor,
+              fontSize: 7,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+// Helper widget to display a team in an arena with its color
+Widget _buildTeamInArena(Map<String, dynamic> team) {
+  final teamName = team['team_name']?.toString() ?? '';
+  final arenaNum = int.tryParse(team['arena_number']?.toString() ?? '1') ?? 1;
+  final bool isRed = arenaNum == 1;
+  final Color teamColor = isRed ? Colors.red : Colors.blue;
+  final String colorName = isRed ? 'RED' : 'BLUE';
+  
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: teamColor.withOpacity(0.1),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: teamColor.withOpacity(0.3)),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Container(
+          width: 6, height: 6,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: teamColor,
+            boxShadow: [BoxShadow(color: teamColor.withOpacity(0.5), blurRadius: 4)],
+          ),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          teamName,
+          style: TextStyle(
+            color: teamColor,
+            fontWeight: FontWeight.w600,
+            fontSize: 11,
+          ),
+        ),
+        const SizedBox(width: 2),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+          decoration: BoxDecoration(
+            color: teamColor.withOpacity(0.2),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            colorName,
+            style: TextStyle(
+              color: teamColor,
+              fontSize: 7,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
 
   Widget _buildHeader() {
     return Container(

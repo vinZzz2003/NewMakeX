@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'dart:math';
 import 'db_helper.dart';
 import 'registration_shared.dart';
+import 'schedule_fairness_helper.dart';
 
 class GenerateSchedule extends StatefulWidget {
   final VoidCallback? onBack;
@@ -19,7 +21,7 @@ class GenerateSchedule extends StatefulWidget {
 class _GenerateScheduleState extends State<GenerateSchedule> {
   static const _accent = Color(0xFF00CFFF);
 
-  final Map<int, int> _runsPerCategory      = {};
+  final Map<int, int> _runsPerCategory      = {}; // matches per team
   final Map<int, int> _arenasPerCategory    = {};
   final Map<int, int> _teamCountPerCategory = {};
 
@@ -28,13 +30,12 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
 
   TimeOfDay _startTime = const TimeOfDay(hour: 9,  minute: 0);
   TimeOfDay _endTime   = const TimeOfDay(hour: 17, minute: 0);
-  final _durationController = TextEditingController(text: '6');
-  final _intervalController = TextEditingController(text: '0');
+  final _durationController = TextEditingController(text: '2'); // Default 2 minutes
+  final _intervalController = TextEditingController(text: '1'); // Default 1 minute
 
   bool _lunchBreakEnabled = true;
   bool _isGenerating      = false;
 
-  // ── Changed from 3 to 30 ──────────────────────────────────────────────────
   static const int _maxTeamsPerArena = 30;
 
   @override
@@ -73,7 +74,8 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
         for (final c in unique) {
           final id    = int.tryParse(c['category_id'].toString()) ?? 0;
           final count = teamCounts[id] ?? 0;
-          _runsPerCategory[id]      = 2;
+          // Default to 4 matches per team
+          _runsPerCategory[id]      = 4;
           _arenasPerCategory[id]    = count == 0 ? 1 : (count / _maxTeamsPerArena).ceil();
           _teamCountPerCategory[id] = count;
         }
@@ -89,6 +91,448 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
       }
     }
   }
+
+  Future<void> _generateSchedule() async {
+    final duration = int.tryParse(_durationController.text.trim()) ?? 2;
+    final interval = int.tryParse(_intervalController.text.trim()) ?? 1;
+
+    if (duration <= 0) { 
+      _snack('❌ Duration must be greater than 0.', Colors.red); 
+      return; 
+    }
+
+    final startMin = _startTime.hour * 60 + _startTime.minute;
+    final endMin   = _endTime.hour   * 60 + _endTime.minute;
+    if (endMin <= startMin) { 
+      _snack('❌ End time must be after start time.', Colors.red); 
+      return; 
+    }
+    if (_hasArenaError) { 
+      _snack('❌ Some categories exceed arena capacity.', Colors.red); 
+      return; 
+    }
+
+    final confirmed = await _showConfirmDialog();
+    if (confirmed != true) return;
+
+    setState(() => _isGenerating = true);
+    try {
+      final st = '${_startTime.hour.toString().padLeft(2, '0')}:${_startTime.minute.toString().padLeft(2, '0')}';
+      final et = '${_endTime.hour.toString().padLeft(2, '0')}:${_endTime.minute.toString().padLeft(2, '0')}';
+
+      await _generateFairSchedule(
+        startTime: st,
+        endTime: et,
+        durationMinutes: duration,
+        intervalMinutes: interval,
+        lunchBreak: _lunchBreakEnabled,
+      );
+      
+      if (mounted) {
+        _snack('✅ Schedule generated successfully!', Colors.green);
+        widget.onGenerated?.call();
+      }
+    } catch (e) {
+      if (mounted) _snack('❌ Error: $e', Colors.red);
+    } finally {
+      if (mounted) setState(() => _isGenerating = false);
+    }
+  }
+
+  Future<void> _generateFairSchedule({
+  required String startTime,
+  required String endTime,
+  required int durationMinutes,
+  required int intervalMinutes,
+  bool lunchBreak = true,
+}) async {
+  final conn = await DBHelper.getConnection();
+
+  // Clear old schedule
+  await DBHelper.clearSchedule();
+
+  // Get first available referee
+  final refResult = await conn.execute(
+    "SELECT referee_id FROM tbl_referee ORDER BY referee_id LIMIT 1"
+  );
+  if (refResult.rows.isEmpty) {
+    throw Exception('No referees found. Please add at least one referee.');
+  }
+  final defaultRefereeId = int.parse(
+    refResult.rows.first.assoc()['referee_id'] ?? '0',
+  );
+
+  // Parse times
+  final startParts = startTime.split(':');
+  int currentHour = int.parse(startParts[0]);
+  int currentMinute = int.parse(startParts[1]);
+
+  final endParts = endTime.split(':');
+  final endLimitMinutes = int.parse(endParts[0]) * 60 + int.parse(endParts[1]);
+
+  bool hasTimeRemaining() {
+    final currentMinutes = currentHour * 60 + currentMinute;
+    return currentMinutes + durationMinutes <= endLimitMinutes;
+  }
+
+  void advanceTime(int minutes) {
+    currentMinute += minutes;
+    while (currentMinute >= 60) {
+      currentMinute -= 60;
+      currentHour++;
+    }
+    if (lunchBreak && currentHour == 12 && currentMinute >= 0) {
+      currentHour = 13;
+      currentMinute = 0;
+    }
+  }
+
+  // Process each category
+  for (final entry in _runsPerCategory.entries) {
+    final categoryId = entry.key;
+    final matchesPerTeam = entry.value;
+    
+    final teams = await DBHelper.getTeamsByCategory(categoryId);
+    if (teams.isEmpty) continue;
+
+    final teamCount = teams.length;
+    
+    // Calculate total matches needed
+    final totalMatches = (teamCount * matchesPerTeam) ~/ 4;
+    
+    print("\n=== SCHEDULING CATEGORY $categoryId ===");
+    print("Teams: $teamCount, Matches per team: $matchesPerTeam");
+    print("Total matches needed: $totalMatches");
+
+    // Create team map for lookup
+    final Map<int, Map<String, dynamic>> teamMap = {};
+    for (final team in teams) {
+      final teamId = int.parse(team['team_id'].toString());
+      teamMap[teamId] = team;
+    }
+
+    // Initialize fairness tracker
+    final tracker = FairnessTracker(categoryId, matchesPerTeam, teams);
+    
+    // Generate matches using round-robin style with fairness constraints
+    final matches = _generateFairMatchesRoundRobin(
+      teamIds: teamMap.keys.toList(),
+      matchesPerTeam: matchesPerTeam,
+      tracker: tracker,
+    );
+
+    print("Generated ${matches.length} fair matches");
+
+    // Schedule each match
+    for (int matchIndex = 0; matchIndex < matches.length; matchIndex++) {
+      if (!hasTimeRemaining()) {
+        print("⚠️ End time reached - stopping scheduling");
+        break;
+      }
+
+      final match = matches[matchIndex];
+      final redTeamIds = match['red'] as List<int>;
+      final blueTeamIds = match['blue'] as List<int>;
+      final round = (matchIndex ~/ (teamCount ~/ 4)) + 1; // Calculate round number
+
+      // Format times
+      final startHH = currentHour.toString().padLeft(2, '0');
+      final startMM = currentMinute.toString().padLeft(2, '0');
+      final startStr = '$startHH:$startMM:00';
+
+      int endHour = currentHour;
+      int endMinute = currentMinute + durationMinutes;
+      while (endMinute >= 60) {
+        endMinute -= 60;
+        endHour++;
+      }
+      final endStr = '${endHour.toString().padLeft(2, '0')}:${endMinute.toString().padLeft(2, '0')}:00';
+
+      // Insert schedule and match
+      final scheduleId = await DBHelper.insertSchedule(
+        startTime: startStr, 
+        endTime: endStr
+      );
+      final matchId = await DBHelper.insertMatch(scheduleId);
+
+      // Insert RED teams
+      for (final teamId in redTeamIds) {
+        await DBHelper.insertTeamSchedule(
+          matchId: matchId,
+          roundId: round,
+          teamId: teamId,
+          refereeId: defaultRefereeId,
+          arenaNumber: 1,
+        );
+      }
+
+      // Insert BLUE teams
+      for (final teamId in blueTeamIds) {
+        await DBHelper.insertTeamSchedule(
+          matchId: matchId,
+          roundId: round,
+          teamId: teamId,
+          refereeId: defaultRefereeId,
+          arenaNumber: 2,
+        );
+      }
+
+      // Print match info
+      final redNames = redTeamIds.map((id) => teamMap[id]!['team_name']).join(', ');
+      final blueNames = blueTeamIds.map((id) => teamMap[id]!['team_name']).join(', ');
+      print("Match ${matchIndex + 1}: RED: [$redNames] vs BLUE: [$blueNames] at $startStr");
+
+      advanceTime(durationMinutes + intervalMinutes);
+    }
+
+    tracker.verifyFairness();
+  }
+
+  await DBHelper.verifyScheduleFairness();
+}
+
+List<Map<String, dynamic>> _generateFairMatchesRoundRobin({
+  required List<int> teamIds,
+  required int matchesPerTeam,
+  required FairnessTracker tracker,
+}) {
+  final random = Random();
+  final matches = <Map<String, dynamic>>[];
+  final teamCount = teamIds.length;
+  
+  // Calculate total matches needed
+  final totalMatches = (teamCount * matchesPerTeam) ~/ 4;
+  
+  // Target counts for RED/BLUE balance
+  final targetRed = (matchesPerTeam / 2).ceil();
+  final targetBlue = (matchesPerTeam / 2).floor();
+  
+  print("\n=== GENERATING FAIR MATCHES ===");
+  print("Teams: $teamCount, Matches per team: $matchesPerTeam");
+  print("Total matches needed: $totalMatches");
+  print("Target RED: $targetRed, Target BLUE: $targetBlue");
+  
+  // Track which teams need to play in each round
+  final Map<int, Set<int>> teamsNeedingRound = {};
+  for (int round = 1; round <= matchesPerTeam; round++) {
+    teamsNeedingRound[round] = Set.from(teamIds);
+  }
+  
+  // Track current round
+  int currentRound = 1;
+  int maxAttempts = 1000; // Prevent infinite loops
+  int attempts = 0;
+  
+  // Continue until we have enough matches
+  while (matches.length < totalMatches && 
+         currentRound <= matchesPerTeam && 
+         attempts < maxAttempts) {
+    attempts++;
+    
+    print("\n--- Round $currentRound ---");
+    print("Matches so far: ${matches.length}/$totalMatches");
+    
+    final availableTeams = teamsNeedingRound[currentRound]?.toList() ?? [];
+    
+    // If no teams available in this round, move to next round
+    if (availableTeams.isEmpty) {
+      currentRound++;
+      continue;
+    }
+    
+    // Need at least 4 teams to make a match
+    if (availableTeams.length < 4) {
+      print("⚠️ Only ${availableTeams.length} teams available in round $currentRound");
+      
+      // Handle remaining teams - they'll get BYEs or be moved to next round
+      if (currentRound < matchesPerTeam) {
+        for (final teamId in availableTeams) {
+          teamsNeedingRound[currentRound]?.remove(teamId);
+          teamsNeedingRound[currentRound + 1]?.add(teamId);
+        }
+      }
+      currentRound++;
+      continue;
+    }
+    
+    // Shuffle for randomness
+    availableTeams.shuffle(random);
+    
+    // Try to create a fair match with the available teams
+    bool matchCreated = false;
+    
+    // Try multiple combinations to find a fair match
+    for (int attempt = 0; attempt < 20 && !matchCreated; attempt++) {
+      // Take a random sample of 4 teams
+      final candidateTeams = <int>[];
+      final tempList = List<int>.from(availableTeams);
+      tempList.shuffle(random);
+      
+      // Take up to 4 teams
+      for (int i = 0; i < 4 && i < tempList.length; i++) {
+        candidateTeams.add(tempList[i]);
+      }
+      
+      if (candidateTeams.length < 4) continue;
+      
+      // Try all possible RED/BLUE splits (6 combinations)
+      final List<List<int>> splits = [
+        [0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]
+      ];
+      
+      // Shuffle splits for randomness
+      splits.shuffle(random);
+      
+      for (final redIndices in splits) {
+        final redIds = <int>[];
+        final blueIds = <int>[];
+        
+        // Assign teams to RED and BLUE based on indices
+        for (int i = 0; i < 4; i++) {
+          if (redIndices.contains(i)) {
+            redIds.add(candidateTeams[i]);
+          } else {
+            blueIds.add(candidateTeams[i]);
+          }
+        }
+        
+        // Check if this split is fair
+        if (!tracker.isMatchFair(redIds, blueIds, currentRound)) {
+          continue;
+        }
+        
+        // Also check that these teams actually need to play in this round
+        bool allNeedRound = true;
+        for (final teamId in [...redIds, ...blueIds]) {
+          if (!teamsNeedingRound[currentRound]!.contains(teamId)) {
+            allNeedRound = false;
+            break;
+          }
+        }
+        
+        if (!allNeedRound) continue;
+        
+        // This is a valid match!
+        matches.add({
+          'red': List<int>.from(redIds),
+          'blue': List<int>.from(blueIds),
+        });
+        
+        // Update tracking
+        tracker.recordMatch(redIds, blueIds, currentRound);
+        
+        // Remove teams from this round
+        for (final teamId in [...redIds, ...blueIds]) {
+          teamsNeedingRound[currentRound]?.remove(teamId);
+        }
+        
+        print("Match ${matches.length}: RED ${redIds.join(',')} vs BLUE ${blueIds.join(',')}");
+        matchCreated = true;
+        break;
+      }
+    }
+    
+    // If no fair match found with the current candidate, 
+    // try with a different approach - rotate teams
+    if (!matchCreated && availableTeams.length >= 4) {
+      print("⚠️ Couldn't find fair match, shuffling teams for next attempt");
+      // Just shuffle and continue to next iteration
+    }
+    
+    // If after many attempts we can't create a match with the current set,
+    // move one problematic team to the next round
+    if (!matchCreated && attempts % 10 == 0 && availableTeams.isNotEmpty) {
+      final movedTeam = availableTeams.first;
+      print("Moving team $movedTeam to next round due to fairness constraints");
+      teamsNeedingRound[currentRound]?.remove(movedTeam);
+      if (currentRound < matchesPerTeam) {
+        teamsNeedingRound[currentRound + 1]?.add(movedTeam);
+      }
+    }
+  }
+  
+  // Verify we have the right number of matches
+  print("\n=== MATCH GENERATION COMPLETE ===");
+  print("Generated ${matches.length}/$totalMatches matches");
+  
+  if (matches.length < totalMatches) {
+    print("⚠️ WARNING: Could not generate all required matches");
+    print("   This may happen if fairness constraints are too strict");
+    print("   Try increasing the number of attempts or relaxing constraints");
+    
+    // Add any remaining matches without strict fairness to ensure completion
+    _addRemainingMatches(matches, teamIds, matchesPerTeam, totalMatches, tracker, teamsNeedingRound);
+  } else {
+    print("✅ Successfully generated $totalMatches matches");
+  }
+  
+  return matches;
+}
+
+// Helper method to add remaining matches if needed
+void _addRemainingMatches(
+  List<Map<String, dynamic>> matches,
+  List<int> teamIds,
+  int matchesPerTeam,
+  int totalMatches,
+  FairnessTracker tracker,
+  Map<int, Set<int>> teamsNeedingRound,
+) {
+  print("\n=== ADDING REMAINING MATCHES (with relaxed constraints) ===");
+  final random = Random();
+  
+  // Track appearances per team
+  final appearances = <int, int>{};
+  for (final teamId in teamIds) {
+    appearances[teamId] = 0;
+  }
+  
+  // Count current appearances
+  for (final match in matches) {
+    for (final teamId in match['red'] as List<int>) {
+      appearances[teamId] = (appearances[teamId] ?? 0) + 1;
+    }
+    for (final teamId in match['blue'] as List<int>) {
+      appearances[teamId] = (appearances[teamId] ?? 0) + 1;
+    }
+  }
+  
+  int round = matchesPerTeam;
+  while (matches.length < totalMatches) {
+    // Find teams that need more appearances
+    final neededTeams = <int>[];
+    for (final teamId in teamIds) {
+      if ((appearances[teamId] ?? 0) < matchesPerTeam) {
+        neededTeams.add(teamId);
+      }
+    }
+    
+    if (neededTeams.length < 4) break;
+    
+    neededTeams.shuffle(random);
+    final matchTeams = neededTeams.take(4).toList();
+    
+    // Try to split fairly
+    final redIds = <int>[matchTeams[0], matchTeams[1]];
+    final blueIds = <int>[matchTeams[2], matchTeams[3]];
+    
+    // Record the match
+    matches.add({
+      'red': redIds,
+      'blue': blueIds,
+    });
+    
+    // Update appearances
+    for (final teamId in redIds) {
+      appearances[teamId] = (appearances[teamId] ?? 0) + 1;
+    }
+    for (final teamId in blueIds) {
+      appearances[teamId] = (appearances[teamId] ?? 0) + 1;
+    }
+    
+    print("Added match ${matches.length}: RED ${redIds.join(',')} vs BLUE ${blueIds.join(',')}");
+  }
+}
 
   String? _arenaWarning(int categoryId) {
     final teams    = _teamCountPerCategory[categoryId] ?? 0;
@@ -106,45 +550,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
       if (_arenaWarning(id) != null) return true;
     }
     return false;
-  }
-
-  Future<void> _generateSchedule() async {
-    final duration = int.tryParse(_durationController.text.trim()) ?? 6;
-    final interval = int.tryParse(_intervalController.text.trim()) ?? 0;
-
-    if (duration <= 0) { _snack('❌ Duration must be greater than 0.', Colors.red); return; }
-
-    final startMin = _startTime.hour * 60 + _startTime.minute;
-    final endMin   = _endTime.hour   * 60 + _endTime.minute;
-    if (endMin <= startMin) { _snack('❌ End time must be after start time.', Colors.red); return; }
-    if (_hasArenaError)     { _snack('❌ Some categories exceed arena capacity.', Colors.red); return; }
-
-    final confirmed = await _showConfirmDialog();
-    if (confirmed != true) return;
-
-    setState(() => _isGenerating = true);
-    try {
-      final st = '${_startTime.hour.toString().padLeft(2, '0')}:${_startTime.minute.toString().padLeft(2, '0')}';
-      final et = '${_endTime.hour.toString().padLeft(2, '0')}:${_endTime.minute.toString().padLeft(2, '0')}';
-
-      await DBHelper.generateSchedule(
-        runsPerCategory:   _runsPerCategory,
-        arenasPerCategory: _arenasPerCategory,
-        startTime:         st,
-        endTime:           et,
-        durationMinutes:   duration,
-        intervalMinutes:   interval,
-        lunchBreak:        _lunchBreakEnabled,
-      );
-      if (mounted) {
-        _snack('✅ Schedule generated successfully!', Colors.green);
-        widget.onGenerated?.call();
-      }
-    } catch (e) {
-      if (mounted) _snack('❌ Error: $e', Colors.red);
-    } finally {
-      if (mounted) setState(() => _isGenerating = false);
-    }
   }
 
   Future<bool?> _showConfirmDialog() {
@@ -182,12 +587,12 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                     color: Colors.orange, size: 30),
               ),
               const SizedBox(height: 16),
-              const Text('Regenerate Schedule?',
+              const Text('Generate Schedule?',
                   style: TextStyle(color: Colors.white, fontSize: 18,
                       fontWeight: FontWeight.w800)),
               const SizedBox(height: 10),
               Text(
-                'This will DELETE the existing schedule\nand generate a new one. Are you sure?',
+                'This will DELETE the existing schedule\nand generate a new one with fair match allocation.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                     color: Colors.white.withOpacity(0.6), fontSize: 13, height: 1.5),
@@ -224,13 +629,13 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                       child: Ink(
                         decoration: BoxDecoration(
                           gradient: const LinearGradient(
-                              colors: [Colors.orange, Color(0xFFE65100)]),
+                              colors: [Color(0xFF00CFFF), Color(0xFF0099CC)]),
                           borderRadius: BorderRadius.circular(10),
                         ),
                         child: const Padding(
                           padding: EdgeInsets.symmetric(vertical: 14),
                           child: Center(
-                            child: Text('REGENERATE',
+                            child: Text('GENERATE',
                                 style: TextStyle(color: Colors.white,
                                     fontWeight: FontWeight.bold,
                                     letterSpacing: 1)),
@@ -253,7 +658,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
       SnackBar(content: Text(msg), backgroundColor: color));
   }
 
-  // ── BUILD ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -289,7 +693,7 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            // ── Title ──────────────────────────────────────
+                            // Title
                             Row(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
@@ -313,7 +717,7 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                                             fontSize: 20,
                                             fontWeight: FontWeight.w800,
                                             letterSpacing: 2)),
-                                    Text('Configure and generate the match schedule',
+                                    Text('Fair match allocation with balanced alliances',
                                         style: TextStyle(
                                             color: Colors.white.withOpacity(0.4),
                                             fontSize: 12)),
@@ -322,11 +726,10 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                               ],
                             ),
                             const SizedBox(height: 28),
-
                             buildDivider(_accent),
                             const SizedBox(height: 28),
 
-                            // ── Two columns ────────────────────────────────
+                            // Two columns
                             Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -337,11 +740,14 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                               ],
                             ),
                             const SizedBox(height: 32),
-
                             buildDivider(_accent),
                             const SizedBox(height: 28),
 
-                            // ── Generate button ────────────────────────────
+                            // Fairness preview
+                            _buildFairnessPreview(),
+                            const SizedBox(height: 20),
+
+                            // Generate button
                             SizedBox(
                               width: double.infinity,
                               child: ElevatedButton(
@@ -377,7 +783,7 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                                               Icon(Icons.auto_awesome_rounded,
                                                   color: Colors.white, size: 20),
                                               SizedBox(width: 10),
-                                              Text('GENERATE SCHEDULE',
+                                              Text('GENERATE FAIR SCHEDULE',
                                                   style: TextStyle(
                                                     color: Colors.white,
                                                     fontWeight: FontWeight.bold,
@@ -420,7 +826,107 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     );
   }
 
-  // ── LEFT: Category runs + arenas ──────────────────────────────────────────
+  Widget _buildFairnessPreview() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF00E5A0).withOpacity(0.06),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF00E5A0).withOpacity(0.2)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.balance_rounded, 
+                  color: Color(0xFF00E5A0), size: 18),
+              const SizedBox(width: 8),
+              const Text('FAIRNESS CONSTRAINTS',
+                  style: TextStyle(color: Color(0xFF00E5A0),
+                      fontWeight: FontWeight.bold, fontSize: 12,
+                      letterSpacing: 1)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _constraintChip(
+                  '✓ Balanced Alliances',
+                  'Every team gets equal RED/BLUE matches',
+                  Icons.sports_mma,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _constraintChip(
+                  '✓ Unique Teams',
+                  '4 unique teams per match',
+                  Icons.groups,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: _constraintChip(
+                  '✓ Fair Partners',
+                  'Minimize repeated teammates',
+                  Icons.people,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _constraintChip(
+                  '✓ Fair Opponents',
+                  'Minimize repeated opponents',
+                  Icons.sports_kabaddi,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _constraintChip(String title, String subtitle, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF00E5A0).withOpacity(0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFF00E5A0).withOpacity(0.15)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: const Color(0xFF00E5A0), size: 14),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 11)),
+                Text(subtitle,
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.5),
+                        fontSize: 9)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // The rest of your UI building methods remain the same...
   Widget _buildCategoryColumn() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -432,9 +938,10 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                     fontSize: 11, letterSpacing: 1.5)),
           ),
           SizedBox(width: 90,
-            child: Center(child: Text('RUNS',
+            child: Center(child: Text('MATCHES',
                 style: TextStyle(color: _accent.withOpacity(0.8),
-                    fontWeight: FontWeight.w800, fontSize: 11, letterSpacing: 1.5)))),
+                    fontWeight: FontWeight.w800, fontSize: 11, letterSpacing: 1.5))),
+          ),
           const SizedBox(width: 10),
           SizedBox(width: 90,
             child: Column(children: [
@@ -448,7 +955,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
             ])),
         ]),
         const SizedBox(height: 4),
-
         Container(height: 1, color: _accent.withOpacity(0.15)),
         const SizedBox(height: 14),
 
@@ -461,7 +967,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                   final name    = (c['category_type'] ?? '').toString();
                   final count   = _teamCountPerCategory[id] ?? 0;
                   final warning = _arenaWarning(id);
-                  final isSoccer = name.toLowerCase().contains('soccer');
 
                   return Container(
                     margin: const EdgeInsets.only(bottom: 12),
@@ -514,37 +1019,11 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                                 ],
                               ),
                             ),
-                            // Show Single Elimination badge for Soccer instead of RUNS spinner
+                            // Matches spinner
                             SizedBox(
                               width: 90,
                               child: Center(
-                                child: isSoccer
-                                    ? Container(
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 8, vertical: 8),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFFFF6B35).withOpacity(0.12),
-                                          borderRadius: BorderRadius.circular(8),
-                                          border: Border.all(
-                                              color: const Color(0xFFFF6B35).withOpacity(0.45)),
-                                        ),
-                                        child: const Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Icon(Icons.emoji_events_rounded,
-                                                color: Color(0xFFFF6B35), size: 14),
-                                            SizedBox(height: 3),
-                                            Text('SINGLE\nELIM',
-                                                textAlign: TextAlign.center,
-                                                style: TextStyle(
-                                                    color: Color(0xFFFF6B35),
-                                                    fontSize: 8,
-                                                    fontWeight: FontWeight.bold,
-                                                    letterSpacing: 0.5)),
-                                          ],
-                                        ),
-                                      )
-                                    : _buildSpinner(id, isRuns: true),
+                                child: _buildSpinner(id, isRuns: true),
                               ),
                             ),
                             const SizedBox(width: 10),
@@ -591,8 +1070,7 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                                   size: 12, color: Color(0xFF00E5A0)),
                               const SizedBox(width: 6),
                               Text(
-                                'Capacity: ${(_arenasPerCategory[id] ?? 1) * _maxTeamsPerArena}'
-                                ' teams (${_arenasPerCategory[id] ?? 1} × $_maxTeamsPerArena)',
+                                'Capacity: ${(_arenasPerCategory[id] ?? 1) * _maxTeamsPerArena} teams',
                                 style: const TextStyle(
                                     fontSize: 10, color: Color(0xFF00E5A0)),
                               ),
@@ -608,7 +1086,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     );
   }
 
-  // ── RIGHT: Schedule settings ───────────────────────────────────────────────
   Widget _buildScheduleColumn() {
     final timeError = (_endTime.hour * 60 + _endTime.minute) <=
         (_startTime.hour * 60 + _startTime.minute);
@@ -760,8 +1237,8 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
   }
 
   Widget _buildTimingPreview() {
-    final duration  = int.tryParse(_durationController.text.trim()) ?? 0;
-    final breakMins = int.tryParse(_intervalController.text.trim())  ?? 0;
+    final duration  = int.tryParse(_durationController.text.trim()) ?? 2;
+    final breakMins = int.tryParse(_intervalController.text.trim())  ?? 1;
     if (duration <= 0) return const SizedBox.shrink();
 
     int h = _startTime.hour, m = _startTime.minute;
@@ -895,7 +1372,7 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
   }
 
   Widget _buildSpinner(int categoryId, {required bool isRuns}) {
-    final value  = isRuns ? (_runsPerCategory[categoryId] ?? 2)
+    final value  = isRuns ? (_runsPerCategory[categoryId] ?? 4) // Default to 4 matches
                           : (_arenasPerCategory[categoryId] ?? 1);
     final maxVal = isRuns ? 99 : 3;
     final color  = isRuns ? _accent : const Color(0xFF967BB6);

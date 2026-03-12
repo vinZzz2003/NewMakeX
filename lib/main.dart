@@ -52,7 +52,7 @@ class RegistrationFlow extends StatefulWidget {
 class _RegistrationFlowState extends State<RegistrationFlow> {
   // 0  = choose mode (manual or excel)
   // -1 = excel import screen
-  // 1–7 = existing manual steps
+  // 1–6 = existing manual steps (Generate Schedule removed)
   int _currentStep = 0;
   int? _teamId;
 
@@ -73,7 +73,7 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
       // ── Step -1: Excel Bulk Import ────────────────────────────────────
       case -1:
         return ExcelImportPage(
-          onDone: () => _goToStep(5),   // jump to Generate Schedule after import
+          onDone: () => _goToStep(5),   // jump to Schedule Viewer after import
         );
 
       // ── Step 1: School ────────────────────────────────────────────────
@@ -109,29 +109,22 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
       case 4:
         return Step4Player(
           teamId: _teamId,
-          onDone: () => _goToStep(5),
+          onDone: () => _goToStep(5), // Go to Schedule Viewer
           onBack: () => _goToStep(3),
-          onSkip: () => _goToStep(5),
+          onSkip: () => _goToStep(5), // Go to Schedule Viewer
         );
 
-      // ── Step 5: Generate Schedule ─────────────────────────────────────
+      // ── Step 5: Schedule Viewer ───────────────────────────────────────
       case 5:
-        return GenerateSchedule(
-          onBack:      () => _goToStep(4),
-          onGenerated: () => _goToStep(6),
-        );
-
-      // ── Step 6: Schedule Viewer ───────────────────────────────────────
-      case 6:
         return ScheduleViewer(
           onRegister:  () => _goToStep(0),
-          onStandings: () => _goToStep(7),
+          onStandings: () => _goToStep(6),
         );
 
-      // ── Step 7: Standings ─────────────────────────────────────────────
-      case 7:
+      // ── Step 6: Standings ─────────────────────────────────────────────
+      case 6:
         return Standings(
-          onBack: () => _goToStep(6),
+          onBack: () => _goToStep(5),
         );
 
       default:
