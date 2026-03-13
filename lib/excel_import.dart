@@ -243,7 +243,7 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
     return excelCategoryName;
   }
 
-  // ── Pick & parse Excel ────────────────────────────────────────────────────
+    // ── Pick & parse Excel ────────────────────────────────────────────────────
   Future<void> _pickFile() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -260,6 +260,39 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
       _rows       = [];
       _importDone = false;
     });
+
+    // Show a more detailed loading indicator
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const SizedBox(
+                width: 20, 
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2, 
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Parsing ${file.name}...',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          backgroundColor: const Color(0xFF2D0E7A),
+          duration: const Duration(seconds: 30), // Long duration, will be dismissed when done
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+        ),
+      );
+    }
 
     try {
       final Uint8List? bytes = file.bytes;
@@ -296,7 +329,7 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
       if (sheet == null) throw Exception('Sheet could not be read');
       if (sheet.maxRows < 2) throw Exception('Spreadsheet has no data rows');
 
-              String extractCell(List<Data?> row, int col) {
+      String extractCell(List<Data?> row, int col) {
         try {
           if (col >= row.length) return '';
           final data = row[col];
@@ -385,21 +418,61 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
         }
       }
 
+      // Dismiss the loading snackbar
+      if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        
+        // Show success message
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ Successfully parsed ${parsed.length} rows'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+        );
+      }
+
       setState(() {
         _rows      = parsed;
         _isParsing = false;
       });
     } catch (e) {
+      // Dismiss loading snackbar
+      if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      }
+      
       setState(() => _isParsing = false);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('❌ Failed to read file: $e'),
-          backgroundColor: Colors.red,
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.error_outline_rounded, color: Colors.white),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    '❌ Failed to read file: $e',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 4),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+        );
       }
     }
   }
-
   // ── Run bulk import ───────────────────────────────────────────────────────
   Future<void> _runImport() async {
     final validRows = _rows.where((r) => !r.hasError).toList();
