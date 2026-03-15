@@ -3,6 +3,7 @@ import 'dart:math';
 import 'db_helper.dart';
 import 'registration_shared.dart';
 import 'schedule_fairness_helper.dart';
+import 'config.dart';
 
 class GenerateSchedule extends StatefulWidget {
   final VoidCallback? onBack;
@@ -36,7 +37,7 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
   bool _lunchBreakEnabled = true;
   bool _isGenerating      = false;
 
-  static const int _maxTeamsPerArena = 30;
+  static int get _maxTeamsPerArena => Config.maxTeamsPerArena;
 
   @override
   void initState() {

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'config.dart';  // Add this import
 import 'db_helper.dart';
 import 'landing_page.dart';
 import 'step1_school.dart';
@@ -12,13 +14,19 @@ import 'excel_import.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
+  
   try {
+    // Load environment variables FIRST
+    await Config.load();
+    print("✅ Environment variables loaded");
+    
+    // Then connect to database
     await DBHelper.getConnection();
     print("✅ Connected to database!");
+    
     await DBHelper.runMigrations();
   } catch (e) {
-    print("❌ Connection failed: $e");
+    print("❌ Initialization failed: $e");
   }
 
   runApp(const MyApp());
@@ -30,10 +38,14 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'RoboVenture',
-      debugShowCheckedModeBanner: false,
+      title: Config.appName,  // Use config
+      debugShowCheckedModeBanner: Config.debugMode,  // Use config
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF3D1A8C)),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Color(
+            int.parse(Config.primaryColorHex.substring(1, 7), radix: 16) + 0xFF000000
+          ),
+        ),
         useMaterial3: true,
       ),
       home: const LandingPage(),

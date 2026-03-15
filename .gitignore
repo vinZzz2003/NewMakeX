@@ -43,3 +43,17 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+
+# Environment variables
+.env
+.env.local
+*.env
+
+# Keep the example file
+!.env.example
+
+# IDE files (if not already there)
+.idea/
+.vscode/
+*.iml

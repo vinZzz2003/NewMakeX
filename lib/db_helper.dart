@@ -1,15 +1,17 @@
 import 'dart:math';
 import 'package:mysql_client/mysql_client.dart';
-import 'schedule_fairness_helper.dart'; // Import the fairness helper
+import 'schedule_fairness_helper.dart';
+import 'config.dart';  // Add this import
 
 class DBHelper {
   static MySQLConnection? _connection;
 
-  static const String _host         = "127.0.0.1";
-  static const int    _port         = 3306;
-  static const String _userName     = "root";
-  static const String _password     = "root";
-  static const String _databaseName = "make_x";
+  // Replace hardcoded values with Config
+  static String get _host => Config.dbHost;
+  static int get _port => Config.dbPort;
+  static String get _userName => Config.dbUser;
+  static String get _password => Config.dbPassword;
+  static String get _databaseName => Config.dbName
 
   // ── MIGRATIONS ───────────────────────────────────────────────────────────
   // In db_helper.dart, update the runMigrations() method:
