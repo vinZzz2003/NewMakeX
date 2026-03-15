@@ -11,7 +11,7 @@ class DBHelper {
   static int get _port => Config.dbPort;
   static String get _userName => Config.dbUser;
   static String get _password => Config.dbPassword;
-  static String get _databaseName => Config.dbName
+  static String get _databaseName => Config.dbName;
 
   // ── MIGRATIONS ───────────────────────────────────────────────────────────
   // In db_helper.dart, update the runMigrations() method:
