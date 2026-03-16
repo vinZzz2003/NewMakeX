@@ -2,9 +2,9 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class Config {
   static Future<void> load() async {
-    await dotenv.load(fileName: ".env");
+    // Load from assets folder instead of root
+    await dotenv.load(fileName: "assets/.env");
   }
-
   // Database Configuration
   static String get dbHost => dotenv.env['DB_HOST'] ?? '127.0.0.1';
   static int get dbPort => int.tryParse(dotenv.env['DB_PORT'] ?? '3306') ?? 3306;

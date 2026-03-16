@@ -11,24 +11,11 @@ import 'generate_schedule.dart';
 import 'schedule_viewer.dart';
 import 'standings.dart';
 import 'excel_import.dart';
+import 'splash_screen.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  
-  try {
-    // Load environment variables FIRST
-    await Config.load();
-    print("✅ Environment variables loaded");
-    
-    // Then connect to database
-    await DBHelper.getConnection();
-    print("✅ Connected to database!");
-    
-    await DBHelper.runMigrations();
-  } catch (e) {
-    print("❌ Initialization failed: $e");
-  }
+Future<void> main() async {
 
+  // Run the app AFTER everything is initialized
   runApp(const MyApp());
 }
 
@@ -38,17 +25,15 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: Config.appName,  // Use config
-      debugShowCheckedModeBanner: Config.debugMode,  // Use config
+      title: 'RoboVenture',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: Color(
-            int.parse(Config.primaryColorHex.substring(1, 7), radix: 16) + 0xFF000000
-          ),
+          seedColor: const Color(0xFF00CFFF),
         ),
         useMaterial3: true,
       ),
-      home: const LandingPage(),
+      home: const SplashScreen(),  // Start with splash screen
     );
   }
 }
