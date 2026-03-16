@@ -60,9 +60,10 @@ class AllianceSelectionPage extends StatefulWidget {
 
 class _AllianceSelectionPageState extends State<AllianceSelectionPage>
     with TickerProviderStateMixin {
-  late List<AllianceTeam> _availableTeams;
-  late List<Alliance> _formedAlliances;
-  late List<AllianceTeam> _selectionOrder;
+  // Initialize immediately to prevent LateError
+  late List<AllianceTeam> _availableTeams = [];
+  late List<Alliance> _formedAlliances = [];
+  late List<AllianceTeam> _selectionOrder = [];
   
   int _currentSelectorIndex = 0;
   AllianceTeam? _currentSelector;
@@ -75,6 +76,7 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
   late Animation<double> _timerAnimation;
   
   bool _isComplete = false;
+  bool _isInitialized = false;  // Track initialization status
   String? _statusMessage;
   String? _errorMessage;
   
@@ -86,7 +88,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
   @override
   void initState() {
     super.initState();
-    _initializeAllianceData();
     _updateCurrentTime();
     
     _timerController = AnimationController(
@@ -105,6 +106,9 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
         });
       }
     });
+
+    // Initialize data after controller is set up
+    _initializeAllianceData();
 
     // Update time every second
     Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -132,19 +136,30 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
         print("   ${team['team_name']}: ${team['totalScore']} pts");
       }
       
+      // FIX: Only keep the TOP 50% of teams
+      // For 12 teams, keep only ranks 1-6
+      final int teamsToKeep = (sortedTeams.length / 2).ceil();
+      final topTeams = sortedTeams.take(teamsToKeep).toList();
+      
+      print("✅ Keeping top $teamsToKeep teams for alliance selection");
+      print("❌ Eliminating ${sortedTeams.length - teamsToKeep} teams");
+      
       // Convert to AllianceTeam objects
       _availableTeams = [];
-      for (int i = 0; i < sortedTeams.length; i++) {
-        final team = sortedTeams[i];
-        final isTop50 = i < (sortedTeams.length / 2).ceil();
+      for (int i = 0; i < topTeams.length; i++) {
+        final team = topTeams[i];
+        
+        // FIX: Only the top half of remaining teams can refuse
+        // With 6 teams, only ranks 1-3 can refuse
+        final canRefuse = i < (topTeams.length / 2).ceil();
         
         _availableTeams.add(AllianceTeam(
           teamId: team['team_id'] as int,
           teamName: team['team_name'] as String,
           rank: i + 1,
           totalScore: team['totalScore'] as int,
-          isTop50: isTop50,
-          canRefuse: isTop50,
+          isTop50: true,  // All remaining teams are top 50%
+          canRefuse: canRefuse,
         ));
       }
       
@@ -160,8 +175,19 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
         _setStatusMessage('${_currentSelector!.teamName} is selecting an alliance partner');
       }
       
+      _isInitialized = true;  // Mark as initialized
+      
     } catch (e) {
       print("Error initializing alliance data: $e");
+      // Ensure lists are at least empty
+      _availableTeams = [];
+      _formedAlliances = [];
+      _selectionOrder = [];
+      _isInitialized = false;
+      
+      setState(() {
+        _errorMessage = 'Failed to initialize: $e';
+      });
     }
   }
 
@@ -317,9 +343,9 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
           });
         }
       } else {
-        // Bottom 50% cannot refuse
+        // Bottom half cannot refuse - auto-accept
         setState(() {
-          _errorMessage = '${_pendingInvitee!.teamName} (bottom 50%) cannot refuse';
+          _errorMessage = '${_pendingInvitee!.teamName} cannot refuse';
         });
         
         // Auto-accept
@@ -349,11 +375,18 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
     _completeAllianceFormation();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // NEW METHODS TO ADD - Place these here
-  // ═══════════════════════════════════════════════════════════════════════════
-
   Future<void> _saveAlliancesToDatabase() async {
+    // Safety check
+    if (!_isInitialized) {
+      print("⚠️ Cannot save - not initialized");
+      return;
+    }
+    
+    if (_formedAlliances.isEmpty) {
+      print("⚠️ No alliances to save");
+      return;
+    }
+    
     try {
       print("💾 Attempting to save ${_formedAlliances.length} alliances to database...");
       
@@ -424,6 +457,15 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
     print("🎯 _completeAllianceFormation called");
     print("📊 Formed alliances count: ${_formedAlliances.length}");
     
+    // Safety check
+    if (!_isInitialized) {
+      print("⚠️ Cannot complete - not initialized");
+      setState(() {
+        _errorMessage = "Initialization failed. Please try again.";
+      });
+      return;
+    }
+    
     setState(() {
       _isComplete = true;
       _selectionTimer?.cancel();
@@ -438,10 +480,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
     });
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // END OF NEW METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   String _formatTeamId(int teamId) {
     return 'C${teamId.toString().padLeft(3, '0')}R';
   }
@@ -455,6 +493,52 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
 
   @override
   Widget build(BuildContext context) {
+    // Show loading state while initializing
+    if (!_isInitialized) {
+      return Scaffold(
+        backgroundColor: const Color(0xFF0E0630),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const CircularProgressIndicator(color: Color(0xFFFFD700)),
+              const SizedBox(height: 16),
+              Text(
+                'Initializing alliance selection...',
+                style: TextStyle(color: Colors.white.withOpacity(0.7)),
+              ),
+              if (_errorMessage != null) ...[
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.red.withOpacity(0.3)),
+                  ),
+                  child: Text(
+                    _errorMessage!,
+                    style: const TextStyle(color: Colors.red),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                ElevatedButton(
+                  onPressed: () {
+                    setState(() {
+                      _errorMessage = null;
+                      _initializeAllianceData();
+                    });
+                  },
+                  child: const Text('RETRY'),
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: const Color(0xFF0E0630),
       body: Column(
@@ -582,7 +666,7 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
                 const Icon(Icons.emoji_events, color: Color(0xFF00CFFF), size: 16),
                 const SizedBox(width: 8),
                 Text(
-                  '${widget.qualifiedTeams.length} QUALIFIED TEAMS',
+                  '${_availableTeams.length} ELIGIBLE TEAMS',
                   style: const TextStyle(color: Color(0xFF00CFFF), fontSize: 12, fontWeight: FontWeight.bold),
                 ),
               ],
@@ -949,12 +1033,15 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
             child: Column(
               children: _availableTeams.where((team) => !_isTeamInAlliance(team.teamId)).map((team) {
                 final isCurrentSelector = team.teamId == _currentSelector?.teamId;
+                final canBeSelected = _currentStatus == SelectionStatus.selecting && 
+                                      !isCurrentSelector && 
+                                      _pendingInvitee == null;
                 
                 return Container(
                   margin: const EdgeInsets.only(bottom: 8),
                   decoration: BoxDecoration(
                     border: Border.all(
-                      color: _currentStatus == SelectionStatus.selecting && !isCurrentSelector
+                      color: canBeSelected
                           ? getCategoryColor(team.rank).withOpacity(0.3)
                           : Colors.transparent,
                     ),
@@ -1016,9 +1103,9 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
-                            team.isTop50 ? 'TOP 50%' : 'BOTTOM 50%',
+                            team.canRefuse ? 'CAN REFUSE' : 'CANNOT REFUSE',
                             style: TextStyle(
-                              color: team.isTop50 ? const Color(0xFFFFD700) : Colors.white38,
+                              color: team.canRefuse ? const Color(0xFFFFD700) : Colors.white38,
                               fontSize: 9,
                               fontWeight: FontWeight.bold,
                             ),
@@ -1026,9 +1113,7 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
                         ),
                       ],
                     ),
-                    trailing: _currentStatus == SelectionStatus.selecting && 
-                             !isCurrentSelector && 
-                             _pendingInvitee == null
+                    trailing: canBeSelected
                         ? ElevatedButton(
                             onPressed: () => _selectTeam(team),
                             style: ElevatedButton.styleFrom(
@@ -1431,7 +1516,7 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Text(
-                              inAlliance ? 'IN ALLIANCE' : 'AVAILABLE',
+                              inAlliance ? 'IN ALLIANCE' : 'WAITING',
                               style: TextStyle(
                                 color: inAlliance ? Colors.green : Colors.orange,
                                 fontSize: 10,

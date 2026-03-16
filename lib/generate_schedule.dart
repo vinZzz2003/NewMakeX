@@ -8,11 +8,15 @@ import 'config.dart';
 class GenerateSchedule extends StatefulWidget {
   final VoidCallback? onBack;
   final VoidCallback? onGenerated;
+  final int? preSelectedCategoryId;
+  final String? categoryName;
 
   const GenerateSchedule({
     super.key,
     this.onBack,
     this.onGenerated,
+    this.preSelectedCategoryId,
+    this.categoryName,
   });
 
   @override
@@ -37,6 +41,8 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
   bool _lunchBreakEnabled = true;
   bool _isGenerating      = false;
 
+  bool get _isSingleCategory => widget.preSelectedCategoryId != null;
+
   static int get _maxTeamsPerArena => Config.maxTeamsPerArena;
 
   @override
@@ -56,10 +62,19 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
 
   Future<void> _loadCategories() async {
     try {
-      // FIX: Change getCategories() to getCategories() (with an 's')
       final cats = await DBHelper.getCategories();
       final seen = <int>{};
-      final unique = cats.where((c) {
+      
+      // If we have a pre-selected category, filter to only that category
+      var filteredCats = cats;
+      if (_isSingleCategory) {
+        filteredCats = cats.where((c) {
+          final id = int.tryParse(c['category_id'].toString()) ?? 0;
+          return id == widget.preSelectedCategoryId;
+        }).toList();
+      }
+      
+      final unique = filteredCats.where((c) {
         final id = int.tryParse(c['category_id'].toString()) ?? 0;
         return id > 0 && seen.add(id);
       }).toList();
@@ -128,6 +143,7 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
         durationMinutes: duration,
         intervalMinutes: interval,
         lunchBreak: _lunchBreakEnabled,
+        targetCategoryId: widget.preSelectedCategoryId,
       );
       
       if (mounted) {
@@ -147,14 +163,18 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     required int durationMinutes,
     required int intervalMinutes,
     bool lunchBreak = true,
+    int? targetCategoryId,
   }) async {
     final conn = await DBHelper.getConnection();
 
-    // Clear old schedule
-    await DBHelper.clearSchedule();
+    // Clear old schedule - only for the target category if specified
+    if (targetCategoryId != null) {
+      await _clearCategorySchedule(targetCategoryId);
+    } else {
+      await DBHelper.clearSchedule();
+    }
 
-    // ── Store the matches per team setting in a new table ──
-    // First, create a table to store category settings if it doesn't exist
+    // Create table for category settings if it doesn't exist
     try {
       await conn.execute("""
         CREATE TABLE IF NOT EXISTS tbl_category_settings (
@@ -221,23 +241,42 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
       }
     }
 
+    // Filter categories to process
+    final categoriesToProcess = targetCategoryId != null
+        ? _runsPerCategory.entries.where((e) => e.key == targetCategoryId).toList()
+        : _runsPerCategory.entries.toList();
+
     // Process each category
-    for (final entry in _runsPerCategory.entries) {
+    for (final entry in categoriesToProcess) {
       final categoryId = entry.key;
       final matchesPerTeam = entry.value;
+      
+      // Get category name to determine match format
+      final catResult = await conn.execute(
+        "SELECT category_type FROM tbl_category WHERE category_id = :catId",
+        {"catId": categoryId}
+      );
+      final categoryName = catResult.rows.isNotEmpty 
+          ? catResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
+          : '';
+      
+      // Determine if this is STARTER (1v1) or EXPLORER (2v2)
+      final bool isOneVsOne = categoryName.contains('starter');
       
       final teams = await DBHelper.getTeamsByCategory(categoryId);
       if (teams.isEmpty) continue;
 
       final teamCount = teams.length;
       
-      // Calculate total matches needed
-      final totalMatches = (teamCount * matchesPerTeam) ~/ 4;
+      // Calculate total matches needed based on format
+      final int teamsPerMatch = isOneVsOne ? 2 : 4;
+      final totalMatches = (teamCount * matchesPerTeam) ~/ teamsPerMatch;
       
       print("\n=== SCHEDULING CATEGORY $categoryId ===");
+      print("Format: ${isOneVsOne ? '1v1' : '2v2'}");
       print("Teams: $teamCount, Matches per team: $matchesPerTeam");
+      print("Teams per match: $teamsPerMatch");
       print("Total matches needed: $totalMatches");
-      print("This means $matchesPerTeam rounds (each team plays once per round)");
 
       // Create team map for lookup
       final Map<int, Map<String, dynamic>> teamMap = {};
@@ -249,24 +288,30 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
       // Initialize fairness tracker
       final tracker = FairnessTracker(categoryId, matchesPerTeam, teams);
       
-      // Generate matches using round-robin style with fairness constraints
-      final matches = _generateFairMatchesRoundRobin(
-        teamIds: teamMap.keys.toList(),
-        matchesPerTeam: matchesPerTeam,
-        tracker: tracker,
-      );
+      // Generate matches based on format
+      final matches = isOneVsOne
+          ? _generateOneVsOneMatches(
+              teamIds: teamMap.keys.toList(),
+              matchesPerTeam: matchesPerTeam,
+              teamMap: teamMap,
+            )
+          : _generateTwoVsTwoMatches(
+              teamIds: teamMap.keys.toList(),
+              matchesPerTeam: matchesPerTeam,
+              tracker: tracker,
+            );
 
-      print("Generated ${matches.length} fair matches (should be $totalMatches)");
+      print("Generated ${matches.length} matches (should be $totalMatches)");
 
       // Group matches by round
       final Map<int, List<Map<String, dynamic>>> matchesByRound = {};
       
       // Calculate matches per round
-      final matchesPerRound = teamCount ~/ 4; // How many simultaneous matches per round
+      final matchesPerRound = isOneVsOne
+          ? teamCount ~/ 2
+          : teamCount ~/ 4;
       
       for (int i = 0; i < matches.length; i++) {
-        // Calculate which round this match belongs to
-        // Each round has matchesPerRound matches
         final round = (i ~/ matchesPerRound) + 1;
         
         if (!matchesByRound.containsKey(round)) {
@@ -276,6 +321,12 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
       }
       
       print("Grouped into ${matchesByRound.length} rounds");
+
+      // Reset time for each category when generating single category
+      if (targetCategoryId != null) {
+        currentHour = int.parse(startParts[0]);
+        currentMinute = int.parse(startParts[1]);
+      }
 
       // Schedule each round
       for (int round = 1; round <= matchesPerTeam; round++) {
@@ -294,55 +345,94 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
             break;
           }
 
-          final redTeamIds = match['red'] as List<int>;
-          final blueTeamIds = match['blue'] as List<int>;
+          if (isOneVsOne) {
+            // 1v1 match format
+            final team1Id = match['team1'] as int;
+            final team2Id = match['team2'] as int;
 
-          // Format times
-          final startHH = currentHour.toString().padLeft(2, '0');
-          final startMM = currentMinute.toString().padLeft(2, '0');
-          final startStr = '$startHH:$startMM:00';
+            final startHH = currentHour.toString().padLeft(2, '0');
+            final startMM = currentMinute.toString().padLeft(2, '0');
+            final startStr = '$startHH:$startMM:00';
 
-          int endHour = currentHour;
-          int endMinute = currentMinute + durationMinutes;
-          while (endMinute >= 60) {
-            endMinute -= 60;
-            endHour++;
-          }
-          final endStr = '${endHour.toString().padLeft(2, '0')}:${endMinute.toString().padLeft(2, '0')}:00';
+            int endHour = currentHour;
+            int endMinute = currentMinute + durationMinutes;
+            while (endMinute >= 60) {
+              endMinute -= 60;
+              endHour++;
+            }
+            final endStr = '${endHour.toString().padLeft(2, '0')}:${endMinute.toString().padLeft(2, '0')}:00';
 
-          // Insert schedule and match
-          final scheduleId = await DBHelper.insertSchedule(
-            startTime: startStr, 
-            endTime: endStr
-          );
-          final matchId = await DBHelper.insertMatch(scheduleId);
+            final scheduleId = await DBHelper.insertSchedule(
+              startTime: startStr, 
+              endTime: endStr
+            );
+            final matchId = await DBHelper.insertMatch(scheduleId);
 
-          // Insert RED teams
-          for (final teamId in redTeamIds) {
             await DBHelper.insertTeamSchedule(
               matchId: matchId,
-              roundId: round, // Use the correct round number
-              teamId: teamId,
+              roundId: round,
+              teamId: team1Id,
               refereeId: defaultRefereeId,
               arenaNumber: 1,
             );
-          }
 
-          // Insert BLUE teams
-          for (final teamId in blueTeamIds) {
             await DBHelper.insertTeamSchedule(
               matchId: matchId,
-              roundId: round, // Use the correct round number
-              teamId: teamId,
+              roundId: round,
+              teamId: team2Id,
               refereeId: defaultRefereeId,
               arenaNumber: 2,
             );
-          }
 
-          // Print match info
-          final redNames = redTeamIds.map((id) => teamMap[id]!['team_name']).join(', ');
-          final blueNames = blueTeamIds.map((id) => teamMap[id]!['team_name']).join(', ');
-          print("Match: RED: [$redNames] vs BLUE: [$blueNames] at $startStr (Round $round)");
+            print("Match: ${teamMap[team1Id]!['team_name']} vs ${teamMap[team2Id]!['team_name']} at $startStr (Round $round)");
+
+          } else {
+            // 2v2 match format
+            final redTeamIds = match['red'] as List<int>;
+            final blueTeamIds = match['blue'] as List<int>;
+
+            final startHH = currentHour.toString().padLeft(2, '0');
+            final startMM = currentMinute.toString().padLeft(2, '0');
+            final startStr = '$startHH:$startMM:00';
+
+            int endHour = currentHour;
+            int endMinute = currentMinute + durationMinutes;
+            while (endMinute >= 60) {
+              endMinute -= 60;
+              endHour++;
+            }
+            final endStr = '${endHour.toString().padLeft(2, '0')}:${endMinute.toString().padLeft(2, '0')}:00';
+
+            final scheduleId = await DBHelper.insertSchedule(
+              startTime: startStr, 
+              endTime: endStr
+            );
+            final matchId = await DBHelper.insertMatch(scheduleId);
+
+            for (final teamId in redTeamIds) {
+              await DBHelper.insertTeamSchedule(
+                matchId: matchId,
+                roundId: round,
+                teamId: teamId,
+                refereeId: defaultRefereeId,
+                arenaNumber: 1,
+              );
+            }
+
+            for (final teamId in blueTeamIds) {
+              await DBHelper.insertTeamSchedule(
+                matchId: matchId,
+                roundId: round,
+                teamId: teamId,
+                refereeId: defaultRefereeId,
+                arenaNumber: 2,
+              );
+            }
+
+            final redNames = redTeamIds.map((id) => teamMap[id]!['team_name']).join(', ');
+            final blueNames = blueTeamIds.map((id) => teamMap[id]!['team_name']).join(', ');
+            print("Match: RED: [$redNames] vs BLUE: [$blueNames] at $startStr (Round $round)");
+          }
 
           advanceTime(durationMinutes + intervalMinutes);
         }
@@ -351,94 +441,304 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
       tracker.verifyFairness();
     }
 
-    await DBHelper.verifyScheduleFairness();
+    if (targetCategoryId == null) {
+      await DBHelper.verifyScheduleFairness();
+    }
   }
 
-  List<Map<String, dynamic>> _generateFairMatchesRoundRobin({
-  required List<int> teamIds,
-  required int matchesPerTeam,
-  required FairnessTracker tracker,
-}) {
-  final random = Random();
-  final matches = <Map<String, dynamic>>[];
-  final teamCount = teamIds.length;
-  
-  // Calculate total matches needed
-  final totalMatches = (teamCount * matchesPerTeam) ~/ 4;
-  
-  // Track appearances per team
-  final appearances = <int, int>{};
-  for (final teamId in teamIds) {
-    appearances[teamId] = 0;
-  }
-  
-  print("\n=== GENERATING FAIR MATCHES ===");
-  print("Teams: $teamCount, Matches per team: $matchesPerTeam");
-  print("Total matches needed: $totalMatches");
-  
-  // Simple approach: Create matches round by round
-  for (int round = 1; round <= matchesPerTeam; round++) {
-    print("\n--- Round $round ---");
+  // Helper method to clear schedule for a specific category
+  Future<void> _clearCategorySchedule(int categoryId) async {
+    final conn = await DBHelper.getConnection();
     
-    // Get teams that haven't played this round yet
-    List<int> availableTeams = [];
+    // Delete only matches for this category
+    await conn.execute("""
+      DELETE ts FROM tbl_teamschedule ts
+      JOIN tbl_team t ON ts.team_id = t.team_id
+      WHERE t.category_id = :catId
+    """, {"catId": categoryId});
+    
+    // Delete orphaned matches and schedules
+    await conn.execute("""
+      DELETE m FROM tbl_match m
+      WHERE NOT EXISTS (
+        SELECT 1 FROM tbl_teamschedule ts WHERE ts.match_id = m.match_id
+      )
+    """);
+    
+    await conn.execute("""
+      DELETE s FROM tbl_schedule s
+      WHERE NOT EXISTS (
+        SELECT 1 FROM tbl_match m WHERE m.schedule_id = s.schedule_id
+      )
+    """);
+    
+    print("✅ Cleared schedule for category $categoryId");
+  }
+
+  // Fixed 1v1 match generation with teamMap passed as parameter
+    // Fixed 1v1 match generation to ensure all teams play required number of matches
+  List<Map<String, dynamic>> _generateOneVsOneMatches({
+    required List<int> teamIds,
+    required int matchesPerTeam,
+    required Map<int, Map<String, dynamic>> teamMap,
+  }) {
+    final random = Random();
+    final matches = <Map<String, dynamic>>[];
+    final teamCount = teamIds.length;
+    
+    // Calculate total matches needed
+    final totalMatches = (teamCount * matchesPerTeam) ~/ 2;
+    
+    print("\n=== GENERATING 1v1 MATCHES ===");
+    print("Teams: $teamCount, Matches per team: $matchesPerTeam");
+    print("Total matches needed: $totalMatches");
+    
+    // Track appearances per team
+    final appearances = <int, int>{};
     for (final teamId in teamIds) {
-      // Check if team has already played this round by looking at matches
-      bool playedThisRound = false;
-      for (final match in matches) {
-        if ((match['red'] as List<int>).contains(teamId) || 
-            (match['blue'] as List<int>).contains(teamId)) {
-          if (matches.indexOf(match) ~/ (teamCount ~/ 4) + 1 == round) {
-            playedThisRound = true;
-            break;
+      appearances[teamId] = 0;
+    }
+    
+    // Track which teams have played each other
+    final playedPairs = <String, int>{};
+    
+    // Keep generating until all teams have their required matches
+    int round = 1;
+    int maxAttempts = 1000; // Prevent infinite loop
+    int attempts = 0;
+    
+    while (matches.length < totalMatches && attempts < maxAttempts) {
+      attempts++;
+      
+      print("\n--- Round $round (Match ${matches.length + 1}/$totalMatches) ---");
+      
+      // Find teams that still need matches
+      List<int> availableTeams = [];
+      for (final teamId in teamIds) {
+        if (appearances[teamId]! < matchesPerTeam) {
+          availableTeams.add(teamId);
+        }
+      }
+      
+      if (availableTeams.length < 2) {
+        print("Not enough teams available to create more matches");
+        break;
+      }
+      
+      // Shuffle for randomness
+      availableTeams.shuffle(random);
+      
+      // Try to create a match with the first two teams
+      bool matchCreated = false;
+      
+      for (int i = 0; i < availableTeams.length - 1 && !matchCreated; i++) {
+        for (int j = i + 1; j < availableTeams.length && !matchCreated; j++) {
+          final team1 = availableTeams[i];
+          final team2 = availableTeams[j];
+          
+          // Check if these teams can play each other
+          final pairKey = team1 < team2 ? '$team1-$team2' : '$team2-$team1';
+          final timesPlayed = playedPairs[pairKey] ?? 0;
+          
+          // Teams can play each other at most once
+          if (timesPlayed == 0) {
+            // Create the match
+            matches.add({
+              'team1': team1,
+              'team2': team2,
+            });
+            
+            // Update appearances
+            appearances[team1] = appearances[team1]! + 1;
+            appearances[team2] = appearances[team2]! + 1;
+            
+            // Record that these teams have played
+            playedPairs[pairKey] = 1;
+            
+            matchCreated = true;
+            
+            final team1Name = teamMap.containsKey(team1) ? teamMap[team1]!['team_name'] : 'Team $team1';
+            final team2Name = teamMap.containsKey(team2) ? teamMap[team2]!['team_name'] : 'Team $team2';
+            print("Match ${matches.length}: $team1Name vs $team2Name");
+            print("  Team $team1 now has ${appearances[team1]} matches");
+            print("  Team $team2 now has ${appearances[team2]} matches");
           }
         }
       }
-      if (!playedThisRound && appearances[teamId]! < matchesPerTeam) {
-        availableTeams.add(teamId);
+      
+      if (!matchCreated) {
+        print("⚠️ Could not create match with current available teams, trying next round");
+        // If we can't create a match with current available teams,
+        // we need to reset the round counter but keep trying with the same teams
+      }
+      
+      // Move to next round concept (for logging purposes)
+      round++;
+      
+      // Safety check - if we're not making progress, break
+      if (attempts > 100 && matches.length == 0) {
+        print("⚠️ No matches created after many attempts, breaking");
+        break;
       }
     }
     
-    availableTeams.shuffle(random);
-    print("Available teams for round $round: $availableTeams");
+    // Verify we have all matches
+    print("\n=== MATCH GENERATION COMPLETE ===");
+    print("Generated ${matches.length}/$totalMatches matches");
     
-    // Create as many matches as possible in this round
-    int matchesInThisRound = 0;
-    while (availableTeams.length >= 4 && matchesInThisRound < (teamCount ~/ 4)) {
-      // Take first 4 teams
-      final matchTeams = availableTeams.sublist(0, 4);
-      availableTeams.removeRange(0, 4);
-      
-      // Simple split: first 2 are RED, last 2 are BLUE
-      final redIds = [matchTeams[0], matchTeams[1]];
-      final blueIds = [matchTeams[2], matchTeams[3]];
-      
-      // Record the match
-      matches.add({
-        'red': List<int>.from(redIds),
-        'blue': List<int>.from(blueIds),
-      });
-      
-      // Update appearances
-      for (final teamId in redIds) {
-        appearances[teamId] = appearances[teamId]! + 1;
-      }
-      for (final teamId in blueIds) {
-        appearances[teamId] = appearances[teamId]! + 1;
-      }
-      
-      matchesInThisRound++;
-      print("Match ${matches.length}: RED ${redIds.join(',')} vs BLUE ${blueIds.join(',')}");
+    // Show per-team statistics
+    print("\n--- Per-team Statistics ---");
+    for (final teamId in teamIds) {
+      final teamName = teamMap.containsKey(teamId) ? teamMap[teamId]!['team_name'] : 'Team $teamId';
+      print("$teamName: ${appearances[teamId]}/${matchesPerTeam} matches");
     }
     
-    print("Created $matchesInThisRound matches in round $round");
+    // If we didn't generate all matches, try the round-robin approach as fallback
+    if (matches.length < totalMatches) {
+      print("\n⚠️ Could not generate all matches with random approach, using round-robin fallback");
+      return _generateOneVsOneMatchesRoundRobin(
+        teamIds: teamIds,
+        matchesPerTeam: matchesPerTeam,
+        teamMap: teamMap,
+      );
+    }
+    
+    return matches;
   }
-  
-  print("\n=== MATCH GENERATION COMPLETE ===");
-  print("Generated ${matches.length}/$totalMatches matches");
-  
-  return matches;
-}
+
+  // Fallback method using round-robin style
+  List<Map<String, dynamic>> _generateOneVsOneMatchesRoundRobin({
+    required List<int> teamIds,
+    required int matchesPerTeam,
+    required Map<int, Map<String, dynamic>> teamMap,
+  }) {
+    final matches = <Map<String, dynamic>>[];
+    final teamCount = teamIds.length;
+    
+    print("\n=== GENERATING 1v1 MATCHES (Round Robin Fallback) ===");
+    
+    // Create a fixed order for fairness
+    List<int> orderedTeams = List.from(teamIds);
+    
+    for (int round = 1; round <= matchesPerTeam; round++) {
+      print("\n--- Round $round ---");
+      
+      // Simple pairing: first vs second, third vs fourth, etc.
+      for (int i = 0; i < orderedTeams.length - 1; i += 2) {
+        if (i + 1 < orderedTeams.length) {
+          final team1 = orderedTeams[i];
+          final team2 = orderedTeams[i + 1];
+          
+          matches.add({
+            'team1': team1,
+            'team2': team2,
+          });
+          
+          final team1Name = teamMap.containsKey(team1) ? teamMap[team1]!['team_name'] : 'Team $team1';
+          final team2Name = teamMap.containsKey(team2) ? teamMap[team2]!['team_name'] : 'Team $team2';
+          print("Match ${matches.length}: $team1Name vs $team2Name");
+        }
+      }
+      
+      // Rotate teams for next round (simple rotation)
+      if (orderedTeams.length > 2) {
+        final last = orderedTeams.removeLast();
+        orderedTeams.insert(1, last);
+      }
+    }
+    
+    print("\n=== MATCH GENERATION COMPLETE ===");
+    print("Generated ${matches.length} matches");
+    
+    return matches;
+  }
+
+  // 2v2 match generation method
+  List<Map<String, dynamic>> _generateTwoVsTwoMatches({
+    required List<int> teamIds,
+    required int matchesPerTeam,
+    required FairnessTracker tracker,
+  }) {
+    final random = Random();
+    final matches = <Map<String, dynamic>>[];
+    final teamCount = teamIds.length;
+    
+    // Calculate total matches needed
+    final totalMatches = (teamCount * matchesPerTeam) ~/ 4;
+    
+    // Track appearances per team
+    final appearances = <int, int>{};
+    for (final teamId in teamIds) {
+      appearances[teamId] = 0;
+    }
+    
+    print("\n=== GENERATING 2v2 MATCHES ===");
+    print("Teams: $teamCount, Matches per team: $matchesPerTeam");
+    print("Total matches needed: $totalMatches");
+    
+    // Simple approach: Create matches round by round
+    for (int round = 1; round <= matchesPerTeam; round++) {
+      print("\n--- Round $round ---");
+      
+      // Get teams that haven't played this round yet
+      List<int> availableTeams = [];
+      for (final teamId in teamIds) {
+        // Check if team has already played this round by looking at matches
+        bool playedThisRound = false;
+        for (final match in matches) {
+          if ((match['red'] as List<int>).contains(teamId) || 
+              (match['blue'] as List<int>).contains(teamId)) {
+            if (matches.indexOf(match) ~/ (teamCount ~/ 4) + 1 == round) {
+              playedThisRound = true;
+              break;
+            }
+          }
+        }
+        if (!playedThisRound && appearances[teamId]! < matchesPerTeam) {
+          availableTeams.add(teamId);
+        }
+      }
+      
+      availableTeams.shuffle(random);
+      print("Available teams for round $round: $availableTeams");
+      
+      // Create as many matches as possible in this round
+      int matchesInThisRound = 0;
+      while (availableTeams.length >= 4 && matchesInThisRound < (teamCount ~/ 4)) {
+        // Take first 4 teams
+        final matchTeams = availableTeams.sublist(0, 4);
+        availableTeams.removeRange(0, 4);
+        
+        // Simple split: first 2 are RED, last 2 are BLUE
+        final redIds = [matchTeams[0], matchTeams[1]];
+        final blueIds = [matchTeams[2], matchTeams[3]];
+        
+        // Record the match
+        matches.add({
+          'red': List<int>.from(redIds),
+          'blue': List<int>.from(blueIds),
+        });
+        
+        // Update appearances
+        for (final teamId in redIds) {
+          appearances[teamId] = appearances[teamId]! + 1;
+        }
+        for (final teamId in blueIds) {
+          appearances[teamId] = appearances[teamId]! + 1;
+        }
+        
+        matchesInThisRound++;
+        print("Match ${matches.length}: RED ${redIds.join(',')} vs BLUE ${blueIds.join(',')}");
+      }
+      
+      print("Created $matchesInThisRound matches in round $round");
+    }
+    
+    print("\n=== MATCH GENERATION COMPLETE ===");
+    print("Generated ${matches.length}/$totalMatches matches");
+    
+    return matches;
+  }
 
   // Helper method to add remaining matches if needed
   void _addRemainingMatches(
@@ -524,6 +824,10 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
   }
 
   Future<bool?> _showConfirmDialog() {
+    String message = _isSingleCategory
+        ? 'This will DELETE the existing schedule for ${widget.categoryName?.toUpperCase() ?? "this category"}\nand generate a new one with fair match allocation.'
+        : 'This will DELETE the existing schedule for ALL categories\nand generate a new one with fair match allocation.';
+
     return showDialog<bool>(
       context: context,
       builder: (ctx) => Dialog(
@@ -558,12 +862,14 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                     color: Colors.orange, size: 30),
               ),
               const SizedBox(height: 16),
-              const Text('Generate Schedule?',
-                  style: TextStyle(color: Colors.white, fontSize: 18,
-                      fontWeight: FontWeight.w800)),
+              Text(
+                _isSingleCategory ? 'Generate Schedule for ${widget.categoryName?.toUpperCase() ?? "Category"}?' : 'Generate Schedule?',
+                style: const TextStyle(color: Colors.white, fontSize: 18,
+                    fontWeight: FontWeight.w800),
+              ),
               const SizedBox(height: 10),
               Text(
-                'This will DELETE the existing schedule\nand generate a new one with fair match allocation.',
+                message,
                 textAlign: TextAlign.center,
                 style: TextStyle(
                     color: Colors.white.withOpacity(0.6), fontSize: 13, height: 1.5),
@@ -683,15 +989,23 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                                 Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    const Text('GENERATE SCHEDULE',
-                                        style: TextStyle(color: Colors.white,
-                                            fontSize: 20,
-                                            fontWeight: FontWeight.w800,
-                                            letterSpacing: 2)),
-                                    Text('Fair match allocation with balanced alliances',
-                                        style: TextStyle(
-                                            color: Colors.white.withOpacity(0.4),
-                                            fontSize: 12)),
+                                    Text(
+                                      _isSingleCategory 
+                                          ? 'GENERATE SCHEDULE FOR ${widget.categoryName?.toUpperCase() ?? ''}'
+                                          : 'GENERATE SCHEDULE',
+                                      style: const TextStyle(color: Colors.white,
+                                          fontSize: 20,
+                                          fontWeight: FontWeight.w800,
+                                          letterSpacing: 2),
+                                    ),
+                                    Text(
+                                      _isSingleCategory
+                                          ? 'Generating schedule only for this category'
+                                          : 'Fair match allocation with balanced alliances',
+                                      style: TextStyle(
+                                          color: Colors.white.withOpacity(0.4),
+                                          fontSize: 12),
+                                    ),
                                   ],
                                 ),
                               ],
@@ -748,19 +1062,23 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                                         ? const SizedBox(width: 22, height: 22,
                                             child: CircularProgressIndicator(
                                                 strokeWidth: 2, color: Colors.white))
-                                        : const Row(
+                                        : Row(
                                             mainAxisAlignment: MainAxisAlignment.center,
                                             children: [
                                               Icon(Icons.auto_awesome_rounded,
                                                   color: Colors.white, size: 20),
                                               SizedBox(width: 10),
-                                              Text('GENERATE FAIR SCHEDULE',
-                                                  style: TextStyle(
-                                                    color: Colors.white,
-                                                    fontWeight: FontWeight.bold,
-                                                    fontSize: 15,
-                                                    letterSpacing: 2,
-                                                  )),
+                                              Text(
+                                                _isSingleCategory
+                                                    ? 'GENERATE FOR ${widget.categoryName?.toUpperCase() ?? ''}'
+                                                    : 'GENERATE FAIR SCHEDULE',
+                                                style: TextStyle(
+                                                  color: Colors.white,
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 15,
+                                                  letterSpacing: 2,
+                                                ),
+                                              ),
                                             ],
                                           ),
                                   ),

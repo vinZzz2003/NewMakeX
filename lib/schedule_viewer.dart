@@ -2851,13 +2851,14 @@ Widget _buildSoccerView(
 
   // In schedule_viewer.dart, replace the _buildCategoryView method with this:
 
+// In schedule_viewer.dart, replace the _buildCategoryView method with this:
+
 Widget _buildCategoryView(
     Map<String, dynamic> category, int catId,
     List<Map<String, dynamic>> matches) {
   final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
   final isSoccer = catId == _soccerCategoryId;
   
-  // For non-soccer categories, we still want to show championship if alliances exist
   return DefaultTabController(
     length: 2, // Qualification + Championship
     child: Column(children: [
@@ -2891,52 +2892,82 @@ Widget _buildCategoryView(
           children: [
             // Qualification tab (existing schedule)
             Column(children: [
-              // Generate Schedule Button
+              // Per-Category Generate Schedule Button
               Padding(
                 padding: const EdgeInsets.all(16.0),
-                child: ElevatedButton(
-                  onPressed: _goToGenerateSchedule,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.transparent,
-                    shadowColor: Colors.transparent,
-                    padding: EdgeInsets.zero,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                  child: Ink(
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFF00CFFF), Color(0xFF0099CC)],
-                      ),
-                      borderRadius: BorderRadius.circular(12),
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFF00CFFF).withOpacity(0.4),
-                          blurRadius: 20,
-                          spreadRadius: 2,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () => _goToGenerateScheduleForCategory(catId, categoryName),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.transparent,
+                          shadowColor: Colors.transparent,
+                          padding: EdgeInsets.zero,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         ),
-                      ],
-                    ),
-                    child: Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      child: const Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.auto_awesome_rounded, color: Colors.white, size: 20),
-                          SizedBox(width: 10),
-                          Text(
-                            'GENERATE SCHEDULE',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15,
-                              letterSpacing: 2,
+                        child: Ink(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [const Color(0xFF00CFFF), const Color(0xFF0099CC)],
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                            boxShadow: [
+                              BoxShadow(
+                                color: const Color(0xFF00CFFF).withOpacity(0.4),
+                                blurRadius: 20,
+                                spreadRadius: 2,
+                              ),
+                            ],
+                          ),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.auto_awesome_rounded, color: Colors.white, size: 20),
+                                SizedBox(width: 10),
+                                Text(
+                                  'GENERATE SCHEDULE FOR $categoryName',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14,
+                                    letterSpacing: 1.5,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                        ],
+                        ),
                       ),
                     ),
-                  ),
+                  ],
+                ),
+              ),
+
+              // Clear Schedule Button for this category
+              Padding(
+                padding: const EdgeInsets.only(left: 16.0, right: 16.0, bottom: 8.0),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () => _confirmClearCategorySchedule(catId, categoryName),
+                        icon: const Icon(Icons.delete_sweep_rounded, size: 16),
+                        label: Text('CLEAR $categoryName SCHEDULE'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.redAccent,
+                          side: BorderSide(color: Colors.redAccent.withOpacity(0.5)),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
 
@@ -2958,6 +2989,107 @@ Widget _buildCategoryView(
   );
 }
 
+// Add these new methods to _ScheduleViewerState:
+
+Future<void> _goToGenerateScheduleForCategory(int categoryId, String categoryName) async {
+  // Navigate to generate schedule page with pre-selected category
+  final result = await Navigator.of(context).push(
+    MaterialPageRoute(
+      builder: (context) => GenerateSchedule(
+        preSelectedCategoryId: categoryId,
+        categoryName: categoryName,
+        onBack: () => Navigator.of(context).pop(),
+        onGenerated: () {
+          Navigator.of(context).pop();
+          _loadData(initial: true);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('✅ Schedule generated for $categoryName'),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        },
+      ),
+    ),
+  );
+}
+
+Future<void> _confirmClearCategorySchedule(int categoryId, String categoryName) async {
+  final confirm = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: const Color(0xFF2D0E7A),
+      title: Text('Clear $categoryName Schedule?', 
+          style: const TextStyle(color: Colors.white)),
+      content: Text(
+        'This will delete ALL matches for $categoryName. This action cannot be undone.',
+        style: const TextStyle(color: Colors.white70),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('CLEAR', style: TextStyle(color: Colors.redAccent)),
+        ),
+      ],
+    ),
+  );
+  
+  if (confirm == true) {
+    await _clearCategorySchedule(categoryId);
+  }
+}
+
+Future<void> _clearCategorySchedule(int categoryId) async {
+  try {
+    final conn = await DBHelper.getConnection();
+    
+    // Delete only matches for this category
+    await conn.execute("""
+      DELETE ts FROM tbl_teamschedule ts
+      JOIN tbl_team t ON ts.team_id = t.team_id
+      WHERE t.category_id = :catId
+    """, {"catId": categoryId});
+    
+    // Also delete orphaned matches and schedules
+    await conn.execute("""
+      DELETE m FROM tbl_match m
+      WHERE NOT EXISTS (
+        SELECT 1 FROM tbl_teamschedule ts WHERE ts.match_id = m.match_id
+      )
+    """);
+    
+    await conn.execute("""
+      DELETE s FROM tbl_schedule s
+      WHERE NOT EXISTS (
+        SELECT 1 FROM tbl_match m WHERE m.schedule_id = s.schedule_id
+      )
+    """);
+    
+    // Refresh the view
+    _loadData(initial: true);
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('✅ Schedule cleared for category'),
+        backgroundColor: Colors.orange,
+      ),
+    );
+  } catch (e) {
+    print("Error clearing category schedule: $e");
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('❌ Error clearing schedule: $e'),
+        backgroundColor: Colors.red,
+      ),
+    );
+  }
+}
+
   Widget _buildCategoryTitleBar(
       Map<String, dynamic> category, String title,
       List<Map<String, dynamic>> matches) {
@@ -2972,7 +3104,7 @@ Widget _buildCategoryView(
       ),
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 28),
       child: Row(children: [
-        const Text('ROBOVENTURE',
+        const Text('MAKE X',
             style: TextStyle(
                 color: Colors.white30,
                 fontSize: 14,
