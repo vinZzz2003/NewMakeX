@@ -1,13 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'config.dart';  // Add this import
-import 'db_helper.dart';
-import 'landing_page.dart';
+// Add this import
 import 'step1_school.dart';
 import 'step2_mentor.dart';
 import 'step3_team.dart';
 import 'step4_player.dart';
-import 'generate_schedule.dart';
 import 'schedule_viewer.dart';
 import 'standings.dart';
 import 'excel_import.dart';

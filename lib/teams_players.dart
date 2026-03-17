@@ -932,7 +932,7 @@ class _TeamCardState extends State<_TeamCard>
                         ],
                       ),
                     );
-                  }).toList(),
+                  }),
                   const SizedBox(height: 10),
                 ],
               ),

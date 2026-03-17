@@ -576,7 +576,7 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
       round++;
       
       // Safety check - if we're not making progress, break
-      if (attempts > 100 && matches.length == 0) {
+      if (attempts > 100 && matches.isEmpty) {
         print("⚠️ No matches created after many attempts, breaking");
         break;
       }
@@ -590,7 +590,7 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     print("\n--- Per-team Statistics ---");
     for (final teamId in teamIds) {
       final teamName = teamMap.containsKey(teamId) ? teamMap[teamId]!['team_name'] : 'Team $teamId';
-      print("$teamName: ${appearances[teamId]}/${matchesPerTeam} matches");
+      print("$teamName: ${appearances[teamId]}/$matchesPerTeam matches");
     }
     
     // If we didn't generate all matches, try the round-robin approach as fallback
@@ -1649,7 +1649,7 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
           Switch(
             value: _lunchBreakEnabled,
             onChanged: (v) => setState(() => _lunchBreakEnabled = v),
-            activeColor: const Color(0xFFFFD700),
+            activeThumbColor: const Color(0xFFFFD700),
             inactiveThumbColor: Colors.white24,
             inactiveTrackColor: Colors.white12,
             materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -1694,8 +1694,11 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                       topRight: Radius.circular(8)),
                   onTap: () => setState(() {
                     if (value < maxVal) {
-                      if (isRuns) _runsPerCategory[categoryId] = value + 1;
-                      else _arenasPerCategory[categoryId] = value + 1;
+                      if (isRuns) {
+                        _runsPerCategory[categoryId] = value + 1;
+                      } else {
+                        _arenasPerCategory[categoryId] = value + 1;
+                      }
                     }
                   }),
                   child: Icon(Icons.keyboard_arrow_up,
@@ -1710,8 +1713,11 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                       bottomRight: Radius.circular(8)),
                   onTap: () => setState(() {
                     if (value > 1) {
-                      if (isRuns) _runsPerCategory[categoryId] = value - 1;
-                      else _arenasPerCategory[categoryId] = value - 1;
+                      if (isRuns) {
+                        _runsPerCategory[categoryId] = value - 1;
+                      } else {
+                        _arenasPerCategory[categoryId] = value - 1;
+                      }
                     }
                   }),
                   child: Icon(Icons.keyboard_arrow_down,
@@ -1749,8 +1755,11 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     );
     if (picked != null) {
       setState(() {
-        if (isStart) _startTime = picked;
-        else         _endTime   = picked;
+        if (isStart) {
+          _startTime = picked;
+        } else {
+          _endTime   = picked;
+        }
       });
     }
   }

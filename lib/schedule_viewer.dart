@@ -92,6 +92,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   TabController? _tabController;
   List<Map<String, dynamic>> _categories = [];
   Map<int, List<Map<String, dynamic>>> _scheduleByCategory = {};
+  final Map<int, int> _championshipRefreshVersionByCategory = {};
+  final Map<int, BuildContext> _categoryTabContexts = {};
   final Map<String, MatchStatus> _statusMap = {};
   bool _isLoading = true;
   DateTime? _lastUpdated;
@@ -193,11 +195,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       
       // Initialize all teams with zero scores
       for (final team in teams) {
-        if (team == null) {
-          print("⚠️ Null team found, skipping");
-          continue;
-        }
-        
         final teamIdObj = team['team_id'];
         if (teamIdObj == null) {
           print("⚠️ Team has null team_id: $team");
@@ -227,11 +224,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       
       // Sum scores from each round
       for (final row in standings) {
-        if (row == null) {
-          print("⚠️ Null standings row, skipping");
-          continue;
-        }
-        
         final teamIdObj = row['team_id'];
         if (teamIdObj == null) {
           print("⚠️ Score row has null team_id: $row");
@@ -367,6 +359,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             onComplete: () {
               print("✅ Alliance selection completed");
               Navigator.of(context).pop();
+              if (!mounted) return;
+              setState(() {
+                _championshipRefreshVersionByCategory[categoryId] =
+                    (_championshipRefreshVersionByCategory[categoryId] ?? 0) + 1;
+              });
               _showChampionshipRoundPrompt(categoryId, categoryName);
             },
             onCancel: () {
@@ -431,8 +428,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               ),
               const SizedBox(height: 20),
               const Text(
-                'Proceed to Championship Round?',
+                'Open the Championship tab to review alliances and generate the schedule.',
                 style: TextStyle(color: Colors.white, fontSize: 16),
+                textAlign: TextAlign.center,
               ),
               const SizedBox(height: 24),
               Row(
@@ -452,14 +450,14 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     child: ElevatedButton(
                       onPressed: () {
                         Navigator.pop(ctx);
-                        _generateChampionshipSchedule(categoryId);
+                        _openChampionshipTab(categoryId);
                       },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF00E5A0),
                         foregroundColor: Colors.black,
                         padding: const EdgeInsets.symmetric(vertical: 14),
                       ),
-                      child: const Text('PROCEED', style: TextStyle(fontWeight: FontWeight.bold)),
+                      child: const Text('OPEN TAB', style: TextStyle(fontWeight: FontWeight.bold)),
                     ),
                   ),
                 ],
@@ -471,201 +469,197 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     );
   }
 
-  // In schedule_viewer.dart, find the _generateChampionshipSchedule method
-// Add the print statements as shown:
+  void _openChampionshipTab(int categoryId) {
+    final tabContext = _categoryTabContexts[categoryId];
+    final controller = tabContext == null ? null : DefaultTabController.maybeOf(tabContext);
+    if (controller != null) {
+      controller.animateTo(1);
+      return;
+    }
 
-Future<void> _generateChampionshipSchedule(int categoryId) async {
-  try {
-    print("🏆 _generateChampionshipSchedule called for category $categoryId"); // ADD THIS AT THE BEGINNING
-    
-    print("🏆 Generating championship schedule for category $categoryId");
-    
     if (!mounted) return;
-    
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Generating championship schedule...'),
+        content: Text('Championship tab is ready. Open it to generate the schedule.'),
         backgroundColor: Colors.blue,
       ),
     );
+  }
 
-    final conn = await DBHelper.getConnection();
-    
-    // Get the formed alliances from the database
-    final alliancesResult = await conn.execute("""
-      SELECT 
-        alliance_id,
-        captain_team_id,
-        partner_team_id,
-        selection_round
-      FROM tbl_alliance_selections 
-      WHERE category_id = :catId
-      ORDER BY selection_round
-    """, {"catId": categoryId});
-    
-    final alliances = alliancesResult.rows.map((r) => r.assoc()).toList();
-    
-    if (alliances.isEmpty) {
+  Future<void> _generateChampionshipSchedule(int categoryId) async {
+    try {
+      print("🏆 _generateChampionshipSchedule called for category $categoryId");
+      
+      print("🏆 Generating championship schedule for category $categoryId");
+      
+      if (!mounted) return;
+      
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('No alliances found. Please complete alliance selection first.'),
-          backgroundColor: Colors.orange,
+          content: Text('Generating championship schedule...'),
+          backgroundColor: Colors.blue,
         ),
       );
-      return;
-    }
-    
-    print("📊 Found ${alliances.length} alliances");
-    
-    // Create championship schedule table if not exists
-    try {
-      await conn.execute("""
-        CREATE TABLE IF NOT EXISTS tbl_championship_schedule (
-          match_id INT AUTO_INCREMENT PRIMARY KEY,
-          alliance1_id INT NOT NULL,
-          alliance2_id INT NOT NULL,
-          match_round INT NOT NULL,
-          match_position INT NOT NULL,
-          schedule_time VARCHAR(20),
-          arena_number INT DEFAULT 1,
-          status VARCHAR(20) DEFAULT 'pending'
-        )
-      """);
-      print("✅ Championship schedule table created");
-    } catch (e) {
-      print("ℹ️ Championship schedule table check: $e");
-    }
-    
-    // Clear existing championship schedule for this category
-    await conn.execute("""
-      DELETE FROM tbl_championship_schedule 
-      WHERE alliance1_id IN (SELECT alliance_id FROM tbl_alliance_selections WHERE category_id = :catId)
-      OR alliance2_id IN (SELECT alliance_id FROM tbl_alliance_selections WHERE category_id = :catId)
-    """, {"catId": categoryId});
-    
-    // Generate bracket based on number of alliances
-    final numAlliances = alliances.length;
-    
-    if (numAlliances == 4) {
-      // Standard 4-team bracket
-      // Semifinal 1: Alliance 1 vs Alliance 4
-      // Semifinal 2: Alliance 2 vs Alliance 3
-      // Final: Winners of semifinals
-      
-      // Semifinals
-      await conn.execute("""
-        INSERT INTO tbl_championship_schedule 
-          (alliance1_id, alliance2_id, match_round, match_position, schedule_time)
-        VALUES
-          (:a1, :a4, 1, 1, '13:00'),
-          (:a2, :a3, 1, 2, '13:10')
-      """, {
-        "a1": alliances[0]['alliance_id'],
-        "a2": alliances[1]['alliance_id'],
-        "a3": alliances[2]['alliance_id'],
-        "a4": alliances[3]['alliance_id'],
-      });
-      
-      // Final (to be filled after semifinals)
-      await conn.execute("""
-        INSERT INTO tbl_championship_schedule 
-          (alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
-        VALUES
-          (0, 0, 2, 1, '13:30', 'pending')
-      """);
-      
-    } else if (numAlliances == 8) {
-      // 8-team bracket
-      // Quarterfinals, Semifinals, Final
-      for (int i = 0; i < 4; i++) {
-        await conn.execute("""
-          INSERT INTO tbl_championship_schedule 
-            (alliance1_id, alliance2_id, match_round, match_position, schedule_time)
-          VALUES
-            (:a1, :a2, 1, :pos, :time)
-        """, {
-          "a1": alliances[i * 2]['alliance_id'],
-          "a2": alliances[i * 2 + 1]['alliance_id'],
-          "pos": i + 1,
-          "time": '${13 + i * 10}:00',
-        });
-      }
-      
-      // Semifinals and final placeholders
-      for (int i = 0; i < 2; i++) {
-        await conn.execute("""
-          INSERT INTO tbl_championship_schedule 
-            (alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
-          VALUES
-            (0, 0, 2, :pos, :time, 'pending')
-        """, {
-          "pos": i + 1,
-          "time": '${14 + i * 10}:00',
-        });
-      }
-      
-      // Final placeholder
-      await conn.execute("""
-        INSERT INTO tbl_championship_schedule 
-          (alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
-        VALUES
-          (0, 0, 3, 1, '15:00', 'pending')
-      """);
-      
-    } else if (numAlliances == 2) {
-      // Direct final
-      await conn.execute("""
-        INSERT INTO tbl_championship_schedule 
-          (alliance1_id, alliance2_id, match_round, match_position, schedule_time)
-        VALUES
-          (:a1, :a2, 1, 1, '13:00')
-      """, {
-        "a1": alliances[0]['alliance_id'],
-        "a2": alliances[1]['alliance_id'],
-      });
-    }
-    
-    print("✅ Championship schedule generated");
-    
-    // Verify the matches were inserted
-    final verifyResult = await conn.execute("""
-      SELECT COUNT(*) as cnt 
-      FROM tbl_championship_schedule cs
-      LEFT JOIN tbl_alliance_selections a1 ON cs.alliance1_id = a1.alliance_id
-      LEFT JOIN tbl_alliance_selections a2 ON cs.alliance2_id = a2.alliance_id
-      WHERE a1.category_id = :catId OR a2.category_id = :catId OR cs.alliance1_id = 0
-    """, {"catId": categoryId});
 
-    final count = verifyResult.rows.first.assoc()['cnt'];
-    print("🔍 Verification: Found $count championship matches in database");
-    print("✅ Championship schedule generated with $count matches"); // ADD THIS HERE
-    
-    if (!mounted) return;
-    
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('✅ Championship schedule generated with $count matches!'),
-        backgroundColor: Colors.green,
-      ),
-    );
-    
-    // Refresh schedule data to show the new championship tab
-    _loadData(initial: true);
-    
-  } catch (e, stackTrace) {
-    print("❌ Error generating championship schedule: $e");
-    print(stackTrace);
-    
-    if (!mounted) return;
-    
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Error generating championship schedule: $e'),
-        backgroundColor: Colors.red,
-      ),
-    );
+      final conn = await DBHelper.getConnection();
+      
+      // Get the formed alliances from the database
+      final alliancesResult = await conn.execute("""
+        SELECT 
+          alliance_id,
+          captain_team_id,
+          partner_team_id,
+          selection_round
+        FROM tbl_alliance_selections 
+        WHERE category_id = :catId
+        ORDER BY selection_round
+      """, {"catId": categoryId});
+      
+      final alliances = alliancesResult.rows.map((r) => r.assoc()).toList();
+      
+      if (alliances.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No alliances found. Please complete alliance selection first.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
+      
+      print("📊 Found ${alliances.length} alliances");
+      
+      // Clear existing championship schedule for this category
+      await conn.execute("""
+        DELETE FROM tbl_championship_schedule 
+        WHERE category_id = :catId
+      """, {"catId": categoryId});
+      
+      // Generate bracket based on number of alliances
+      final numAlliances = alliances.length;
+      
+      if (numAlliances == 4) {
+        // Standard 4-team bracket
+        // Semifinal 1: Alliance 1 vs Alliance 4
+        // Semifinal 2: Alliance 2 vs Alliance 3
+        // Final: Winners of semifinals
+        
+        // Semifinals
+        await conn.execute("""
+          INSERT INTO tbl_championship_schedule 
+            (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time)
+          VALUES
+            (:catId, :a1, :a4, 1, 1, '13:00'),
+            (:catId, :a2, :a3, 1, 2, '13:10')
+        """, {
+          "catId": categoryId,
+          "a1": alliances[0]['alliance_id'],
+          "a2": alliances[1]['alliance_id'],
+          "a3": alliances[2]['alliance_id'],
+          "a4": alliances[3]['alliance_id'],
+        });
+        
+        // Final (to be filled after semifinals)
+        await conn.execute("""
+          INSERT INTO tbl_championship_schedule 
+            (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
+          VALUES
+            (:catId, 0, 0, 2, 1, '13:30', 'pending')
+        """, {"catId": categoryId});
+        
+      } else if (numAlliances == 8) {
+        // 8-team bracket
+        // Quarterfinals, Semifinals, Final
+        for (int i = 0; i < 4; i++) {
+          await conn.execute("""
+            INSERT INTO tbl_championship_schedule 
+              (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time)
+            VALUES
+              (:catId, :a1, :a2, 1, :pos, :time)
+          """, {
+            "catId": categoryId,
+            "a1": alliances[i * 2]['alliance_id'],
+            "a2": alliances[i * 2 + 1]['alliance_id'],
+            "pos": i + 1,
+            "time": '${13 + i * 10}:00',
+          });
+        }
+        
+        // Semifinals and final placeholders
+        for (int i = 0; i < 2; i++) {
+          await conn.execute("""
+            INSERT INTO tbl_championship_schedule 
+              (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
+            VALUES
+              (:catId, 0, 0, 2, :pos, :time, 'pending')
+          """, {
+            "catId": categoryId,
+            "pos": i + 1,
+            "time": '${14 + i * 10}:00',
+          });
+        }
+        
+        // Final placeholder
+        await conn.execute("""
+          INSERT INTO tbl_championship_schedule 
+            (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
+          VALUES
+            (:catId, 0, 0, 3, 1, '15:00', 'pending')
+        """, {"catId": categoryId});
+        
+      } else if (numAlliances == 2) {
+        // Direct final
+        await conn.execute("""
+          INSERT INTO tbl_championship_schedule 
+            (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time)
+          VALUES
+            (:catId, :a1, :a2, 1, 1, '13:00')
+        """, {
+          "catId": categoryId,
+          "a1": alliances[0]['alliance_id'],
+          "a2": alliances[1]['alliance_id'],
+        });
+      }
+      
+      print("✅ Championship schedule generated");
+      
+      // Verify the matches were inserted
+      final verifyResult = await conn.execute("""
+        SELECT COUNT(*) as cnt 
+        FROM tbl_championship_schedule
+        WHERE category_id = :catId
+      """, {"catId": categoryId});
+
+      final count = verifyResult.rows.first.assoc()['cnt'];
+      print("🔍 Verification: Found $count championship matches in database");
+      print("✅ Championship schedule generated with $count matches");
+      
+      if (!mounted) return;
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Championship schedule generated with $count matches!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      
+      // Refresh schedule data to show the new championship tab
+      _loadData(initial: true);
+      
+    } catch (e, stackTrace) {
+      print("❌ Error generating championship schedule: $e");
+      print(stackTrace);
+      
+      if (!mounted) return;
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error generating championship schedule: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
   }
-}
 
   // ── silent background refresh ─────────────────────────────────────────────
   Future<void> _silentRefresh() async {
@@ -739,8 +733,6 @@ Future<void> _generateChampionshipSchedule(int categoryId) async {
       final Map<int, List<Map<String, dynamic>>> scheduleByCategory = {};
 
       for (final cat in categories) {
-        if (cat == null) continue;
-        
         final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
         if (catId == 0) continue;
         
@@ -754,8 +746,6 @@ Future<void> _generateChampionshipSchedule(int categoryId) async {
         final Map<int, Map<String, dynamic>> matchesByMatchId = {};
 
         for (final row in catRows) {
-          if (row == null) continue;
-          
           final matchId = int.tryParse(row['match_id'].toString()) ?? 0;
           if (matchId == 0) continue;
           
@@ -810,7 +800,6 @@ Future<void> _generateChampionshipSchedule(int categoryId) async {
 
       int? soccerCatId;
       for (final cat in categories) {
-        if (cat == null) continue;
         final type = (cat['category_type'] ?? '').toString().toLowerCase();
         if (type.contains('soccer')) {
           soccerCatId = int.tryParse(cat['category_id'].toString());
@@ -910,8 +899,9 @@ Future<void> _generateChampionshipSchedule(int categoryId) async {
           teamName: b['team_name'].toString()));
     }
     int byeN = 0;
-    while (bracketTeams.length < size)
+    while (bracketTeams.length < size) {
       bracketTeams.add(BracketTeam(teamId: -(++byeN), teamName: 'BYE', isBye: true));
+    }
 
     final rounds = _buildBracketFromTeams(bracketTeams);
     _assignBracketTimes(rounds, 10);
@@ -973,8 +963,11 @@ Future<void> _generateChampionshipSchedule(int categoryId) async {
     final nextMatchIdx = match.position ~/ 2;
     if (nextMatchIdx >= nextRound.length) return;
     final nextMatch = nextRound[nextMatchIdx];
-    if (match.position % 2 == 0) nextMatch.team1 = match.winner!;
-    else nextMatch.team2 = match.winner!;
+    if (match.position % 2 == 0) {
+      nextMatch.team1 = match.winner!;
+    } else {
+      nextMatch.team2 = match.winner!;
+    }
   }
 
   void _clearMatchResult(BracketMatch match) {
@@ -986,9 +979,9 @@ Future<void> _generateChampionshipSchedule(int categoryId) async {
       if (nextMatchIdx >= nextRound.length) return;
       final nextMatch = nextRound[nextMatchIdx];
       final feedsTeam1 = m.position % 2 == 0;
-      if (feedsTeam1 && nextMatch.team1.teamId == m.winner?.teamId)
+      if (feedsTeam1 && nextMatch.team1.teamId == m.winner?.teamId) {
         nextMatch.team1 = BracketTeam(teamId: -99, teamName: 'TBD');
-      else if (!feedsTeam1 && nextMatch.team2.teamId == m.winner?.teamId)
+      } else if (!feedsTeam1 && nextMatch.team2.teamId == m.winner?.teamId)
         nextMatch.team2 = BracketTeam(teamId: -99, teamName: 'TBD');
       if (nextMatch.winner != null) {
         resetDownstream(nextMatch);
@@ -1255,7 +1248,7 @@ Future<void> _generateChampionshipSchedule(int categoryId) async {
                 }),
               ]),
             );
-          }).toList(),
+          }),
         ],
       ),
     ));
@@ -1284,620 +1277,137 @@ Future<void> _generateChampionshipSchedule(int categoryId) async {
     if (!allDone) return const SizedBox.shrink();
 
     return Container(
-      margin: const EdgeInsets.all(16),
-      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
         gradient: const LinearGradient(
           colors: [Color(0xFF4A1A8C), Color(0xFF2D0E7A)],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.5), width: 2),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.45), width: 1.5),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFFFFD700).withOpacity(0.2),
-            blurRadius: 20,
-            spreadRadius: 2,
+            color: const Color(0xFFFFD700).withOpacity(0.14),
+            blurRadius: 14,
+            spreadRadius: 1,
           ),
         ],
       ),
-      child: Column(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          const Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.celebration, color: Color(0xFFFFD700), size: 24),
-              SizedBox(width: 8),
-              Text(
-                'QUALIFICATION COMPLETE!',
-                style: TextStyle(color: Color(0xFFFFD700), fontSize: 18, fontWeight: FontWeight.w900, letterSpacing: 1.5),
-              ),
-            ],
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFD700).withOpacity(0.12),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.celebration, color: Color(0xFFFFD700), size: 20),
           ),
-          const SizedBox(height: 12),
-          const Text(
-            'All qualification matches are done. Proceed to Alliance Selection Ceremony.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white70, fontSize: 14),
+          const SizedBox(width: 14),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'QUALIFICATION COMPLETE!',
+                  style: TextStyle(
+                    color: Color(0xFFFFD700),
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.1,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'All matches are done. Start the alliance ceremony to move teams into Championship.',
+                  style: TextStyle(color: Colors.white70, fontSize: 12.5, height: 1.25),
+                ),
+              ],
+            ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(width: 12),
           ElevatedButton(
             onPressed: () => _showAllianceSelection(catId, categoryName),
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFFFFD700),
               foregroundColor: Colors.black,
-              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
             ),
             child: const Text(
-              'START ALLIANCE CEREMONY',
-              style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.5),
+              'START CEREMONY',
+              style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1),
             ),
           ),
         ],
       ),
     );
   }
-// In schedule_viewer.dart, update the _getChampionshipMatches method:
 
-Future<List<Map<String, dynamic>>> _getChampionshipMatches(int categoryId) async {
-  try {
-    print("🔍 _getChampionshipMatches called for category $categoryId");
-    
-    final conn = await DBHelper.getConnection();
-    
-    // First, check if there are any alliances
-    final alliances = await conn.execute("""
-      SELECT alliance_id, captain_team_id, partner_team_id 
-      FROM tbl_alliance_selections 
-      WHERE category_id = :catId
-    """, {"catId": categoryId});
-    
-    final allianceRows = alliances.rows.map((r) => r.assoc()).toList();
-    print("📊 Found ${allianceRows.length} alliances for category $categoryId");
-    
-    if (allianceRows.isEmpty) {
-      print("ℹ️ No alliances found for category $categoryId");
-      return [];
-    }
-    
-    // Check if there's a championship schedule table
-    try {
-      await conn.execute("SELECT 1 FROM tbl_championship_schedule LIMIT 1");
-      print("✅ tbl_championship_schedule exists");
-    } catch (e) {
-      print("❌ tbl_championship_schedule does not exist: $e");
-      return [];
-    }
-    
-    // Get championship matches
-    final result = await conn.execute("""
-      SELECT 
-        cs.match_id,
-        cs.match_round,
-        cs.match_position,
-        cs.schedule_time,
-        cs.status,
-        cs.alliance1_id,
-        cs.alliance2_id,
-        a1.alliance_id as a1_id,
-        a2.alliance_id as a2_id,
-        t1.team_name as captain1_name,
-        t2.team_name as partner1_name,
-        t3.team_name as captain2_name,
-        t4.team_name as partner2_name
-      FROM tbl_championship_schedule cs
-      LEFT JOIN tbl_alliance_selections a1 ON cs.alliance1_id = a1.alliance_id
-      LEFT JOIN tbl_alliance_selections a2 ON cs.alliance2_id = a2.alliance_id
-      LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
-      LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
-      LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
-      LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
-      WHERE (a1.category_id = :catId OR a2.category_id = :catId OR cs.alliance1_id = 0 OR cs.alliance2_id = 0)
-      ORDER BY cs.match_round, cs.match_position
-    """, {"catId": categoryId});
-    
-    final rows = result.rows.map((r) {
-      final data = r.assoc();
-      
-      // Format alliance names
-      if (data['alliance1_id'] != null && data['alliance1_id'] != '0') {
-        data['alliance1_name'] = '${data['captain1_name'] ?? '???'} + ${data['partner1_name'] ?? '???'}';
-      } else {
-        data['alliance1_name'] = 'TBD';
-      }
-      
-      if (data['alliance2_id'] != null && data['alliance2_id'] != '0') {
-        data['alliance2_name'] = '${data['captain2_name'] ?? '???'} + ${data['partner2_name'] ?? '???'}';
-      } else {
-        data['alliance2_name'] = 'TBD';
-      }
-      
-      return data;
-    }).toList();
-    
-    print("✅ Found ${rows.length} championship matches for category $categoryId");
-    if (rows.isNotEmpty) {
-      print("📊 First match: ${rows.first}");
-    } else {
-      print("⚠️ No championship matches found in database");
-    }
-    
-    return rows;
-    
-  } catch (e, stackTrace) {
-    print("❌ Error getting championship matches: $e");
-    print(stackTrace);
-    return [];
+  Widget _buildQualificationActions(int catId, String categoryName) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+      child: Wrap(
+        spacing: 10,
+        runSpacing: 10,
+        children: [
+          ElevatedButton.icon(
+            onPressed: () => _goToGenerateScheduleForCategory(catId, categoryName),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF00CFFF),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            icon: const Icon(Icons.auto_awesome_rounded, size: 18),
+            label: Text(
+              'GENERATE $categoryName SCHEDULE',
+              style: const TextStyle(fontWeight: FontWeight.bold, letterSpacing: 0.8),
+            ),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => _confirmClearCategorySchedule(catId, categoryName),
+            icon: const Icon(Icons.delete_sweep_rounded, size: 16),
+            label: Text('CLEAR $categoryName SCHEDULE'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.redAccent,
+              side: BorderSide(color: Colors.redAccent.withOpacity(0.5)),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
-}
+
+  // Helper method to get category name by ID
+  String categoryName(int catId) {
+    for (final cat in _categories) {
+      final id = int.tryParse(cat['category_id'].toString()) ?? 0;
+      if (id == catId) {
+        return (cat['category_type'] ?? '').toString();
+      }
+    }
+    return 'Category $catId';
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // FIXED: Championship tab that actually shows real data
+  // FIXED: Championship tab that uses the ChampionshipSchedule widget
   // ═══════════════════════════════════════════════════════════════════════════
   Widget _buildChampionshipTab(int catId) {
-    return FutureBuilder<List<Map<String, dynamic>>>(
-      future: _getChampionshipMatches(catId),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                CircularProgressIndicator(color: Color(0xFFFFD700)),
-                SizedBox(height: 16),
-                Text(
-                  'Loading championship schedule...',
-                  style: TextStyle(color: Colors.white54),
-                ),
-              ],
-            ),
-          );
-        }
-        
-        if (snapshot.hasError) {
-          return Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
-                const SizedBox(height: 16),
-                Text(
-                  'Error loading championship schedule',
-                  style: TextStyle(color: Colors.redAccent),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  snapshot.error.toString(),
-                  style: TextStyle(color: Colors.white38, fontSize: 12),
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
-          );
-        }
-        
-        final matches = snapshot.data ?? [];
-        
-        if (matches.isEmpty) {
-          // Check if there are alliances but no schedule
-          return FutureBuilder<bool>(
-            future: _checkForAlliances(catId),
-            builder: (context, allianceSnapshot) {
-              final hasAlliances = allianceSnapshot.data == true;
-              
-              return Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      hasAlliances ? Icons.schedule : Icons.emoji_events,
-                      size: 64,
-                      color: Colors.white.withOpacity(0.1),
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      hasAlliances 
-                          ? 'No championship schedule yet'
-                          : 'No alliances formed yet',
-                      style: TextStyle(color: Colors.white38, fontSize: 18),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      hasAlliances
-                          ? 'Click GENERATE CHAMPIONSHIP SCHEDULE below'
-                          : 'Complete qualification and alliance selection first',
-                      style: TextStyle(color: Colors.white24, fontSize: 14),
-                    ),
-                    if (hasAlliances)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 20),
-                        child: ElevatedButton.icon(
-                          onPressed: () => _generateChampionshipSchedule(catId),
-                          icon: const Icon(Icons.auto_awesome),
-                          label: const Text('GENERATE CHAMPIONSHIP SCHEDULE'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFFFFD700),
-                            foregroundColor: Colors.black,
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 24, vertical: 12),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              );
-            },
-          );
-        }
-        
-        // Group matches by round
-        final Map<int, List<Map<String, dynamic>>> matchesByRound = {};
-        for (var match in matches) {
-          final round = int.tryParse(match['match_round'].toString()) ?? 1;
-          matchesByRound.putIfAbsent(round, () => []).add(match);
-        }
-        
-        // Sort rounds
-        final sortedRounds = matchesByRound.keys.toList()..sort();
-        
-        return ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            // Championship header
-            Container(
-              margin: const EdgeInsets.only(bottom: 24),
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [Color(0xFFFFD700), Color(0xFFCCAC00)],
-                ),
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFFFFD700).withOpacity(0.3),
-                    blurRadius: 20,
-                    spreadRadius: 2,
-                  ),
-                ],
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.2),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      Icons.emoji_events,
-                      color: Colors.black,
-                      size: 28,
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  const Text(
-                    'CHAMPIONSHIP ROUND',
-                    style: TextStyle(
-                      color: Colors.black,
-                      fontSize: 24,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 2,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            
-            // Display rounds
-            ...sortedRounds.map((round) {
-              final roundMatches = matchesByRound[round]!;
-              
-              String roundName;
-              if (round == 1) {
-                roundName = roundMatches.length > 2 ? 'QUARTER-FINALS' : 'SEMI-FINALS';
-              } else if (round == 2) {
-                roundName = 'SEMI-FINALS';
-              } else {
-                roundName = 'FINALS';
-              }
-              
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Round header
-                  Container(
-                    margin: const EdgeInsets.symmetric(vertical: 16),
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          const Color(0xFFFFD700).withOpacity(0.15),
-                          const Color(0xFFFFD700).withOpacity(0.05),
-                        ],
-                      ),
-                      borderRadius: BorderRadius.circular(30),
-                      border: Border.all(
-                        color: const Color(0xFFFFD700).withOpacity(0.3),
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          round == sortedRounds.last ? Icons.star : Icons.emoji_events,
-                          color: const Color(0xFFFFD700),
-                          size: 18,
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          roundName,
-                          style: const TextStyle(
-                            color: Color(0xFFFFD700),
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                            letterSpacing: 1,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  
-                  // Round matches
-                  ...roundMatches.map((match) {
-                    final alliance1Name = match['alliance1_name'] ?? 'TBD';
-                    final alliance2Name = match['alliance2_name'] ?? 'TBD';
-                    final scheduleTime = match['schedule_time'] ?? '--:--';
-                    final status = match['status']?.toString().toUpperCase() ?? 'PENDING';
-                    
-                    // Check if this is a placeholder match (alliance IDs = 0)
-                    final isPlaceholder = 
-                        match['alliance1_id'] == '0' || match['alliance1_id'] == null ||
-                        match['alliance2_id'] == '0' || match['alliance2_id'] == null;
-                    
-                    return Container(
-                      margin: const EdgeInsets.only(bottom: 16),
-                      padding: const EdgeInsets.all(20),
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            const Color(0xFF1A0A4A),
-                            const Color(0xFF2D0E7A).withOpacity(0.5),
-                          ],
-                        ),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(
-                          color: isPlaceholder
-                              ? Colors.white.withOpacity(0.1)
-                              : const Color(0xFFFFD700).withOpacity(0.3),
-                          width: isPlaceholder ? 1 : 2,
-                        ),
-                        boxShadow: isPlaceholder
-                            ? []
-                            : [
-                                BoxShadow(
-                                  color: const Color(0xFFFFD700).withOpacity(0.1),
-                                  blurRadius: 20,
-                                  spreadRadius: 2,
-                                ),
-                              ],
-                      ),
-                      child: Column(
-                        children: [
-                          // Alliance 1 vs Alliance 2
-                          Row(
-                            children: [
-                              // Alliance 1
-                              Expanded(
-                                child: Container(
-                                  padding: const EdgeInsets.all(16),
-                                  decoration: BoxDecoration(
-                                    color: isPlaceholder
-                                        ? Colors.white.withOpacity(0.02)
-                                        : const Color(0xFF00CFFF).withOpacity(0.1),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(
-                                      color: isPlaceholder
-                                          ? Colors.white.withOpacity(0.1)
-                                          : const Color(0xFF00CFFF).withOpacity(0.3),
-                                    ),
-                                  ),
-                                  child: Column(
-                                    children: [
-                                      const Text(
-                                        'ALLIANCE',
-                                        style: TextStyle(
-                                          color: Color(0xFF00CFFF),
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.bold,
-                                          letterSpacing: 1,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        alliance1Name,
-                                        style: TextStyle(
-                                          color: isPlaceholder
-                                              ? Colors.white38
-                                              : Colors.white,
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 14,
-                                        ),
-                                        textAlign: TextAlign.center,
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              
-                              // VS
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 16),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 16, vertical: 8),
-                                  decoration: BoxDecoration(
-                                    color: isPlaceholder
-                                        ? Colors.white.withOpacity(0.05)
-                                        : const Color(0xFFFFD700).withOpacity(0.15),
-                                    borderRadius: BorderRadius.circular(30),
-                                    border: Border.all(
-                                      color: isPlaceholder
-                                          ? Colors.white.withOpacity(0.1)
-                                          : const Color(0xFFFFD700).withOpacity(0.3),
-                                    ),
-                                  ),
-                                  child: Text(
-                                    'VS',
-                                    style: TextStyle(
-                                      color: isPlaceholder
-                                          ? Colors.white24
-                                          : const Color(0xFFFFD700),
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 14,
-                                      letterSpacing: 2,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              
-                              // Alliance 2
-                              Expanded(
-                                child: Container(
-                                  padding: const EdgeInsets.all(16),
-                                  decoration: BoxDecoration(
-                                    color: isPlaceholder
-                                        ? Colors.white.withOpacity(0.02)
-                                        : const Color(0xFF00FF88).withOpacity(0.1),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(
-                                      color: isPlaceholder
-                                          ? Colors.white.withOpacity(0.1)
-                                          : const Color(0xFF00FF88).withOpacity(0.3),
-                                    ),
-                                  ),
-                                  child: Column(
-                                    children: [
-                                      const Text(
-                                        'ALLIANCE',
-                                        style: TextStyle(
-                                          color: Color(0xFF00FF88),
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.bold,
-                                          letterSpacing: 1,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        alliance2Name,
-                                        style: TextStyle(
-                                          color: isPlaceholder
-                                              ? Colors.white38
-                                              : Colors.white,
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 14,
-                                        ),
-                                        textAlign: TextAlign.center,
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          
-                          const SizedBox(height: 16),
-                          
-                          // Match details
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              // Time
-                              Row(
-                                children: [
-                                  Icon(
-                                    Icons.access_time,
-                                    color: isPlaceholder
-                                        ? Colors.white24
-                                        : Colors.white38,
-                                    size: 14,
-                                  ),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    scheduleTime,
-                                    style: TextStyle(
-                                      color: isPlaceholder
-                                          ? Colors.white24
-                                          : Colors.white.withOpacity(0.5),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              
-                              // Status
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 12, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: status == 'PENDING'
-                                      ? Colors.orange.withOpacity(0.15)
-                                      : Colors.green.withOpacity(0.15),
-                                  borderRadius: BorderRadius.circular(20),
-                                  border: Border.all(
-                                    color: status == 'PENDING'
-                                        ? Colors.orange.withOpacity(0.3)
-                                        : Colors.green.withOpacity(0.3),
-                                  ),
-                                ),
-                                child: Text(
-                                  status,
-                                  style: TextStyle(
-                                    color: status == 'PENDING'
-                                        ? Colors.orange
-                                        : Colors.green,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                              
-                              // Round indicator
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFFFD700).withOpacity(0.1),
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                child: Text(
-                                  'ROUND $round',
-                                  style: const TextStyle(
-                                    color: Color(0xFFFFD700),
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    );
-                  }).toList(),
-                ],
-              );
-            }).toList(),
-          ],
-        );
-      },
+    // Simply return the ChampionshipSchedule widget which now handles everything
+    return ChampionshipSchedule(
+      key: ValueKey('championship-$catId-${_championshipRefreshVersionByCategory[catId] ?? 0}'),
+      categoryId: catId,
+      categoryName: categoryName(catId),
     );
   }
 
@@ -1969,102 +1479,100 @@ Future<List<Map<String, dynamic>>> _getChampionshipMatches(int categoryId) async
     );
   }
 
-  // In schedule_viewer.dart, replace the _buildSoccerView method with this:
+  Widget _buildSoccerView(
+      Map<String, dynamic> category, int catId,
+      List<Map<String, dynamic>> matches) {
+    final bracketSize = _bracketSize(_soccerTeams.length);
+    final canSeed = !_bracketSeeded;
+    final allDone = _allMatchesDone(catId, matches);
 
-Widget _buildSoccerView(
-    Map<String, dynamic> category, int catId,
-    List<Map<String, dynamic>> matches) {
-  final bracketSize = _bracketSize(_soccerTeams.length);
-  final canSeed = !_bracketSeeded;
-  final allDone = _allMatchesDone(catId, matches);
-
-  return DefaultTabController(
-    length: 3, // Make sure this is 3
-    child: Column(children: [
-      _buildCategoryTitleBar(category, 'SOCCER', matches),
-      Container(
-        color: const Color(0xFF130742),
-        child: TabBar(
-          onTap: (index) {
-            if (index == 1 && !allDone) {
-              DefaultTabController.of(context).animateTo(0);
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  backgroundColor: const Color(0xFF2D0E7A),
-                  behavior: SnackBarBehavior.floating,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10)),
-                  content: Row(children: const [
-                    Icon(Icons.lock, color: Color(0xFFFFD700), size: 18),
-                    SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'Complete all group-stage matches first.\nSet every match status to "Done" to unlock the bracket.',
-                        style: TextStyle(color: Colors.white, fontSize: 13),
+    return DefaultTabController(
+      length: 3, // Make sure this is 3
+      child: Column(children: [
+        _buildCategoryTitleBar(category, 'SOCCER', matches),
+        Container(
+          color: const Color(0xFF130742),
+          child: TabBar(
+            onTap: (index) {
+              if (index == 1 && !allDone) {
+                DefaultTabController.of(context).animateTo(0);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    backgroundColor: const Color(0xFF2D0E7A),
+                    behavior: SnackBarBehavior.floating,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                    content: Row(children: const [
+                      Icon(Icons.lock, color: Color(0xFFFFD700), size: 18),
+                      SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Complete all group-stage matches first.\nSet every match status to "Done" to unlock the bracket.',
+                          style: TextStyle(color: Colors.white, fontSize: 13),
+                        ),
+                      ),
+                    ]),
+                    duration: const Duration(seconds: 3),
+                  ),
+                );
+              }
+            },
+            indicatorColor: const Color(0xFF00FF88),
+            indicatorWeight: 3,
+            labelColor: const Color(0xFF00FF88),
+            unselectedLabelColor: Colors.white30,
+            labelStyle: const TextStyle(
+                fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1.2),
+            tabs: [
+              const Tab(
+                icon: Icon(Icons.calendar_today, size: 16),
+                text: 'QUALIFICATION',
+              ),
+              Tab(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      allDone ? Icons.account_tree : Icons.lock,
+                      size: 16,
+                      color: allDone
+                          ? const Color(0xFF00FF88)
+                          : Colors.white24,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'PLAYOFF BRACKET',
+                      style: TextStyle(
+                        color: allDone ? const Color(0xFF00FF88) : Colors.white24,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                        letterSpacing: 1.2,
                       ),
                     ),
-                  ]),
-                  duration: const Duration(seconds: 3),
+                  ],
                 ),
-              );
-            }
-          },
-          indicatorColor: const Color(0xFF00FF88),
-          indicatorWeight: 3,
-          labelColor: const Color(0xFF00FF88),
-          unselectedLabelColor: Colors.white30,
-          labelStyle: const TextStyle(
-              fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1.2),
-          tabs: [
-            const Tab(
-              icon: Icon(Icons.calendar_today, size: 16),
-              text: 'QUALIFICATION',
-            ),
-            Tab(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    allDone ? Icons.account_tree : Icons.lock,
-                    size: 16,
-                    color: allDone
-                        ? const Color(0xFF00FF88)
-                        : Colors.white24,
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    'PLAYOFF BRACKET',
-                    style: TextStyle(
-                      color: allDone ? const Color(0xFF00FF88) : Colors.white24,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 14,
-                      letterSpacing: 1.2,
-                    ),
-                  ),
-                ],
               ),
-            ),
-            const Tab(
-              icon: Icon(Icons.emoji_events, size: 16),
-              text: 'CHAMPIONSHIP',
-            ),
-          ],
+              const Tab(
+                icon: Icon(Icons.emoji_events, size: 16),
+                text: 'CHAMPIONSHIP',
+              ),
+            ],
+          ),
         ),
-      ),
-      Expanded(
-        child: TabBarView(
-          children: [
-            _buildSoccerScheduleTab(catId, matches, bracketSize, canSeed),
-            allDone
-                ? _buildBracketTab(matches)
-                : _buildBracketLockedScreen(matches),
-            _buildChampionshipTab(catId), // Make sure this is here
-          ],
+        Expanded(
+          child: TabBarView(
+            children: [
+              _buildSoccerScheduleTab(catId, matches, bracketSize, canSeed),
+              allDone
+                  ? _buildBracketTab(matches)
+                  : _buildBracketLockedScreen(matches),
+              _buildChampionshipTab(catId), // This now uses the fixed method
+            ],
+          ),
         ),
-      ),
-    ]),
-  );
-}
+      ]),
+    );
+  }
 
   // Locked bracket placeholder screen
   Widget _buildBracketLockedScreen(List<Map<String, dynamic>> matches) {
@@ -2162,16 +1670,6 @@ Widget _buildSoccerView(
         ],
       ),
     );
-  }
-
-  String categoryName(int catId) {
-    for (final cat in _categories) {
-      final id = int.tryParse(cat['category_id'].toString()) ?? 0;
-      if (id == catId) {
-        return (cat['category_type'] ?? '').toString();
-      }
-    }
-    return 'Category $catId';
   }
 
   // Soccer Schedule sub-tab
@@ -2289,10 +1787,10 @@ Widget _buildSoccerView(
 
                   final team1Name = t1?['team_name']?.toString() ?? '—';
                   final team2Name = t2?['team_name']?.toString() ?? '—';
-                  final _t1raw = t1?['team_id']?.toString() ?? '';
-                  final _t2raw = t2?['team_id']?.toString() ?? '';
-                  final team1Id = _t1raw.isNotEmpty ? 'C${_t1raw}R' : '';
-                  final team2Id = _t2raw.isNotEmpty ? 'C${_t2raw}R' : '';
+                  final t1raw = t1?['team_id']?.toString() ?? '';
+                  final t2raw = t2?['team_id']?.toString() ?? '';
+                  final team1Id = t1raw.isNotEmpty ? 'C${t1raw}R' : '';
+                  final team2Id = t2raw.isNotEmpty ? 'C${t2raw}R' : '';
                   final bothReal = team1Name != '—' && team2Name != '—';
 
                   final bool t1Wins = score?.isHomeWin == true;
@@ -2849,246 +2347,169 @@ Widget _buildSoccerView(
     );
   }
 
-  // In schedule_viewer.dart, replace the _buildCategoryView method with this:
-
-// In schedule_viewer.dart, replace the _buildCategoryView method with this:
-
-Widget _buildCategoryView(
-    Map<String, dynamic> category, int catId,
-    List<Map<String, dynamic>> matches) {
-  final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
-  final isSoccer = catId == _soccerCategoryId;
-  
-  return DefaultTabController(
-    length: 2, // Qualification + Championship
-    child: Column(children: [
-      _buildCategoryTitleBar(category, categoryName, matches),
-      
-      // Add tab bar for non-soccer categories
-      Container(
-        color: const Color(0xFF130742),
-        child: TabBar(
-          indicatorColor: const Color(0xFFFFD700),
-          indicatorWeight: 3,
-          labelColor: const Color(0xFFFFD700),
-          unselectedLabelColor: Colors.white30,
-          labelStyle: const TextStyle(
-              fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1.2),
-          tabs: const [
-            Tab(
-              icon: Icon(Icons.calendar_today, size: 16),
-              text: 'QUALIFICATION',
-            ),
-            Tab(
-              icon: Icon(Icons.emoji_events, size: 16),
-              text: 'CHAMPIONSHIP',
-            ),
-          ],
+  Widget _buildCategoryView(
+      Map<String, dynamic> category, int catId,
+      List<Map<String, dynamic>> matches) {
+    final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
+    final isSoccer = catId == _soccerCategoryId;
+    
+    return DefaultTabController(
+      length: 2, // Qualification + Championship
+      child: Builder(builder: (tabContext) {
+        _categoryTabContexts[catId] = tabContext;
+        return Column(children: [
+        _buildCategoryTitleBar(category, categoryName, matches),
+        
+        // Add tab bar for non-soccer categories
+        Container(
+          color: const Color(0xFF130742),
+          child: TabBar(
+            indicatorColor: const Color(0xFFFFD700),
+            indicatorWeight: 3,
+            labelColor: const Color(0xFFFFD700),
+            unselectedLabelColor: Colors.white30,
+            labelStyle: const TextStyle(
+                fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1.2),
+            tabs: const [
+              Tab(
+                icon: Icon(Icons.calendar_today, size: 16),
+                text: 'QUALIFICATION',
+              ),
+              Tab(
+                icon: Icon(Icons.emoji_events, size: 16),
+                text: 'CHAMPIONSHIP',
+              ),
+            ],
+          ),
         ),
-      ),
-      
-      Expanded(
-        child: TabBarView(
-          children: [
-            // Qualification tab (existing schedule)
-            Column(children: [
-              // Per-Category Generate Schedule Button
-              Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: ElevatedButton(
-                        onPressed: () => _goToGenerateScheduleForCategory(catId, categoryName),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.transparent,
-                          shadowColor: Colors.transparent,
-                          padding: EdgeInsets.zero,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ),
-                        child: Ink(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [const Color(0xFF00CFFF), const Color(0xFF0099CC)],
-                            ),
-                            borderRadius: BorderRadius.circular(12),
-                            boxShadow: [
-                              BoxShadow(
-                                color: const Color(0xFF00CFFF).withOpacity(0.4),
-                                blurRadius: 20,
-                                spreadRadius: 2,
-                              ),
-                            ],
-                          ),
-                          child: Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.symmetric(vertical: 16),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(Icons.auto_awesome_rounded, color: Colors.white, size: 20),
-                                SizedBox(width: 10),
-                                Text(
-                                  'GENERATE SCHEDULE FOR $categoryName',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 14,
-                                    letterSpacing: 1.5,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+        
+        Expanded(
+          child: TabBarView(
+            children: [
+              // Qualification tab (existing schedule)
+              Column(children: [
+                _buildQualificationActions(catId, categoryName),
 
-              // Clear Schedule Button for this category
-              Padding(
-                padding: const EdgeInsets.only(left: 16.0, right: 16.0, bottom: 8.0),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () => _confirmClearCategorySchedule(catId, categoryName),
-                        icon: const Icon(Icons.delete_sweep_rounded, size: 16),
-                        label: Text('CLEAR $categoryName SCHEDULE'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.redAccent,
-                          side: BorderSide(color: Colors.redAccent.withOpacity(0.5)),
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-              // Alliance Selection Button (shown when all matches are done)
-              _buildAllianceSelectionButton(catId, categoryName),
+                // Alliance Selection Button (shown when all matches are done)
+                _buildAllianceSelectionButton(catId, categoryName),
+                
+                Expanded(child: _buildScheduleTable(category, catId, matches)),
+              ]),
               
-              Expanded(child: _buildScheduleTable(category, catId, matches)),
-            ]),
-            
-            // Championship tab
-            ChampionshipSchedule(
-              categoryId: catId,
-              categoryName: categoryName,
-            ),
-          ],
+              // Championship tab - using the fixed widget
+              ChampionshipSchedule(
+                key: ValueKey('championship-$catId-${_championshipRefreshVersionByCategory[catId] ?? 0}'),
+                categoryId: catId,
+                categoryName: categoryName,
+              ),
+            ],
+          ),
         ),
-      ),
-    ]),
-  );
-}
-
-// Add these new methods to _ScheduleViewerState:
-
-Future<void> _goToGenerateScheduleForCategory(int categoryId, String categoryName) async {
-  // Navigate to generate schedule page with pre-selected category
-  final result = await Navigator.of(context).push(
-    MaterialPageRoute(
-      builder: (context) => GenerateSchedule(
-        preSelectedCategoryId: categoryId,
-        categoryName: categoryName,
-        onBack: () => Navigator.of(context).pop(),
-        onGenerated: () {
-          Navigator.of(context).pop();
-          _loadData(initial: true);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('✅ Schedule generated for $categoryName'),
-              backgroundColor: Colors.green,
-              duration: const Duration(seconds: 2),
-            ),
-          );
-        },
-      ),
-    ),
-  );
-}
-
-Future<void> _confirmClearCategorySchedule(int categoryId, String categoryName) async {
-  final confirm = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      backgroundColor: const Color(0xFF2D0E7A),
-      title: Text('Clear $categoryName Schedule?', 
-          style: const TextStyle(color: Colors.white)),
-      content: Text(
-        'This will delete ALL matches for $categoryName. This action cannot be undone.',
-        style: const TextStyle(color: Colors.white70),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx, false),
-          child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
-        ),
-        TextButton(
-          onPressed: () => Navigator.pop(ctx, true),
-          child: const Text('CLEAR', style: TextStyle(color: Colors.redAccent)),
-        ),
-      ],
-    ),
-  );
-  
-  if (confirm == true) {
-    await _clearCategorySchedule(categoryId);
-  }
-}
-
-Future<void> _clearCategorySchedule(int categoryId) async {
-  try {
-    final conn = await DBHelper.getConnection();
-    
-    // Delete only matches for this category
-    await conn.execute("""
-      DELETE ts FROM tbl_teamschedule ts
-      JOIN tbl_team t ON ts.team_id = t.team_id
-      WHERE t.category_id = :catId
-    """, {"catId": categoryId});
-    
-    // Also delete orphaned matches and schedules
-    await conn.execute("""
-      DELETE m FROM tbl_match m
-      WHERE NOT EXISTS (
-        SELECT 1 FROM tbl_teamschedule ts WHERE ts.match_id = m.match_id
-      )
-    """);
-    
-    await conn.execute("""
-      DELETE s FROM tbl_schedule s
-      WHERE NOT EXISTS (
-        SELECT 1 FROM tbl_match m WHERE m.schedule_id = s.schedule_id
-      )
-    """);
-    
-    // Refresh the view
-    _loadData(initial: true);
-    
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('✅ Schedule cleared for category'),
-        backgroundColor: Colors.orange,
-      ),
+      ]);
+      }),
     );
-  } catch (e) {
-    print("Error clearing category schedule: $e");
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('❌ Error clearing schedule: $e'),
-        backgroundColor: Colors.red,
+  }
+
+  // Add these new methods to _ScheduleViewerState:
+
+  Future<void> _goToGenerateScheduleForCategory(int categoryId, String categoryName) async {
+    // Navigate to generate schedule page with pre-selected category
+    final result = await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => GenerateSchedule(
+          preSelectedCategoryId: categoryId,
+          categoryName: categoryName,
+          onBack: () => Navigator.of(context).pop(),
+          onGenerated: () {
+            Navigator.of(context).pop();
+            _loadData(initial: true);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('✅ Schedule generated for $categoryName'),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          },
+        ),
       ),
     );
   }
-}
+
+  Future<void> _confirmClearCategorySchedule(int categoryId, String categoryName) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF2D0E7A),
+        title: Text('Clear $categoryName Schedule?', 
+            style: const TextStyle(color: Colors.white)),
+        content: Text(
+          'This will delete ALL matches for $categoryName. This action cannot be undone.',
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('CLEAR', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+    
+    if (confirm == true) {
+      await _clearCategorySchedule(categoryId);
+    }
+  }
+
+  Future<void> _clearCategorySchedule(int categoryId) async {
+    try {
+      final conn = await DBHelper.getConnection();
+      
+      // Delete only matches for this category
+      await conn.execute("""
+        DELETE ts FROM tbl_teamschedule ts
+        JOIN tbl_team t ON ts.team_id = t.team_id
+        WHERE t.category_id = :catId
+      """, {"catId": categoryId});
+      
+      // Also delete orphaned matches and schedules
+      await conn.execute("""
+        DELETE m FROM tbl_match m
+        WHERE NOT EXISTS (
+          SELECT 1 FROM tbl_teamschedule ts WHERE ts.match_id = m.match_id
+        )
+      """);
+      
+      await conn.execute("""
+        DELETE s FROM tbl_schedule s
+        WHERE NOT EXISTS (
+          SELECT 1 FROM tbl_match m WHERE m.schedule_id = s.schedule_id
+        )
+      """);
+      
+      // Refresh the view
+      _loadData(initial: true);
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Schedule cleared for category'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+    } catch (e) {
+      print("Error clearing category schedule: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Error clearing schedule: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
 
   Widget _buildCategoryTitleBar(
       Map<String, dynamic> category, String title,

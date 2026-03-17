@@ -62,11 +62,13 @@ class _Step3TeamState extends State<Step3Team> {
         _categories = uniqueCat;
         _mentors    = uniqueMen;
         if (!uniqueCat.any((c) =>
-            int.tryParse(c['category_id'].toString()) == _selectedCategoryId))
+            int.tryParse(c['category_id'].toString()) == _selectedCategoryId)) {
           _selectedCategoryId = null;
+        }
         if (!uniqueMen.any((m) =>
-            int.tryParse(m['mentor_id'].toString()) == _selectedMentorId))
+            int.tryParse(m['mentor_id'].toString()) == _selectedMentorId)) {
           _selectedMentorId = null;
+        }
         _isLoadingData = false;
       });
     } catch (e) {
@@ -336,7 +338,7 @@ class _Step3TeamState extends State<Step3Team> {
                     strokeWidth: 2, color: _accent)),
               )
             : DropdownButtonFormField<int>(
-                value: value,
+                initialValue: value,
                 dropdownColor: const Color(0xFF2D0E7A),
                 style: const TextStyle(color: Colors.white, fontSize: 13),
                 hint: Text(hint,

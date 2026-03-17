@@ -214,7 +214,7 @@ class _LiveClockBadgeState extends State<_LiveClockBadge>
         children: [
           AnimatedBuilder(
             animation: _pulseAnim,
-            builder: (_, __) => Container(
+            builder: (_, _) => Container(
               width: 7, height: 7,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,

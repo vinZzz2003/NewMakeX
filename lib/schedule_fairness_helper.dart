@@ -117,8 +117,7 @@ class FairnessTracker {
     for (final entry in teamData.entries) {
       final data = entry.value;
       
-      print("${data.teamName}: RED=${data.redCount} (target: $targetRed), BLUE=${data.blueCount} (target: $targetBlue) | " +
-            "Rounds played: ${data.playedRounds.join(', ')}");
+      print("${data.teamName}: RED=${data.redCount} (target: $targetRed), BLUE=${data.blueCount} (target: $targetBlue) | " "Rounds played: ${data.playedRounds.join(', ')}");
       
       // Check red/blue balance (allow difference of 2)
       if ((data.redCount - targetRed).abs() > 1 || 

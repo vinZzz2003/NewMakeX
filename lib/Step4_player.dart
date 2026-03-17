@@ -547,7 +547,7 @@ class _Step4PlayerState extends State<Step4Player> {
                     strokeWidth: 2, color: _accent)),
               )
             : DropdownButtonFormField<int>(
-                value: _selectedTeamId,
+                initialValue: _selectedTeamId,
                 dropdownColor: const Color(0xFF2D0E7A),
                 style: const TextStyle(color: Colors.white, fontSize: 13),
                 hint: Text('Select team',

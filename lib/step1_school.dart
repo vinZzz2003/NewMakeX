@@ -223,7 +223,7 @@ class _Step1SchoolState extends State<Step1School> {
                             AnimatedBuilder(
                               animation: Listenable.merge(
                                   [_nameController, _campusController]),
-                              builder: (_, __) {
+                              builder: (_, _) {
                                 final name   = _nameController.text.trim();
                                 final campus = _campusController.text.trim();
                                 if (name.isEmpty) return const SizedBox.shrink();
@@ -652,7 +652,7 @@ class _Step1SchoolState extends State<Step1School> {
         ),
         const SizedBox(height: 8),
         DropdownButtonFormField<String>(
-          value: _selectedRegion,
+          initialValue: _selectedRegion,
           dropdownColor: const Color(0xFF2D0E7A),
           style: const TextStyle(color: Colors.white, fontSize: 13),
           hint: Text('Select region',

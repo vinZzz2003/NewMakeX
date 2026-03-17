@@ -275,7 +275,7 @@ class _Step2MentorState extends State<Step2Mentor> {
                         strokeWidth: 2, color: _accent)),
               )
             : DropdownButtonFormField<int>(
-                value: _selectedSchoolId,
+                initialValue: _selectedSchoolId,
                 dropdownColor: const Color(0xFF2D0E7A),
                 style: const TextStyle(color: Colors.white, fontSize: 13),
                 hint: Text('Select school',

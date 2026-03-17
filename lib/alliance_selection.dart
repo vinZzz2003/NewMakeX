@@ -454,31 +454,45 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
   }
 
   void _completeAllianceFormation() {
-    print("🎯 _completeAllianceFormation called");
-    print("📊 Formed alliances count: ${_formedAlliances.length}");
-    
-    // Safety check
-    if (!_isInitialized) {
-      print("⚠️ Cannot complete - not initialized");
-      setState(() {
-        _errorMessage = "Initialization failed. Please try again.";
-      });
-      return;
-    }
-    
+  print("🎯 _completeAllianceFormation called");
+  print("📊 Formed alliances count: ${_formedAlliances.length}");
+  
+  // Safety check
+  if (!_isInitialized) {
+    print("⚠️ Cannot complete - not initialized");
     setState(() {
-      _isComplete = true;
-      _selectionTimer?.cancel();
-      _timerController.stop();
+      _errorMessage = "Initialization failed. Please try again.";
     });
-    
-    // Save alliances to database
-    _saveAlliancesToDatabase().then((_) {
-      print("✅ Alliance save completed");
-    }).catchError((error) {
-      print("❌ Alliance save failed: $error");
-    });
+    return;
   }
+  
+  setState(() {
+    _isComplete = true;
+    _selectionTimer?.cancel();
+    _timerController.stop();
+  });
+  
+  // Save alliances to database
+  _saveAlliancesToDatabase().then((_) {
+    print("✅ Alliance save completed");
+    
+    // IMPORTANT: Call onComplete callback to return to schedule viewer
+    // This will trigger showing the championship round prompt
+    if (mounted) {
+      widget.onComplete();
+    }
+  }).catchError((error) {
+    print("❌ Alliance save failed: $error");
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error saving alliances: $error'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  });
+}
 
   String _formatTeamId(int teamId) {
     return 'C${teamId.toString().padLeft(3, '0')}R';
@@ -1493,8 +1507,8 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
               SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: DataTable(
-                  headingRowColor: MaterialStateProperty.all(const Color(0xFF2D0E7A)),
-                  dataRowColor: MaterialStateProperty.all(Colors.transparent),
+                  headingRowColor: WidgetStateProperty.all(const Color(0xFF2D0E7A)),
+                  dataRowColor: WidgetStateProperty.all(Colors.transparent),
                   columns: const [
                     DataColumn(label: Text('RANK', style: TextStyle(color: Colors.white))),
                     DataColumn(label: Text('TEAM', style: TextStyle(color: Colors.white))),

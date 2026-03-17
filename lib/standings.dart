@@ -45,6 +45,49 @@ extension StandingTypeExt on StandingType {
   }
 }
 
+// Score model for qualification rounds
+class RoundScore {
+  int individualScore;
+  int allianceScore;
+  int violation;
+  String duration;
+  
+  RoundScore({
+    this.individualScore = 0,
+    this.allianceScore = 0,
+    this.violation = 0,
+    this.duration = '00:00',
+  });
+  
+  int get totalScore => individualScore + allianceScore - violation;
+}
+
+// Championship alliance standing model
+class ChampionshipAllianceStanding {
+  final int allianceId;
+  final int allianceRank;
+  final String captainName;
+  final String partnerName;
+  final Map<int, Map<String, int>> matchScores; // match position -> {score, violation}
+  int totalScore;
+  
+  ChampionshipAllianceStanding({
+    required this.allianceId,
+    required this.allianceRank,
+    required this.captainName,
+    required this.partnerName,
+    required this.matchScores,
+    required this.totalScore,
+  });
+  
+  Map<String, int>? getMatchScore(int position) {
+    return matchScores[position];
+  }
+  
+  String get allianceName => 'Alliance #$allianceRank';
+}
+
+// Alliance standing for overview
 class AllianceStanding {
   final int allianceId;
   final int allianceRank;
@@ -65,6 +108,7 @@ class AllianceStanding {
   });
 }
 
+// Champion standing for battle of champions
 class ChampionStanding {
   final int allianceId;
   final int allianceRank;
@@ -93,24 +137,25 @@ class Standings extends StatefulWidget {
   State<Standings> createState() => _StandingsState();
 }
 
-class _StandingsState extends State<Standings>
-    with TickerProviderStateMixin {
+class _StandingsState extends State<Standings> with TickerProviderStateMixin {
   TabController? _tabController;
   List<Map<String, dynamic>> _categories = [];
   Map<int, List<Map<String, dynamic>>> _standingsByCategory = {};
 
   // Store selected type per category
-  Map<int, StandingType> _selectedTypeByCategory = {};
+  final Map<int, StandingType> _selectedTypeByCategory = {};
   
   // Store data per category
-  Map<int, List<AllianceStanding>> _allianceStandingsByCategory = {};
-  Map<int, List<ChampionStanding>> _championStandingsByCategory = {};
-  Map<int, bool> _isLoadingAllianceByCategory = {};
+  final Map<int, List<AllianceStanding>> _allianceStandingsByCategory = {};
+  final Map<int, List<ChampionStanding>> _championStandingsByCategory = {};
+  final Map<int, List<ChampionshipAllianceStanding>> _championshipStandingsByCategory = {};
+  final Map<int, bool> _isLoadingAllianceByCategory = {};
+  final Map<int, int> _championshipMatchesPerAlliance = {};
 
   bool _isLoading = true;
   bool _isInitializingScores = false;
   DateTime? _lastUpdated;
-  Timer?    _autoRefreshTimer;
+  Timer? _autoRefreshTimer;
   String _lastDataSignature = '';
 
   @override
@@ -138,7 +183,7 @@ class _StandingsState extends State<Standings>
     try {
       final conn = await DBHelper.getConnection();
       final result = await conn.execute(
-          "SELECT score_id, team_id, round_id, score_totalscore FROM tbl_score ORDER BY score_id");
+          "SELECT score_id, team_id, round_id, score_totalscore, score_individual, score_alliance, score_violation FROM tbl_score ORDER BY score_id");
       final rows = result.rows.map((r) => r.assoc()).toList();
       final signature = _buildSignature(rows);
 
@@ -149,8 +194,7 @@ class _StandingsState extends State<Standings>
     } catch (_) {}
   }
 
-  Future<void> _loadAllianceStandings(int categoryId) async {
-    // Mark as loading for this category
+  Future<void> _loadChampionshipStandings(int categoryId) async {
     setState(() {
       _isLoadingAllianceByCategory[categoryId] = true;
     });
@@ -158,7 +202,144 @@ class _StandingsState extends State<Standings>
     try {
       final conn = await DBHelper.getConnection();
       
-      // Check if table exists
+      // Check if tables exist
+      try {
+        await conn.execute("SELECT 1 FROM tbl_alliance_selections LIMIT 1");
+      } catch (e) {
+        setState(() {
+          _championshipStandingsByCategory[categoryId] = [];
+          _isLoadingAllianceByCategory[categoryId] = false;
+        });
+        return;
+      }
+      
+      // Get championship settings to know matches per alliance
+      int matchesPerAlliance = 1;
+      try {
+        final settingsResult = await conn.execute("""
+          SELECT matches_per_alliance 
+          FROM tbl_championship_settings 
+          WHERE category_id = :catId
+        """, {"catId": categoryId});
+        
+        if (settingsResult.rows.isNotEmpty) {
+          matchesPerAlliance = int.parse(settingsResult.rows.first.assoc()['matches_per_alliance']?.toString() ?? '1');
+        }
+      } catch (e) {
+        print("⚠️ Could not load championship settings: $e");
+      }
+      
+      setState(() {
+        _championshipMatchesPerAlliance[categoryId] = matchesPerAlliance;
+      });
+      
+      // Get all alliances
+      final alliancesResult = await conn.execute("""
+        SELECT 
+          a.alliance_id,
+          a.selection_round as alliance_rank,
+          COALESCE(t1.team_name, 'Unknown') as captain_name,
+          COALESCE(t2.team_name, 'Unknown') as partner_name
+        FROM tbl_alliance_selections a
+        LEFT JOIN tbl_team t1 ON a.captain_team_id = t1.team_id
+        LEFT JOIN tbl_team t2 ON a.partner_team_id = t2.team_id
+        WHERE a.category_id = :catId
+        ORDER BY a.selection_round
+      """, {"catId": categoryId});
+      
+      final alliances = alliancesResult.rows.map((r) => r.assoc()).toList();
+      
+      if (alliances.isEmpty) {
+        setState(() {
+          _championshipStandingsByCategory[categoryId] = [];
+          _isLoadingAllianceByCategory[categoryId] = false;
+        });
+        return;
+      }
+      
+      // Get championship matches
+      final matchesResult = await conn.execute("""
+        SELECT 
+          match_id,
+          match_round,
+          match_position,
+          alliance1_id,
+          alliance2_id,
+          status
+        FROM tbl_championship_schedule
+        WHERE category_id = :catId
+        ORDER BY match_round, match_position
+      """, {"catId": categoryId});
+      
+      final matches = matchesResult.rows.map((r) => r.assoc()).toList();
+      
+      // Create standings map
+      final Map<int, ChampionshipAllianceStanding> standingMap = {};
+      
+      for (final alliance in alliances) {
+        final allianceId = int.parse(alliance['alliance_id'].toString());
+        final allianceRank = int.parse(alliance['alliance_rank'].toString());
+        
+        standingMap[allianceId] = ChampionshipAllianceStanding(
+          allianceId: allianceId,
+          allianceRank: allianceRank,
+          captainName: alliance['captain_name'].toString(),
+          partnerName: alliance['partner_name'].toString(),
+          matchScores: {},
+          totalScore: 0,
+        );
+      }
+      
+      // For now, initialize with zero scores
+      // In the future, this will come from actual score entry
+      for (final match in matches) {
+        final position = int.parse(match['match_position'].toString());
+        final alliance1Id = int.parse(match['alliance1_id'].toString());
+        final alliance2Id = int.parse(match['alliance2_id'].toString());
+        
+        if (standingMap.containsKey(alliance1Id) && alliance1Id != 0) {
+          standingMap[alliance1Id]!.matchScores[position] = {
+            'score': 0,
+            'violation': 0,
+            'total': 0,
+          };
+        }
+        
+        if (standingMap.containsKey(alliance2Id) && alliance2Id != 0) {
+          standingMap[alliance2Id]!.matchScores[position] = {
+            'score': 0,
+            'violation': 0,
+            'total': 0,
+          };
+        }
+      }
+      
+      // Convert to list and sort by alliance rank
+      final standings = standingMap.values.toList()
+        ..sort((a, b) => a.allianceRank.compareTo(b.allianceRank));
+      
+      setState(() {
+        _championshipStandingsByCategory[categoryId] = standings;
+        _isLoadingAllianceByCategory[categoryId] = false;
+      });
+      
+    } catch (e) {
+      print("Error loading championship standings: $e");
+      setState(() {
+        _championshipStandingsByCategory[categoryId] = [];
+        _isLoadingAllianceByCategory[categoryId] = false;
+      });
+    }
+  }
+
+  Future<void> _loadAllianceStandings(int categoryId) async {
+    setState(() {
+      _isLoadingAllianceByCategory[categoryId] = true;
+    });
+    
+    try {
+      final conn = await DBHelper.getConnection();
+      
       try {
         await conn.execute("SELECT 1 FROM tbl_alliance_selections LIMIT 1");
       } catch (e) {
@@ -169,7 +350,6 @@ class _StandingsState extends State<Standings>
         return;
       }
       
-      // Get alliances for this specific category
       final alliancesResult = await conn.execute("""
         SELECT 
           a.alliance_id,
@@ -195,7 +375,6 @@ class _StandingsState extends State<Standings>
         return;
       }
       
-      // Build standings
       final List<AllianceStanding> standings = [];
       for (int i = 0; i < alliances.length; i++) {
         final alliance = alliances[i];
@@ -375,9 +554,9 @@ class _StandingsState extends State<Standings>
           if (exists == 0) {
             await conn.execute("""
               INSERT INTO tbl_score
-                (team_id, round_id, score_totalscore, score_totalduration)
+                (team_id, round_id, score_totalscore, score_individual, score_alliance, score_violation, score_totalduration)
               VALUES
-                (:teamId, :roundId, 0, '00:00')
+                (:teamId, :roundId, 0, 0, 0, 0, '00:00')
             """, {
               "teamId": teamId,
               "roundId": roundId,
@@ -459,85 +638,21 @@ class _StandingsState extends State<Standings>
     }
   }
 
-  Future<void> _updateScore(int teamId, int roundId, int newScore) async {
-    try {
-      final conn = await DBHelper.getConnection();
-      
-      final checkResult = await conn.execute("""
-        SELECT COUNT(*) as cnt 
-        FROM tbl_score 
-        WHERE team_id = :teamId AND round_id = :roundId
-      """, {"teamId": teamId, "roundId": roundId});
-      
-      final exists = int.tryParse(
-        checkResult.rows.first.assoc()['cnt']?.toString() ?? '0'
-      ) ?? 0;
-      
-      if (exists > 0) {
-        await conn.execute("""
-          UPDATE tbl_score 
-          SET score_totalscore = :score
-          WHERE team_id = :teamId AND round_id = :roundId
-        """, {
-          "score": newScore,
-          "teamId": teamId,
-          "roundId": roundId,
-        });
-      } else {
-        await conn.execute("""
-          INSERT INTO tbl_score
-            (team_id, round_id, score_totalscore, score_totalduration)
-          VALUES
-            (:teamId, :roundId, :score, '00:00')
-        """, {
-          "teamId": teamId,
-          "roundId": roundId,
-          "score": newScore,
-        });
-      }
-      
-      setState(() {
-        for (final catStandings in _standingsByCategory.values) {
-          for (final team in catStandings) {
-            if (team['team_id'] == teamId) {
-              final rounds = team['rounds'] as Map<int, Map<String, dynamic>>;
-              if (rounds.containsKey(roundId)) {
-                rounds[roundId]!['score'] = newScore;
-              } else {
-                rounds[roundId] = {
-                  'score': newScore,
-                  'duration': '00:00',
-                };
-              }
-              int total = 0;
-              rounds.forEach((_, data) {
-                total += (data['score'] as int? ?? 0);
-              });
-              team['totalScore'] = total;
-            }
-          }
-        }
-      });
-      
-    } catch (e) {
-      print("Error updating score: $e");
-    }
-  }
-
-  void _showScoreEditDialog(
-    int teamId, 
-    String teamName, 
-    int roundId, 
-    int currentScore
-  ) {
-    final controller = TextEditingController(text: currentScore.toString());
+  // Dialog for championship match scores
+  void _showChampionshipScoreDialog({
+    required ChampionshipAllianceStanding standing,
+    required int matchPosition,
+    required Map<String, int>? currentScore,
+  }) {
+    final scoreController = TextEditingController(text: currentScore?['score']?.toString() ?? '0');
+    final violationController = TextEditingController(text: currentScore?['violation']?.toString() ?? '0');
     
     showDialog(
       context: context,
       builder: (ctx) => Dialog(
         backgroundColor: Colors.transparent,
         child: Container(
-          width: 320,
+          width: 400,
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
             gradient: const LinearGradient(
@@ -547,7 +662,7 @@ class _StandingsState extends State<Standings>
             ),
             borderRadius: BorderRadius.circular(20),
             border: Border.all(
-                color: const Color(0xFF00CFFF).withOpacity(0.4), width: 1.5),
+                color: const Color(0xFFFFD700).withOpacity(0.4), width: 1.5),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -557,24 +672,23 @@ class _StandingsState extends State<Standings>
                   Container(
                     padding: const EdgeInsets.all(8),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF00CFFF).withOpacity(0.1),
+                      color: const Color(0xFFFFD700).withOpacity(0.1),
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: const Icon(Icons.edit_note_rounded,
-                        color: Color(0xFF00CFFF), size: 20),
+                    child: const Icon(Icons.emoji_events,
+                        color: Color(0xFFFFD700), size: 20),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(teamName,
+                        Text(standing.allianceName,
                             style: const TextStyle(
                                 color: Colors.white,
                                 fontWeight: FontWeight.bold,
-                                fontSize: 14),
-                            overflow: TextOverflow.ellipsis),
-                        Text('Round $roundId',
+                                fontSize: 14)),
+                        Text('Match $matchPosition • Championship',
                             style: TextStyle(
                                 color: Colors.white.withOpacity(0.5),
                                 fontSize: 11)),
@@ -584,37 +698,45 @@ class _StandingsState extends State<Standings>
                 ],
               ),
               const SizedBox(height: 20),
-              TextField(
-                controller: controller,
-                keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: Color(0xFF00CFFF),
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold),
-                decoration: InputDecoration(
-                  labelText: 'SCORE',
-                  labelStyle: TextStyle(
-                      color: Colors.white.withOpacity(0.5), fontSize: 12),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(
-                        color: const Color(0xFF00CFFF).withOpacity(0.3)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(
-                        color: const Color(0xFF00CFFF).withOpacity(0.3)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(
-                        color: Color(0xFF00CFFF), width: 2),
-                  ),
+              
+              _buildScoreField(
+                label: 'ALLIANCE SCORE',
+                controller: scoreController,
+                color: const Color(0xFFFFD700),
+                hint: '0',
+              ),
+              const SizedBox(height: 16),
+              
+              _buildScoreField(
+                label: 'VIOLATION (-)',
+                controller: violationController,
+                color: Colors.redAccent,
+                hint: '0',
+              ),
+              const SizedBox(height: 8),
+              
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFD700).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.info_outline, color: Color(0xFFFFD700), size: 14),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Total = Alliance Score - Violation',
+                        style: TextStyle(color: Colors.white70, fontSize: 11),
+                      ),
+                    ),
+                  ],
                 ),
               ),
+              
               const SizedBox(height: 20),
+              
               Row(
                 children: [
                   Expanded(
@@ -629,12 +751,34 @@ class _StandingsState extends State<Standings>
                   Expanded(
                     child: ElevatedButton(
                       onPressed: () {
-                        final newScore = int.tryParse(controller.text.trim()) ?? 0;
-                        _updateScore(teamId, roundId, newScore);
+                        final score = int.tryParse(scoreController.text.trim()) ?? 0;
+                        final violation = int.tryParse(violationController.text.trim()) ?? 0;
+                        
+                        setState(() {
+                          standing.matchScores[matchPosition] = {
+                            'score': score,
+                            'violation': violation,
+                            'total': score - violation,
+                          };
+                          
+                          standing.totalScore = 0;
+                          standing.matchScores.forEach((_, data) {
+                            standing.totalScore += (data['score']! - data['violation']!);
+                          });
+                        });
+                        
                         Navigator.pop(ctx);
+                        
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('✅ Score saved'),
+                            backgroundColor: Colors.green,
+                            duration: Duration(seconds: 1),
+                          ),
+                        );
                       },
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF00CFFF),
+                        backgroundColor: const Color(0xFFFFD700),
                         foregroundColor: Colors.black,
                         shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(8)),
@@ -651,6 +795,49 @@ class _StandingsState extends State<Standings>
     );
   }
 
+  Widget _buildScoreField({
+    required String label,
+    required TextEditingController controller,
+    required Color color,
+    required String hint,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label,
+            style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.bold,
+                fontSize: 11,
+                letterSpacing: 0.5)),
+        const SizedBox(height: 4),
+        TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.bold),
+          decoration: InputDecoration(
+            hintText: hint,
+            hintStyle: TextStyle(color: color.withOpacity(0.3), fontSize: 18),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: BorderSide(color: color.withOpacity(0.3)),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: BorderSide(color: color.withOpacity(0.3)),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: BorderSide(color: color, width: 2),
+            ),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          ),
+        ),
+      ],
+    );
+  }
+
   Future<void> _loadData({bool initial = false}) async {
     if (initial) setState(() => _isLoading = true);
 
@@ -660,7 +847,24 @@ class _StandingsState extends State<Standings>
 
       for (final cat in categories) {
         final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
-        final rows = await DBHelper.getScoresByCategory(catId);
+        
+        final conn = await DBHelper.getConnection();
+        final scoreResult = await conn.execute("""
+          SELECT 
+            team_id, 
+            round_id, 
+            score_totalscore,
+            score_individual,
+            score_alliance,
+            score_violation,
+            score_totalduration 
+          FROM tbl_score 
+          WHERE team_id IN (
+            SELECT team_id FROM tbl_team WHERE category_id = :catId
+          )
+        """, {"catId": catId});
+        
+        final rows = scoreResult.rows.map((r) => r.assoc()).toList();
 
         final Map<int, Map<String, dynamic>> teamMap = {};
         
@@ -670,7 +874,7 @@ class _StandingsState extends State<Standings>
           teamMap[teamId] = {
             'team_id': teamId,
             'team_name': team['team_name'] ?? '',
-            'rounds': <int, Map<String, dynamic>>{},
+            'rounds': <int, RoundScore>{},
             'totalScore': 0,
           };
         }
@@ -679,15 +883,22 @@ class _StandingsState extends State<Standings>
         for (final row in rows) {
           final teamId = int.tryParse(row['team_id'].toString()) ?? 0;
           final roundId = int.tryParse(row['round_id']?.toString() ?? '0') ?? 0;
-          final score = int.tryParse(row['score_totalscore'].toString()) ?? 0;
+          final totalScore = int.tryParse(row['score_totalscore'].toString()) ?? 0;
+          final individualScore = int.tryParse(row['score_individual']?.toString() ?? '0') ?? 0;
+          final allianceScore = int.tryParse(row['score_alliance']?.toString() ?? '0') ?? 0;
+          final violation = int.tryParse(row['score_violation']?.toString() ?? '0') ?? 0;
           final duration = row['score_totalduration']?.toString() ?? '00:00';
 
           if (teamMap.containsKey(teamId)) {
-            teamMap[teamId]!['rounds'][roundId] = {
-              'score': score,
-              'duration': duration,
-            };
-            teamMap[teamId]!['totalScore'] = (teamMap[teamId]!['totalScore'] as int) + score;
+            final roundScore = RoundScore(
+              individualScore: individualScore,
+              allianceScore: allianceScore,
+              violation: violation,
+              duration: duration,
+            );
+            
+            teamMap[teamId]!['rounds'][roundId] = roundScore;
+            teamMap[teamId]!['totalScore'] = (teamMap[teamId]!['totalScore'] as int) + totalScore;
             
             if (roundId > maxRoundFound) maxRoundFound = roundId;
           }
@@ -696,7 +907,7 @@ class _StandingsState extends State<Standings>
         int maxRounds = 0;
         
         try {
-          final settingsResult = await (await DBHelper.getConnection()).execute("""
+          final settingsResult = await conn.execute("""
             SELECT matches_per_team 
             FROM tbl_category_settings 
             WHERE category_id = :catId
@@ -708,20 +919,6 @@ class _StandingsState extends State<Standings>
         } catch (e) {}
         
         if (maxRounds == 0 && maxRoundFound > 0) maxRounds = maxRoundFound;
-        
-        if (maxRounds == 0 && teams.isNotEmpty) {
-          final roundCheck = await (await DBHelper.getConnection()).execute("""
-            SELECT COUNT(DISTINCT round_id) as round_count
-            FROM tbl_teamschedule ts
-            JOIN tbl_team t ON ts.team_id = t.team_id
-            WHERE t.category_id = :catId
-          """, {"catId": catId});
-          
-          if (roundCheck.rows.isNotEmpty) {
-            final roundCount = int.tryParse(roundCheck.rows.first.assoc()['round_count']?.toString() ?? '0') ?? 0;
-            if (roundCount > 0) maxRounds = roundCount;
-          }
-        }
         
         if (maxRounds == 0 && teams.isNotEmpty) maxRounds = 4;
 
@@ -743,7 +940,6 @@ class _StandingsState extends State<Standings>
 
         standingsByCategory[catId] = standings;
         
-        // Initialize selected type for this category if not set
         if (!_selectedTypeByCategory.containsKey(catId)) {
           _selectedTypeByCategory[catId] = StandingType.qualification;
         }
@@ -767,7 +963,7 @@ class _StandingsState extends State<Standings>
       
       final conn = await DBHelper.getConnection();
       final result = await conn.execute(
-          "SELECT score_id, team_id, round_id, score_totalscore FROM tbl_score ORDER BY score_id");
+          "SELECT score_id, team_id, round_id, score_totalscore, score_individual, score_alliance, score_violation FROM tbl_score ORDER BY score_id");
       final rows = result.rows.map((r) => r.assoc()).toList();
       _lastDataSignature = _buildSignature(rows);
       
@@ -848,9 +1044,9 @@ class _StandingsState extends State<Standings>
 
     bool hasScores = false;
     for (final row in rows) {
-      final rounds = row['rounds'] as Map<int, Map<String, dynamic>>;
-      for (final roundData in rounds.values) {
-        if ((roundData['score'] as int? ?? 0) > 0) {
+      final rounds = row['rounds'] as Map<int, RoundScore>;
+      for (final roundScore in rounds.values) {
+        if (roundScore.totalScore > 0) {
           hasScores = true;
           break;
         }
@@ -858,12 +1054,10 @@ class _StandingsState extends State<Standings>
       if (hasScores) break;
     }
 
-    // Get the selected type for this category
     StandingType selectedType = _selectedTypeByCategory[categoryId] ?? StandingType.qualification;
 
     return Column(
       children: [
-        // Title bar with dropdown replacing ROBOVENTURE
         Container(
           width: double.infinity,
           color: const Color(0xFF2D0E7A),
@@ -871,7 +1065,6 @@ class _StandingsState extends State<Standings>
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              // LEFT SIDE: Dropdown (replaces ROBOVENTURE)
               Container(
                 constraints: const BoxConstraints(minWidth: 250),
                 child: DropdownButton<StandingType>(
@@ -894,7 +1087,7 @@ class _StandingsState extends State<Standings>
                       });
                       
                       if (newValue == StandingType.championship) {
-                        _loadAllianceStandings(categoryId);
+                        _loadChampionshipStandings(categoryId);
                       } else if (newValue == StandingType.battleOfChampions) {
                         _loadChampionStandings(categoryId);
                       }
@@ -940,7 +1133,6 @@ class _StandingsState extends State<Standings>
                 ),
               ),
               
-              // MIDDLE: Category name (original)
               Text(
                 categoryName,
                 style: const TextStyle(
@@ -951,7 +1143,6 @@ class _StandingsState extends State<Standings>
                 ),
               ),
               
-              // RIGHT SIDE: All buttons (original)
               Row(
                 children: [
                   if (selectedType == StandingType.qualification && rows.isNotEmpty && !hasScores)
@@ -1054,11 +1245,10 @@ class _StandingsState extends State<Standings>
           ),
         ),
 
-        // Content based on selection
         if (selectedType == StandingType.qualification)
           _buildQualificationTable(rows, maxRounds)
         else if (selectedType == StandingType.championship)
-          _buildChampionshipView(categoryId)
+          _buildChampionshipTable(categoryId)
         else
           _buildBattleOfChampionsView(categoryId),
       ],
@@ -1069,23 +1259,85 @@ class _StandingsState extends State<Standings>
     return Expanded(
       child: Column(
         children: [
-          // Table header
           Container(
             color: const Color(0xFF5C2ECC),
-            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
             child: Row(
               children: [
                 _headerCell('RANK', flex: 1),
                 _headerCell('TEAM ID', flex: 2),
                 _headerCell('TEAM NAME', flex: 3),
                 ...List.generate(maxRounds, (i) => 
-                  _headerCell('ROUND ${i + 1}', flex: 2, center: true)),
+                  Expanded(
+                    flex: 4,
+                    child: Center(
+                      child: Text(
+                        'ROUND ${i + 1}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
                 _headerCell('TOTAL', flex: 2, center: true),
               ],
             ),
           ),
+          
+          Container(
+            color: const Color(0xFF4A1A9C),
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+            child: Row(
+              children: [
+                const Expanded(flex: 1, child: SizedBox()),
+                const Expanded(flex: 2, child: SizedBox()),
+                const Expanded(flex: 3, child: SizedBox()),
+                ...List.generate(maxRounds, (i) => 
+                  Expanded(
+                    flex: 4,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        Expanded(
+                          child: Center(
+                            child: Text('IND',
+                                style: TextStyle(
+                                    color: const Color(0xFF00CFFF).withOpacity(0.9),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold)),
+                          ),
+                        ),
+                        Expanded(
+                          child: Center(
+                            child: Text('ALL',
+                                style: TextStyle(
+                                    color: const Color(0xFFFFD700).withOpacity(0.9),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold)),
+                          ),
+                        ),
+                        Expanded(
+                          child: Center(
+                            child: Text('VIO',
+                                style: TextStyle(
+                                    color: Colors.redAccent.withOpacity(0.9),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const Expanded(flex: 2, child: SizedBox()),
+              ],
+            ),
+          ),
 
-          // Rows
           Expanded(
             child: rows.isEmpty
                 ? const Center(
@@ -1097,70 +1349,151 @@ class _StandingsState extends State<Standings>
                     itemBuilder: (context, index) {
                       final row = rows[index];
                       final rank = row['rank'] as int;
-                      final teamId = row['team_id'];
+                      final teamId = row['team_id'] as int;
                       final teamName = row['team_name'] as String;
-                      final rounds = row['rounds'] as Map<int, Map<String, dynamic>>;
+                      final rounds = row['rounds'] as Map<int, RoundScore>;
                       final total = row['totalScore'] as int;
                       final isEven = index % 2 == 0;
 
                       return Container(
                         color: isEven ? const Color(0xFF1E0E5A) : const Color(0xFF160A42),
-                        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
+                        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
                         child: Row(
                           children: [
                             Expanded(flex: 1, child: Text('$rank', 
                                 style: TextStyle(color: _rankColor(rank), fontWeight: FontWeight.bold))),
+                            
                             Expanded(flex: 2, child: Text('C${teamId.toString().padLeft(3, '0')}R', 
                                 style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
+                            
                             Expanded(flex: 3, child: Text(teamName, 
                                 style: const TextStyle(color: Colors.white), overflow: TextOverflow.ellipsis)),
+                            
                             ...List.generate(maxRounds, (i) {
-                              final roundData = rounds[i + 1];
-                              final score = roundData?['score'] ?? 0;
+                              final roundScore = rounds[i + 1] ?? RoundScore();
                               final hasScore = rounds.containsKey(i + 1);
                               
                               return Expanded(
-                                flex: 2,
-                                child: GestureDetector(
-                                  onTap: () => _showScoreEditDialog(teamId, teamName, i + 1, score),
-                                  child: Container(
-                                    margin: const EdgeInsets.symmetric(horizontal: 4),
-                                    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-                                    decoration: BoxDecoration(
-                                      color: hasScore ? const Color(0xFF00CFFF).withOpacity(0.1) : Colors.transparent,
-                                      borderRadius: BorderRadius.circular(6),
-                                      border: Border.all(
-                                        color: hasScore ? const Color(0xFF00CFFF).withOpacity(0.2) : Colors.transparent,
-                                      ),
+                                flex: 4,
+                                child: Container(
+                                  margin: const EdgeInsets.symmetric(horizontal: 2),
+                                  decoration: BoxDecoration(
+                                    border: Border.all(
+                                      color: hasScore 
+                                          ? const Color(0xFFFFD700).withOpacity(0.3)
+                                          : Colors.white.withOpacity(0.1),
+                                      width: 1,
                                     ),
-                                    child: Column(
-                                      children: [
-                                        Text(
-                                          score > 0 ? '$score' : (hasScore ? '0' : '—'),
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(
-                                            color: score > 0 || hasScore ? Colors.white : Colors.white24,
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 18,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                    children: [
+                                      Expanded(
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(vertical: 6),
+                                          decoration: BoxDecoration(
+                                            color: hasScore && roundScore.individualScore > 0
+                                                ? const Color(0xFF00CFFF).withOpacity(0.15)
+                                                : null,
+                                            borderRadius: const BorderRadius.horizontal(
+                                                left: Radius.circular(3)),
+                                          ),
+                                          child: Center(
+                                            child: Text(
+                                              roundScore.individualScore > 0 
+                                                  ? '${roundScore.individualScore}'
+                                                  : (hasScore ? '0' : '—'),
+                                              style: TextStyle(
+                                                color: roundScore.individualScore > 0 || hasScore
+                                                    ? const Color(0xFF00CFFF)
+                                                    : Colors.white24,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 13,
+                                              ),
+                                            ),
                                           ),
                                         ),
-                                        if (hasScore)
-                                          const Icon(Icons.edit_note_rounded,
-                                              color: Color(0xFF00CFFF), size: 12),
-                                      ],
-                                    ),
+                                      ),
+                                      
+                                      Expanded(
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(vertical: 6),
+                                          decoration: BoxDecoration(
+                                            color: hasScore && roundScore.allianceScore > 0
+                                                ? const Color(0xFFFFD700).withOpacity(0.15)
+                                                : null,
+                                            border: Border(
+                                              left: BorderSide(color: Colors.white.withOpacity(0.1), width: 1),
+                                              right: BorderSide(color: Colors.white.withOpacity(0.1), width: 1),
+                                            ),
+                                          ),
+                                          child: Center(
+                                            child: Text(
+                                              roundScore.allianceScore > 0 
+                                                  ? '${roundScore.allianceScore}'
+                                                  : (hasScore ? '0' : '—'),
+                                              style: TextStyle(
+                                                color: roundScore.allianceScore > 0 || hasScore
+                                                    ? const Color(0xFFFFD700)
+                                                    : Colors.white24,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 13,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      
+                                      Expanded(
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(vertical: 6),
+                                          decoration: BoxDecoration(
+                                            color: roundScore.violation > 0
+                                                ? Colors.red.withOpacity(0.15)
+                                                : null,
+                                            borderRadius: const BorderRadius.horizontal(
+                                                right: Radius.circular(3)),
+                                          ),
+                                          child: Center(
+                                            child: Text(
+                                              roundScore.violation > 0 
+                                                  ? '${roundScore.violation}'
+                                                  : (hasScore ? '0' : '—'),
+                                              style: TextStyle(
+                                                color: roundScore.violation > 0
+                                                    ? Colors.redAccent
+                                                    : (hasScore ? Colors.white38 : Colors.white24),
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 13,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               );
                             }),
-                            Expanded(flex: 2, child: Column(
-                              children: [
-                                Text('$total', textAlign: TextAlign.center,
-                                    style: const TextStyle(color: Color(0xFFFFD700), fontWeight: FontWeight.bold, fontSize: 20)),
-                                Text(_bestDuration(rounds), textAlign: TextAlign.center,
-                                    style: const TextStyle(color: Colors.white60, fontSize: 11)),
-                              ],
-                            )),
+                            
+                            Expanded(
+                              flex: 2,
+                              child: Center(
+                                child: Column(
+                                  children: [
+                                    Text('$total',
+                                        style: const TextStyle(
+                                            color: Color(0xFFFFD700),
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 18)),
+                                    Text(_bestDuration(rounds),
+                                        style: const TextStyle(
+                                            color: Colors.white60, fontSize: 10)),
+                                  ],
+                                ),
+                              ),
+                            ),
                           ],
                         ),
                       );
@@ -1172,158 +1505,327 @@ class _StandingsState extends State<Standings>
     );
   }
 
-  Widget _buildChampionshipView(int categoryId) {
-    bool isLoading = _isLoadingAllianceByCategory[categoryId] ?? false;
-    List<AllianceStanding> standings = _allianceStandingsByCategory[categoryId] ?? [];
+  Widget _buildChampionshipTable(int categoryId) {
+  bool isLoading = _isLoadingAllianceByCategory[categoryId] ?? false;
+  List<ChampionshipAllianceStanding> standings = _championshipStandingsByCategory[categoryId] ?? [];
+  int matchesPerAlliance = _championshipMatchesPerAlliance[categoryId] ?? 1;
 
-    if (isLoading) {
-      return const Expanded(
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              CircularProgressIndicator(color: Color(0xFFFFD700)),
-              SizedBox(height: 16),
-              Text('Loading alliance standings...',
-                  style: TextStyle(color: Colors.white54)),
-            ],
-          ),
+  if (isLoading) {
+    return const Expanded(
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(color: Color(0xFFFFD700)),
+            SizedBox(height: 16),
+            Text('Loading championship standings...',
+                style: TextStyle(color: Colors.white54, fontSize: 14)),
+          ],
         ),
-      );
-    }
-    
-    if (standings.isEmpty) {
-      return Expanded(
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.emoji_events, size: 64, color: Colors.white.withOpacity(0.2)),
-              const SizedBox(height: 16),
-              const Text('No Alliances Formed Yet',
-                  style: TextStyle(color: Colors.white, fontSize: 18)),
-              const SizedBox(height: 8),
-              Text('Complete qualification and alliance selection first',
-                  style: TextStyle(color: Colors.white.withOpacity(0.5))),
-            ],
-          ),
-        ),
-      );
-    }
-    
+      ),
+    );
+  }
+  
+  if (standings.isEmpty) {
     return Expanded(
-      child: Column(
-        children: [
-          Container(
-            color: const Color(0xFF5C2ECC),
-            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
-            child: Row(
-              children: [
-                _headerCell('RANK', flex: 1),
-                _headerCell('ALLIANCE', flex: 2),
-                _headerCell('TEAMS', flex: 4),
-                _headerCell('STATUS', flex: 2, center: true),
-              ],
-            ),
-          ),
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: standings.length,
-              itemBuilder: (context, index) {
-                final standing = standings[index];
-                return Container(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: index % 2 == 0 ? const Color(0xFF1E0E5A) : const Color(0xFF160A42),
-                    borderRadius: BorderRadius.circular(12),
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.emoji_events, size: 64, color: Colors.white.withOpacity(0.2)),
+            const SizedBox(height: 16),
+            const Text('No Championship Data Yet',
+                style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            Text('Generate championship schedule first',
+                style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 14)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  return Expanded(
+    child: Column(
+      children: [
+        // Main header
+        Container(
+          color: const Color(0xFF5C2ECC),
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+          child: Row(
+            children: [
+              _headerCell('RANK', flex: 1),
+              _headerCell('ALLIANCE', flex: 1), // Reduced from 2 to 1
+              _headerCell('TEAMS', flex: 4), // Increased from 4 to 4.5 to compensate
+              ...List.generate(matchesPerAlliance, (i) => 
+                Expanded(
+                  flex: 3,
+                  child: Center(
+                    child: Text(
+                      'MATCH ${i + 1}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
                   ),
+                ),
+              ),
+              _headerCell('TOTAL', flex: 2, center: true),
+            ],
+          ),
+        ),
+        
+        // Sub-header with ALL and VIO
+        Container(
+          color: const Color(0xFF4A1A9C),
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+          child: Row(
+            children: [
+              const Expanded(flex: 1, child: SizedBox()), // RANK
+              const Expanded(flex: 1, child: SizedBox()), // ALLIANCE (reduced from 2 to 1)
+              const Expanded(flex: 4, child: SizedBox()), // TEAMS (increased from 4 to 4.5)
+              ...List.generate(matchesPerAlliance, (i) => 
+                Expanded(
+                  flex: 3,
                   child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
                       Expanded(
-                        flex: 1,
-                        child: Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: index == 0 
-                                ? const Color(0xFFFFD700).withOpacity(0.2)
-                                : index == 1
-                                    ? const Color(0xFFC0C0C0).withOpacity(0.2)
-                                    : index == 2
-                                        ? const Color(0xFFCD7F32).withOpacity(0.2)
-                                        : Colors.white.withOpacity(0.1),
-                          ),
-                          child: Center(
-                            child: Text(
-                              '#${standing.allianceRank}',
-                              style: TextStyle(
-                                color: index == 0 
-                                    ? const Color(0xFFFFD700)
-                                    : index == 1
-                                        ? const Color(0xFFC0C0C0)
-                                        : index == 2
-                                            ? const Color(0xFFCD7F32)
-                                            : Colors.white,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      Expanded(
-                        flex: 2,
-                        child: Text(
-                          'A${standing.allianceId.toString().padLeft(2, '0')}',
-                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                      Expanded(
-                        flex: 4,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: standing.teams.map((team) {
-                            return Text(
-                              '${team['team_name']} (${team['role']})',
-                              style: const TextStyle(color: Colors.white70, fontSize: 12),
-                            );
-                          }).toList(),
-                        ),
-                      ),
-                      Expanded(
-                        flex: 2,
                         child: Center(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: standing.status == 'active' 
-                                  ? Colors.green.withOpacity(0.2)
-                                  : Colors.orange.withOpacity(0.2),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Text(
-                              standing.status.toUpperCase(),
+                          child: Text('ALL',
                               style: TextStyle(
-                                color: standing.status == 'active' ? Colors.green : Colors.orange,
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
+                                  color: const Color(0xFFFFD700).withOpacity(0.9),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold)),
+                        ),
+                      ),
+                      Expanded(
+                        child: Center(
+                          child: Text('VIO',
+                              style: TextStyle(
+                                  color: Colors.redAccent.withOpacity(0.9),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold)),
                         ),
                       ),
                     ],
                   ),
-                );
-              },
-            ),
+                ),
+              ),
+              const Expanded(flex: 2, child: SizedBox()), // TOTAL
+            ],
           ),
-        ],
-      ),
-    );
-  }
+        ),
+
+        // Rows
+        Expanded(
+          child: ListView.builder(
+            itemCount: standings.length,
+            itemBuilder: (context, index) {
+              final standing = standings[index];
+              final isEven = index % 2 == 0;
+
+              return Container(
+                color: isEven ? const Color(0xFF1E0E5A) : const Color(0xFF160A42),
+                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                child: Row(
+                  children: [
+                    // Rank
+                    Expanded(
+                      flex: 1,
+                      child: Text(
+                        '${index + 1}',
+                        style: TextStyle(
+                          color: _rankColor(index + 1),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ),
+                    
+                    // Alliance - Reduced width
+                    Expanded(
+                      flex: 1, // Reduced from 2 to 1
+                      child: Text(
+                        '#${standing.allianceRank}',
+                        style: const TextStyle(
+                          color: Color(0xFFFFD700),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ),
+                    
+                    // Teams - Displayed as "CAPTAIN/PARTNER" with rounded square container
+                    // Now with more space to compensate
+                    Expanded(
+                      flex: 4, // Increased from 4 to 4.5
+                      child: Padding(
+                        padding: const EdgeInsets.only(right: 12), // Reduced from 16 to 12
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [
+                                const Color(0xFFFFD700).withOpacity(0.15),
+                                const Color(0xFF00CFFF).withOpacity(0.1),
+                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: const Color(0xFFFFD700).withOpacity(0.3),
+                              width: 1.5,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: const Color(0xFFFFD700).withOpacity(0.1),
+                                blurRadius: 6,
+                                spreadRadius: 0.5,
+                              ),
+                            ],
+                          ),
+                          child: Center(
+                            child: Text(
+                              '${standing.captainName.toUpperCase()} / ${standing.partnerName.toUpperCase()}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.3,
+                              ),
+                              textAlign: TextAlign.center,
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 2,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    
+                    // Match scores
+                    ...List.generate(matchesPerAlliance, (i) {
+                      final matchScore = standing.getMatchScore(i + 1);
+                      final hasScore = matchScore != null;
+                      
+                      return Expanded(
+                        flex: 3,
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 2),
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                              color: hasScore 
+                                  ? const Color(0xFFFFD700).withOpacity(0.3)
+                                  : Colors.white.withOpacity(0.1),
+                              width: 1,
+                            ),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              // Alliance Score (ALL)
+                              Expanded(
+                                child: GestureDetector(
+                                  onTap: () => _showChampionshipScoreDialog(
+                                    standing: standing,
+                                    matchPosition: i + 1,
+                                    currentScore: matchScore,
+                                  ),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(vertical: 8),
+                                    decoration: BoxDecoration(
+                                      color: hasScore && (matchScore?['score'] ?? 0) > 0
+                                          ? const Color(0xFFFFD700).withOpacity(0.15)
+                                          : null,
+                                      borderRadius: const BorderRadius.horizontal(
+                                          left: Radius.circular(3)),
+                                    ),
+                                    child: Center(
+                                      child: Text(
+                                        hasScore ? '${matchScore!['score']}' : '—',
+                                        style: TextStyle(
+                                          color: hasScore
+                                              ? const Color(0xFFFFD700)
+                                              : Colors.white24,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              
+                              // Violation (VIO)
+                              Expanded(
+                                child: GestureDetector(
+                                  onTap: () => _showChampionshipScoreDialog(
+                                    standing: standing,
+                                    matchPosition: i + 1,
+                                    currentScore: matchScore,
+                                  ),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(vertical: 8),
+                                    decoration: BoxDecoration(
+                                      color: hasScore && (matchScore?['violation'] ?? 0) > 0
+                                          ? Colors.red.withOpacity(0.15)
+                                          : null,
+                                      borderRadius: const BorderRadius.horizontal(
+                                          right: Radius.circular(3)),
+                                    ),
+                                    child: Center(
+                                      child: Text(
+                                        hasScore ? '${matchScore!['violation']}' : '—',
+                                        style: TextStyle(
+                                          color: hasScore
+                                              ? Colors.redAccent
+                                              : Colors.white24,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    }),
+                    
+                    // Total Score
+                    Expanded(
+                      flex: 2,
+                      child: Center(
+                        child: Text(
+                          '${standing.totalScore}',
+                          style: const TextStyle(
+                            color: Color(0xFFFFD700),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 18,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+
+
 
   Widget _buildBattleOfChampionsView(int categoryId) {
     bool isLoading = _isLoadingAllianceByCategory[categoryId] ?? false;
@@ -1416,7 +1918,7 @@ class _StandingsState extends State<Standings>
                           '• ${team['team_name']} (${team['role']})',
                           style: const TextStyle(color: Colors.white70, fontSize: 12),
                         );
-                      }).toList(),
+                      }),
                     ],
                   ),
                 ),
@@ -1452,15 +1954,14 @@ class _StandingsState extends State<Standings>
     }
   }
 
-  String _bestDuration(Map<int, Map<String, dynamic>> rounds) {
+  String _bestDuration(Map<int, RoundScore> rounds) {
     if (rounds.isEmpty) return '00:00';
     int bestScore = -1;
     String bestDuration = '00:00';
-    for (final r in rounds.values) {
-      final s = r['score'] as int? ?? 0;
-      if (s > bestScore) {
-        bestScore = s;
-        bestDuration = r['duration'] as String? ?? '00:00';
+    for (final roundScore in rounds.values) {
+      if (roundScore.totalScore > bestScore) {
+        bestScore = roundScore.totalScore;
+        bestDuration = roundScore.duration;
       }
     }
     return bestDuration;

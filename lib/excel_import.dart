@@ -53,8 +53,9 @@ class _ImportRow {
     if (schoolName.isEmpty)       return 'School name is required';
     if (mentorName.isEmpty)       return 'Mentor name is required';
     if (mentorContact.isEmpty)    return 'Mentor contact is required';
-    if (!RegExp(r'^\d{11}$').hasMatch(mentorContact))
-                                  return 'Contact must be exactly 11 digits';
+    if (!RegExp(r'^\d{11}$').hasMatch(mentorContact)) {
+      return 'Contact must be exactly 11 digits';
+    }
     if (p1Name.isEmpty)           return 'Player 1 name is required';
     if (p1Birthdate.isEmpty)      return 'Player 1 birthdate is required';
     if (p2Name.isEmpty)           return 'Player 2 name is required';
@@ -1192,8 +1193,9 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
 
   Widget _buildRow(_ImportRow row, int index) {
     Color rowBg;
-    if (row.isOk)           rowBg = const Color(0xFF00FF88).withOpacity(0.04);
-    else if (row.hasError)  rowBg = Colors.red.withOpacity(0.05);
+    if (row.isOk) {
+      rowBg = const Color(0xFF00FF88).withOpacity(0.04);
+    } else if (row.hasError)  rowBg = Colors.red.withOpacity(0.05);
     else if (row.isSkipped) rowBg = Colors.orange.withOpacity(0.05);
     else                    rowBg = index % 2 == 0
         ? const Color(0xFF130840) : const Color(0xFF0F0630);
