@@ -477,134 +477,109 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
 
   // Fixed 1v1 match generation with teamMap passed as parameter
     // Fixed 1v1 match generation to ensure all teams play required number of matches
-  List<Map<String, dynamic>> _generateOneVsOneMatches({
-    required List<int> teamIds,
-    required int matchesPerTeam,
-    required Map<int, Map<String, dynamic>> teamMap,
-  }) {
-    final random = Random();
-    final matches = <Map<String, dynamic>>[];
-    final teamCount = teamIds.length;
-    
-    // Calculate total matches needed
-    final totalMatches = (teamCount * matchesPerTeam) ~/ 2;
-    
-    print("\n=== GENERATING 1v1 MATCHES ===");
-    print("Teams: $teamCount, Matches per team: $matchesPerTeam");
-    print("Total matches needed: $totalMatches");
-    
-    // Track appearances per team
-    final appearances = <int, int>{};
-    for (final teamId in teamIds) {
-      appearances[teamId] = 0;
-    }
-    
-    // Track which teams have played each other
-    final playedPairs = <String, int>{};
-    
-    // Keep generating until all teams have their required matches
-    int round = 1;
-    int maxAttempts = 1000; // Prevent infinite loop
-    int attempts = 0;
-    
-    while (matches.length < totalMatches && attempts < maxAttempts) {
-      attempts++;
-      
-      print("\n--- Round $round (Match ${matches.length + 1}/$totalMatches) ---");
-      
-      // Find teams that still need matches
-      List<int> availableTeams = [];
-      for (final teamId in teamIds) {
-        if (appearances[teamId]! < matchesPerTeam) {
-          availableTeams.add(teamId);
-        }
-      }
-      
-      if (availableTeams.length < 2) {
-        print("Not enough teams available to create more matches");
-        break;
-      }
-      
-      // Shuffle for randomness
-      availableTeams.shuffle(random);
-      
-      // Try to create a match with the first two teams
-      bool matchCreated = false;
-      
-      for (int i = 0; i < availableTeams.length - 1 && !matchCreated; i++) {
-        for (int j = i + 1; j < availableTeams.length && !matchCreated; j++) {
-          final team1 = availableTeams[i];
-          final team2 = availableTeams[j];
-          
-          // Check if these teams can play each other
-          final pairKey = team1 < team2 ? '$team1-$team2' : '$team2-$team1';
-          final timesPlayed = playedPairs[pairKey] ?? 0;
-          
-          // Teams can play each other at most once
-          if (timesPlayed == 0) {
-            // Create the match
-            matches.add({
-              'team1': team1,
-              'team2': team2,
-            });
-            
-            // Update appearances
-            appearances[team1] = appearances[team1]! + 1;
-            appearances[team2] = appearances[team2]! + 1;
-            
-            // Record that these teams have played
-            playedPairs[pairKey] = 1;
-            
-            matchCreated = true;
-            
-            final team1Name = teamMap.containsKey(team1) ? teamMap[team1]!['team_name'] : 'Team $team1';
-            final team2Name = teamMap.containsKey(team2) ? teamMap[team2]!['team_name'] : 'Team $team2';
-            print("Match ${matches.length}: $team1Name vs $team2Name");
-            print("  Team $team1 now has ${appearances[team1]} matches");
-            print("  Team $team2 now has ${appearances[team2]} matches");
-          }
-        }
-      }
-      
-      if (!matchCreated) {
-        print("⚠️ Could not create match with current available teams, trying next round");
-        // If we can't create a match with current available teams,
-        // we need to reset the round counter but keep trying with the same teams
-      }
-      
-      // Move to next round concept (for logging purposes)
-      round++;
-      
-      // Safety check - if we're not making progress, break
-      if (attempts > 100 && matches.isEmpty) {
-        print("⚠️ No matches created after many attempts, breaking");
-        break;
-      }
-    }
-    
-    // Verify we have all matches
-    print("\n=== MATCH GENERATION COMPLETE ===");
-    print("Generated ${matches.length}/$totalMatches matches");
-    
-    // Show per-team statistics
-    print("\n--- Per-team Statistics ---");
-    for (final teamId in teamIds) {
-      final teamName = teamMap.containsKey(teamId) ? teamMap[teamId]!['team_name'] : 'Team $teamId';
-      print("$teamName: ${appearances[teamId]}/$matchesPerTeam matches");
-    }
-    
-    // If we didn't generate all matches, try the round-robin approach as fallback
-    if (matches.length < totalMatches) {
-      print("\n⚠️ Could not generate all matches with random approach, using round-robin fallback");
-      return _generateOneVsOneMatchesRoundRobin(
-        teamIds: teamIds,
-        matchesPerTeam: matchesPerTeam,
-        teamMap: teamMap,
-      );
-    }
-    
-    return matches;
+  // In generate_schedule.dart, replace the _generateOneVsOneMatches method
+
+List<Map<String, dynamic>> _generateOneVsOneMatches({
+  required List<int> teamIds,
+  required int matchesPerTeam,
+  required Map<int, Map<String, dynamic>> teamMap,
+}) {
+  final random = Random();
+  final matches = <Map<String, dynamic>>[];
+  final teamCount = teamIds.length;
+  
+  // Calculate total matches needed
+  final totalMatches = (teamCount * matchesPerTeam) ~/ 2;
+  
+  print("\n=== GENERATING 1v1 MATCHES ===");
+  print("Teams: $teamCount, Matches per team: $matchesPerTeam");
+  print("Total matches needed: $totalMatches");
+  
+  // Track appearances per team
+  final appearances = <int, int>{};
+  for (final teamId in teamIds) {
+    appearances[teamId] = 0;
   }
+  
+  // Track which teams have played each other
+  final playedPairs = <String, int>{};
+  
+  // Generate matches round by round
+  for (int round = 1; round <= matchesPerTeam; round++) {
+    print("\n--- Round $round ---");
+    
+    // Get teams that haven't reached their match count yet
+    List<int> availableTeams = [];
+    for (final teamId in teamIds) {
+      if (appearances[teamId]! < matchesPerTeam) {
+        availableTeams.add(teamId);
+      }
+    }
+    
+    // Track teams already used in this round
+    final Set<int> usedInThisRound = {};
+    int matchesInRound = 0;
+    
+    // Shuffle for randomness
+    availableTeams.shuffle(random);
+    
+    // Create as many matches as possible in this round
+    for (int i = 0; i < availableTeams.length - 1 && matchesInRound < (teamCount ~/ 2); i++) {
+      final team1 = availableTeams[i];
+      
+      // Skip if team already used in this round
+      if (usedInThisRound.contains(team1)) continue;
+      
+      for (int j = i + 1; j < availableTeams.length; j++) {
+        final team2 = availableTeams[j];
+        
+        // Skip if team already used in this round
+        if (usedInThisRound.contains(team2)) continue;
+        
+        // Check if these teams can play each other
+        final pairKey = team1 < team2 ? '$team1-$team2' : '$team2-$team1';
+        final timesPlayed = playedPairs[pairKey] ?? 0;
+        
+        // Teams can play each other at most once
+        if (timesPlayed == 0) {
+          // Create the match
+          matches.add({
+            'team1': team1,
+            'team2': team2,
+          });
+          
+          // Update appearances
+          appearances[team1] = appearances[team1]! + 1;
+          appearances[team2] = appearances[team2]! + 1;
+          
+          // Record that these teams have played
+          playedPairs[pairKey] = 1;
+          
+          // Mark teams as used in this round
+          usedInThisRound.add(team1);
+          usedInThisRound.add(team2);
+          
+          matchesInRound++;
+          
+          final team1Name = teamMap.containsKey(team1) ? teamMap[team1]!['team_name'] : 'Team $team1';
+          final team2Name = teamMap.containsKey(team2) ? teamMap[team2]!['team_name'] : 'Team $team2';
+          print("Match ${matches.length}: $team1Name vs $team2Name");
+          print("  Team $team1 now has ${appearances[team1]} matches");
+          print("  Team $team2 now has ${appearances[team2]} matches");
+          
+          break; // Found a match for team1, move to next team
+        }
+      }
+    }
+    
+    print("Created $matchesInRound matches in round $round");
+  }
+  
+  print("\n=== MATCH GENERATION COMPLETE ===");
+  print("Generated ${matches.length}/$totalMatches matches");
+  
+  return matches;
+}
 
   // Fallback method using round-robin style
   List<Map<String, dynamic>> _generateOneVsOneMatchesRoundRobin({
@@ -654,6 +629,9 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
   }
 
   // 2v2 match generation method
+  // In generate_schedule.dart, replace the _generateTwoVsTwoMatches method
+
+  // 2v2 match generation method - FIXED to prevent teams playing twice in same round
   List<Map<String, dynamic>> _generateTwoVsTwoMatches({
     required List<int> teamIds,
     required int matchesPerTeam,
@@ -676,24 +654,30 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     print("Teams: $teamCount, Matches per team: $matchesPerTeam");
     print("Total matches needed: $totalMatches");
     
-    // Simple approach: Create matches round by round
+    // Track which teams have been teammates
+    final teammatePairs = <String, int>{};
+    
+    // Generate matches round by round
     for (int round = 1; round <= matchesPerTeam; round++) {
       print("\n--- Round $round ---");
       
-      // Get teams that haven't played this round yet
+      // Get teams that haven't reached their match count yet AND haven't played this round
       List<int> availableTeams = [];
       for (final teamId in teamIds) {
-        // Check if team has already played this round by looking at matches
+        // Check if team has already played in this round
         bool playedThisRound = false;
         for (final match in matches) {
           if ((match['red'] as List<int>).contains(teamId) || 
               (match['blue'] as List<int>).contains(teamId)) {
-            if (matches.indexOf(match) ~/ (teamCount ~/ 4) + 1 == round) {
+            // Calculate which round this match belongs to
+            final matchRound = (matches.indexOf(match) ~/ (teamCount ~/ 4)) + 1;
+            if (matchRound == round) {
               playedThisRound = true;
               break;
             }
           }
         }
+        
         if (!playedThisRound && appearances[teamId]! < matchesPerTeam) {
           availableTeams.add(teamId);
         }
@@ -702,22 +686,111 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
       availableTeams.shuffle(random);
       print("Available teams for round $round: $availableTeams");
       
-      // Create as many matches as possible in this round
+      // Track teams used in this round to prevent duplicates
+      final Set<int> usedInThisRound = {};
       int matchesInThisRound = 0;
-      while (availableTeams.length >= 4 && matchesInThisRound < (teamCount ~/ 4)) {
-        // Take first 4 teams
-        final matchTeams = availableTeams.sublist(0, 4);
-        availableTeams.removeRange(0, 4);
+      final int maxMatchesInRound = teamCount ~/ 4;
+      
+      // Create as many matches as possible in this round
+      while (availableTeams.length >= 4 && matchesInThisRound < maxMatchesInRound) {
+        // Take 4 teams that haven't been used in this round yet
+        final matchTeams = <int>[];
+        for (int i = 0; i < availableTeams.length && matchTeams.length < 4; i++) {
+          if (!usedInThisRound.contains(availableTeams[i])) {
+            matchTeams.add(availableTeams[i]);
+          }
+        }
         
-        // Simple split: first 2 are RED, last 2 are BLUE
-        final redIds = [matchTeams[0], matchTeams[1]];
-        final blueIds = [matchTeams[2], matchTeams[3]];
+        if (matchTeams.length < 4) break;
         
-        // Record the match
-        matches.add({
-          'red': List<int>.from(redIds),
-          'blue': List<int>.from(blueIds),
-        });
+        // Remove these teams from available list
+        for (final teamId in matchTeams) {
+          availableTeams.remove(teamId);
+          usedInThisRound.add(teamId);
+        }
+        
+        // Try to find a fair split: first 2 are RED, last 2 are BLUE
+        // But try to balance teammate combinations
+        Map<String, dynamic>? bestMatch;
+        int bestScore = -1;
+        
+        // Try different RED/BLUE splits
+        final List<List<int>> redCombinations = [
+          [0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]
+        ];
+        
+        for (final redIndices in redCombinations) {
+          final redIds = [
+            matchTeams[redIndices[0]],
+            matchTeams[redIndices[1]]
+          ];
+          final blueIds = matchTeams.where((id) => !redIds.contains(id)).toList();
+          
+          // Check if these teams have been teammates too often
+          bool teammateOk = true;
+          int teammateScore = 0;
+          
+          // Check RED team combinations
+          final redPairKey1 = redIds[0] < redIds[1] 
+              ? '${redIds[0]}-${redIds[1]}' 
+              : '${redIds[1]}-${redIds[0]}';
+          final redTimes = teammatePairs[redPairKey1] ?? 0;
+          if (redTimes > 1) { // Allow max 2 times as teammates
+            teammateOk = false;
+          }
+          teammateScore += redTimes;
+          
+          // Check BLUE team combinations
+          final bluePairKey1 = blueIds[0] < blueIds[1] 
+              ? '${blueIds[0]}-${blueIds[1]}' 
+              : '${blueIds[1]}-${blueIds[0]}';
+          final blueTimes = teammatePairs[bluePairKey1] ?? 0;
+          if (blueTimes > 1) {
+            teammateOk = false;
+          }
+          teammateScore += blueTimes;
+          
+          if (!teammateOk) continue;
+          
+          // Check if match is fair (arena balance)
+          if (!tracker.isMatchFair(redIds, blueIds, round)) {
+            continue;
+          }
+          
+          // Score this combination - prefer less frequent teammates
+          if (teammateScore > bestScore) {
+            bestScore = teammateScore;
+            bestMatch = {
+              'red': List<int>.from(redIds),
+              'blue': List<int>.from(blueIds),
+            };
+          }
+        }
+        
+        // If no good match found, use simple split
+        if (bestMatch == null) {
+          bestMatch = {
+            'red': [matchTeams[0], matchTeams[1]],
+            'blue': [matchTeams[2], matchTeams[3]],
+          };
+        }
+        
+        final redIds = bestMatch['red'] as List<int>;
+        final blueIds = bestMatch['blue'] as List<int>;
+        
+        // Record teammate pairs
+        final redPairKey = redIds[0] < redIds[1] 
+            ? '${redIds[0]}-${redIds[1]}' 
+            : '${redIds[1]}-${redIds[0]}';
+        teammatePairs[redPairKey] = (teammatePairs[redPairKey] ?? 0) + 1;
+        
+        final bluePairKey = blueIds[0] < blueIds[1] 
+            ? '${blueIds[0]}-${blueIds[1]}' 
+            : '${blueIds[1]}-${blueIds[0]}';
+        teammatePairs[bluePairKey] = (teammatePairs[bluePairKey] ?? 0) + 1;
+        
+        // Record the match in tracker
+        tracker.recordMatch(redIds, blueIds, round);
         
         // Update appearances
         for (final teamId in redIds) {
@@ -727,7 +800,16 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
           appearances[teamId] = appearances[teamId]! + 1;
         }
         
+        matches.add({
+          'red': List<int>.from(redIds),
+          'blue': List<int>.from(blueIds),
+        });
+        
         matchesInThisRound++;
+        
+        // Get team names for logging
+        final conn = DBHelper.getConnection();
+        // This is just for logging, we'll use placeholder names
         print("Match ${matches.length}: RED ${redIds.join(',')} vs BLUE ${blueIds.join(',')}");
       }
       

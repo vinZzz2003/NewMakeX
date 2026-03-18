@@ -212,70 +212,73 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
   }
 
   Future<void> _generateSchedule() async {
-    if (_settings == null) return;
-    
-    // Confirm with user
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF2D0E7A),
-        title: Text('Generate Championship Schedule?', 
-            style: const TextStyle(color: Colors.white)),
-        content: Text(
-          'This will generate ${_settings!.matchesPerAlliance} match(es) between the alliances for ${widget.categoryName}.\n\n'
-          'Start: ${_settings!.startTime.format(context)}\n'
-          'End: ${_settings!.endTime.format(context)}\n'
-          'Duration: ${_settings!.durationMinutes} min per match\n'
-          'Interval: ${_settings!.intervalMinutes} min between matches',
-          style: const TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('GENERATE', style: TextStyle(color: kAccentGold)),
-          ),
-        ],
+  if (_settings == null) return;
+  
+  // Confirm with user
+  final confirm = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: const Color(0xFF2D0E7A),
+      title: Text('Generate Championship Schedule?', 
+          style: const TextStyle(color: Colors.white)),
+      content: Text(
+        'This will generate ${_settings!.matchesPerAlliance} match(es) between the alliances for ${widget.categoryName}.\n\n'
+        'Start: ${_settings!.startTime.format(context)}\n'
+        'End: ${_settings!.endTime.format(context)}\n'
+        'Duration: ${_settings!.durationMinutes} min per match\n'
+        'Interval: ${_settings!.intervalMinutes} min between matches',
+        style: const TextStyle(color: Colors.white70),
       ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('GENERATE', style: TextStyle(color: kAccentGold)),
+        ),
+      ],
+    ),
+  );
+  
+  if (confirm != true) return;
+  
+  setState(() => _isGenerating = true);
+  
+  try {
+    // Add a small delay to ensure any previous operations are complete
+    await Future.delayed(const Duration(milliseconds: 100));
+    
+    await DBHelper.generateChampionshipScheduleWithSettings(
+      widget.categoryId,
+      _settings!,
     );
     
-    if (confirm != true) return;
+    await _loadAllianceCount();
+    await _loadMatches();
     
-    setState(() => _isGenerating = true);
-    
-    try {
-      await DBHelper.generateChampionshipScheduleWithSettings(
-        widget.categoryId,
-        _settings!,
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Championship schedule generated for ${widget.categoryName}'),
+          backgroundColor: Colors.green,
+        ),
       );
-      
-      await _loadAllianceCount();
-      await _loadMatches();
-      
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('✅ Championship schedule generated for ${widget.categoryName}'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('❌ Error: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isGenerating = false);
     }
+  } catch (e) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Error: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  } finally {
+    if (mounted) setState(() => _isGenerating = false);
   }
+}
 
   String _getRoundName(int round, int totalMatches) {
     if (_allianceCount == 2) {

@@ -2,7 +2,7 @@ import 'dart:math';
 import 'package:mysql_client/mysql_client.dart';
 import 'schedule_fairness_helper.dart';
 import 'config.dart';
-import 'championship_settings.dart'; // Add this import
+import 'championship_settings.dart';
 
 class DBHelper {
   static MySQLConnection? _connection;
@@ -14,106 +14,104 @@ class DBHelper {
   static String get _password => Config.dbPassword;
   static String get _databaseName => Config.dbName;
 
-  // In db_helper.dart, update the runMigrations() method:
+  static Future<void> runMigrations() async {
+    final conn = await getConnection();
+    
+    // Add arena_number column if not exists
+    try {
+      await conn.execute("""
+        ALTER TABLE tbl_teamschedule
+        ADD COLUMN arena_number INT NOT NULL DEFAULT 1
+      """);
+      print("✅ Migration: arena_number column added.");
+    } catch (_) {
+      print("ℹ️  Migration: arena_number already present.");
+    }
+    
+    try {
+      await conn.execute("""
+        ALTER TABLE tbl_score
+        ADD COLUMN score_individual INT DEFAULT 0,
+        ADD COLUMN score_alliance INT DEFAULT 0
+      """);
+      print("✅ Added individual and alliance score columns to tbl_score");
+    } catch (e) {
+      print("ℹ️ Score columns may already exist: $e");
+    }
 
-static Future<void> runMigrations() async {
-  final conn = await getConnection();
-  
-  // Add arena_number column if not exists
-  try {
-    await conn.execute("""
-      ALTER TABLE tbl_teamschedule
-      ADD COLUMN arena_number INT NOT NULL DEFAULT 1
-    """);
-    print("✅ Migration: arena_number column added.");
-  } catch (_) {
-    print("ℹ️  Migration: arena_number already present.");
-  }
-  
-  try {
-  await conn.execute("""
-    ALTER TABLE tbl_score
-    ADD COLUMN score_individual INT DEFAULT 0,
-    ADD COLUMN score_alliance INT DEFAULT 0
-  """);
-  print("✅ Added individual and alliance score columns to tbl_score");
-} catch (e) {
-  print("ℹ️ Score columns may already exist: $e");
-}
+    // Create alliance selections table
+    try {
+      await conn.execute("""
+        CREATE TABLE IF NOT EXISTS tbl_alliance_selections (
+          alliance_id INT AUTO_INCREMENT PRIMARY KEY,
+          category_id INT NOT NULL,
+          captain_team_id INT NOT NULL,
+          partner_team_id INT NOT NULL,
+          selection_round INT NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (category_id) REFERENCES tbl_category(category_id) ON DELETE CASCADE,
+          FOREIGN KEY (captain_team_id) REFERENCES tbl_team(team_id) ON DELETE CASCADE,
+          FOREIGN KEY (partner_team_id) REFERENCES tbl_team(team_id) ON DELETE CASCADE
+        )
+      """);
+      print("✅ Alliance selections table created");
+    } catch (e) {
+      print("ℹ️ Alliance selections table check: $e");
+    }
+    
+    // Create championship schedule table
+    try {
+      await conn.execute("""
+        CREATE TABLE IF NOT EXISTS tbl_championship_schedule (
+          match_id INT AUTO_INCREMENT PRIMARY KEY,
+          category_id INT NOT NULL,
+          alliance1_id INT NOT NULL,
+          alliance2_id INT NOT NULL,
+          match_round INT NOT NULL,
+          match_position INT NOT NULL,
+          schedule_time VARCHAR(20),
+          arena_number INT DEFAULT 1,
+          status VARCHAR(20) DEFAULT 'pending'
+        )
+      """);
+      print("✅ Championship schedule table created");
+    } catch (e) {
+      print("ℹ️ Championship schedule table check: $e");
+    }
 
-  // Create alliance selections table
-  try {
-    await conn.execute("""
-      CREATE TABLE IF NOT EXISTS tbl_alliance_selections (
-        alliance_id INT AUTO_INCREMENT PRIMARY KEY,
-        category_id INT NOT NULL,
-        captain_team_id INT NOT NULL,
-        partner_team_id INT NOT NULL,
-        selection_round INT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (category_id) REFERENCES tbl_category(category_id) ON DELETE CASCADE,
-        FOREIGN KEY (captain_team_id) REFERENCES tbl_team(team_id) ON DELETE CASCADE,
-        FOREIGN KEY (partner_team_id) REFERENCES tbl_team(team_id) ON DELETE CASCADE
-      )
-    """);
-    print("✅ Alliance selections table created");
-  } catch (e) {
-    print("ℹ️ Alliance selections table check: $e");
-  }
-  
-  // Create championship schedule table
-  try {
-    await conn.execute("""
-      CREATE TABLE IF NOT EXISTS tbl_championship_schedule (
-        match_id INT AUTO_INCREMENT PRIMARY KEY,
-        category_id INT NOT NULL,
-        alliance1_id INT NOT NULL,
-        alliance2_id INT NOT NULL,
-        match_round INT NOT NULL,
-        match_position INT NOT NULL,
-        schedule_time VARCHAR(20),
-        arena_number INT DEFAULT 1,
-        status VARCHAR(20) DEFAULT 'pending'
-      )
-    """);
-    print("✅ Championship schedule table created");
-  } catch (e) {
-    print("ℹ️ Championship schedule table check: $e");
-  }
+    // Create championship settings table
+    try {
+      await conn.execute("""
+        CREATE TABLE IF NOT EXISTS tbl_championship_settings (
+          category_id INT PRIMARY KEY,
+          matches_per_alliance INT NOT NULL DEFAULT 1,
+          start_time VARCHAR(5) NOT NULL DEFAULT '13:00',
+          end_time VARCHAR(5) NOT NULL DEFAULT '17:00',
+          duration_minutes INT NOT NULL DEFAULT 10,
+          interval_minutes INT NOT NULL DEFAULT 5,
+          lunch_break_enabled BOOLEAN DEFAULT TRUE,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          FOREIGN KEY (category_id) REFERENCES tbl_category(category_id) ON DELETE CASCADE
+        )
+      """);
+      print("✅ Championship settings table created");
+    } catch (e) {
+      print("ℹ️ Championship settings table check: $e");
+    }
 
-  // Create championship settings table
-  try {
-    await conn.execute("""
-      CREATE TABLE IF NOT EXISTS tbl_championship_settings (
-        category_id INT PRIMARY KEY,
-        matches_per_alliance INT NOT NULL DEFAULT 1,
-        start_time VARCHAR(5) NOT NULL DEFAULT '13:00',
-        end_time VARCHAR(5) NOT NULL DEFAULT '17:00',
-        duration_minutes INT NOT NULL DEFAULT 10,
-        interval_minutes INT NOT NULL DEFAULT 5,
-        lunch_break_enabled BOOLEAN DEFAULT TRUE,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        FOREIGN KEY (category_id) REFERENCES tbl_category(category_id) ON DELETE CASCADE
-      )
-    """);
-    print("✅ Championship settings table created");
-  } catch (e) {
-    print("ℹ️ Championship settings table check: $e");
+    try {
+      await conn.execute("""
+        ALTER TABLE tbl_championship_schedule
+        ADD COLUMN category_id INT NULL AFTER match_id
+      """);
+      print("✅ Migration: category_id column added to tbl_championship_schedule");
+    } catch (_) {
+      print("ℹ️  Migration: category_id already present on tbl_championship_schedule.");
+    }
+    
+    // Add database indexes for performance
+    await addDatabaseIndexes();
   }
-
-  try {
-    await conn.execute("""
-      ALTER TABLE tbl_championship_schedule
-      ADD COLUMN category_id INT NULL AFTER match_id
-    """);
-    print("✅ Migration: category_id column added to tbl_championship_schedule");
-  } catch (_) {
-    print("ℹ️  Migration: category_id already present on tbl_championship_schedule.");
-  }
-  
-  // Add database indexes for performance
-  await addDatabaseIndexes();
-}
 
   // Add database indexes for better query performance
   static Future<void> addDatabaseIndexes() async {
@@ -208,251 +206,325 @@ static Future<void> runMigrations() async {
     }
   }
 
-// ── CHAMPIONSHIP SETTINGS ─────────────────────────────────────────────────
+  // ── CHAMPIONSHIP SETTINGS ─────────────────────────────────────────────────
 
-// Save championship settings
-static Future<void> saveChampionshipSettings(ChampionshipSettings settings) async {
-  final conn = await getConnection();
-  
-  await conn.execute("""
-    INSERT INTO tbl_championship_settings 
-      (category_id, matches_per_alliance, start_time, end_time, duration_minutes, interval_minutes, lunch_break_enabled)
-    VALUES
-      (:catId, :matches, :startTime, :endTime, :duration, :interval, :lunch)
-    ON DUPLICATE KEY UPDATE
-      matches_per_alliance = :matches,
-      start_time = :startTime,
-      end_time = :endTime,
-      duration_minutes = :duration,
-      interval_minutes = :interval,
-      lunch_break_enabled = :lunch
-  """, {
-    "catId": settings.categoryId,
-    "matches": settings.matchesPerAlliance,
-    "startTime": settings.startTimeString,
-    "endTime": settings.endTimeString,
-    "duration": settings.durationMinutes,
-    "interval": settings.intervalMinutes,
-    "lunch": settings.lunchBreakEnabled ? 1 : 0,
-  });
-  
-  print("✅ Saved championship settings for category ${settings.categoryId}");
-}
-
-// Load championship settings
-static Future<ChampionshipSettings?> loadChampionshipSettings(int categoryId) async {
-  final conn = await getConnection();
-  
-  try {
-    final result = await conn.execute("""
-      SELECT * FROM tbl_championship_settings 
-      WHERE category_id = :catId
-    """, {"catId": categoryId});
+  // Save championship settings
+  static Future<void> saveChampionshipSettings(ChampionshipSettings settings) async {
+    final conn = await getConnection();
     
-    if (result.rows.isNotEmpty) {
-      final row = result.rows.first.assoc();
-      return ChampionshipSettings.fromMap(row);
-    }
-  } catch (e) {
-    print("⚠️ Could not load championship settings: $e");
-  }
-  
-  return null;
-}
-
-// Enhanced championship schedule generation with settings
-static Future<void> generateChampionshipScheduleWithSettings(
-  int categoryId,
-  ChampionshipSettings settings,
-) async {
-  final conn = await getConnection();
-  
-  // Get alliances
-  final alliancesResult = await conn.execute("""
-    SELECT alliance_id, selection_round
-    FROM tbl_alliance_selections 
-    WHERE category_id = :catId
-    ORDER BY selection_round
-  """, {"catId": categoryId});
-  
-  final alliances = alliancesResult.rows.map((r) => r.assoc()).toList();
-  
-  if (alliances.isEmpty) {
-    throw Exception('No alliances found');
-  }
-  
-  // Clear existing schedule
-  await conn.execute("""
-    DELETE FROM tbl_championship_schedule 
-    WHERE category_id = :catId
-  """, {"catId": categoryId});
-  
-  final numAlliances = alliances.length;
-  int matchesInserted = 0;
-  
-  // Parse times
-  int currentHour = settings.startTime.hour;
-  int currentMinute = settings.startTime.minute;
-  final endLimitMinutes = settings.endTime.hour * 60 + settings.endTime.minute;
-  
-  bool hasTimeRemaining() {
-    final currentMinutes = currentHour * 60 + currentMinute;
-    return currentMinutes + settings.durationMinutes <= endLimitMinutes;
-  }
-  
-  void advanceTime(int minutes) {
-    currentMinute += minutes;
-    while (currentMinute >= 60) {
-      currentMinute -= 60;
-      currentHour++;
-    }
-    if (settings.lunchBreakEnabled && currentHour == 12 && currentMinute >= 0) {
-      currentHour = 13;
-      currentMinute = 0;
-    }
-  }
-  
-  String formatTime(int hour, int minute) {
-    return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
-  }
-  
-  if (numAlliances == 2) {
-    // CASE 1: Only 2 alliances - DIRECT FINAL SERIES
-    // All matches are in the FINAL round
-    print("🎯 Generating FINAL SERIES with ${settings.matchesPerAlliance} matches");
+    await conn.execute("""
+      INSERT INTO tbl_championship_settings 
+        (category_id, matches_per_alliance, start_time, end_time, duration_minutes, interval_minutes, lunch_break_enabled)
+      VALUES
+        (:catId, :matches, :startTime, :endTime, :duration, :interval, :lunch)
+      ON DUPLICATE KEY UPDATE
+        matches_per_alliance = :matches,
+        start_time = :startTime,
+        end_time = :endTime,
+        duration_minutes = :duration,
+        interval_minutes = :interval,
+        lunch_break_enabled = :lunch
+    """, {
+      "catId": settings.categoryId,
+      "matches": settings.matchesPerAlliance,
+      "startTime": settings.startTimeString,
+      "endTime": settings.endTimeString,
+      "duration": settings.durationMinutes,
+      "interval": settings.intervalMinutes,
+      "lunch": settings.lunchBreakEnabled ? 1 : 0,
+    });
     
-    for (int matchNum = 1; matchNum <= settings.matchesPerAlliance; matchNum++) {
-      if (hasTimeRemaining()) {
+    print("✅ Saved championship settings for category ${settings.categoryId}");
+  }
+
+  // Load championship settings
+  static Future<ChampionshipSettings?> loadChampionshipSettings(int categoryId) async {
+    final conn = await getConnection();
+    
+    try {
+      final result = await conn.execute("""
+        SELECT * FROM tbl_championship_settings 
+        WHERE category_id = :catId
+      """, {"catId": categoryId});
+      
+      if (result.rows.isNotEmpty) {
+        final row = result.rows.first.assoc();
+        return ChampionshipSettings.fromMap(row);
+      }
+    } catch (e) {
+      print("⚠️ Could not load championship settings: $e");
+    }
+    
+    return null;
+  }
+
+  // Clean up orphaned championship records
+  static Future<void> cleanupOrphanedChampionshipRecords() async {
+    final conn = await getConnection();
+    
+    try {
+      // Delete championship schedule entries that reference non-existent categories
+      await conn.execute("""
+        DELETE cs FROM tbl_championship_schedule cs
+        LEFT JOIN tbl_category c ON cs.category_id = c.category_id
+        WHERE c.category_id IS NULL
+      """);
+      
+      // Delete championship settings for non-existent categories
+      await conn.execute("""
+        DELETE cs FROM tbl_championship_settings cs
+        LEFT JOIN tbl_category c ON cs.category_id = c.category_id
+        WHERE c.category_id IS NULL
+      """);
+      
+      print("✅ Cleaned up orphaned championship records");
+    } catch (e) {
+      print("⚠️ Error cleaning up orphaned records: $e");
+    }
+  }
+
+  // Enhanced championship schedule generation with settings
+  static Future<void> generateChampionshipScheduleWithSettings(
+    int categoryId,
+    ChampionshipSettings settings,
+  ) async {
+    final conn = await getConnection();
+    
+    try {
+      print("🏆 Starting championship schedule generation for category $categoryId");
+      
+      // Get alliances
+      final alliancesResult = await conn.execute("""
+        SELECT alliance_id, selection_round
+        FROM tbl_alliance_selections 
+        WHERE category_id = :catId
+        ORDER BY selection_round
+      """, {"catId": categoryId});
+      
+      final alliances = alliancesResult.rows.map((r) => r.assoc()).toList();
+      
+      if (alliances.isEmpty) {
+        throw Exception('No alliances found');
+      }
+      
+      // First, delete existing schedule for this category
+      await conn.execute(
+        "DELETE FROM tbl_championship_schedule WHERE category_id = :catId",
+        {"catId": categoryId},
+      );
+      
+      final numAlliances = alliances.length;
+      int matchesInserted = 0;
+      
+      // Parse times
+      int currentHour = settings.startTime.hour;
+      int currentMinute = settings.startTime.minute;
+      
+      String formatTime(int hour, int minute) {
+        return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
+      }
+      
+      if (numAlliances == 2) {
+        // CASE 1: Only 2 alliances - DIRECT FINAL SERIES
+        print("🎯 Generating FINAL SERIES with ${settings.matchesPerAlliance} matches");
+        
+        for (int matchNum = 1; matchNum <= settings.matchesPerAlliance; matchNum++) {
+          final timeStr = formatTime(currentHour, currentMinute);
+          
+          await conn.execute("""
+            INSERT INTO tbl_championship_schedule 
+              (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
+            VALUES
+              (:catId, :a1, :a2, 1, :pos, :time, 'pending')
+          """, {
+            "catId": categoryId,
+            "a1": alliances[0]['alliance_id'],
+            "a2": alliances[1]['alliance_id'],
+            "pos": matchNum,
+            "time": timeStr,
+          });
+          
+          matchesInserted++;
+          print("  ✅ Match $matchNum at $timeStr");
+          
+          // Advance time
+          currentMinute += settings.durationMinutes + settings.intervalMinutes;
+          while (currentMinute >= 60) {
+            currentMinute -= 60;
+            currentHour++;
+          }
+        }
+        
+      } else if (numAlliances == 4) {
+        // CASE 2: 4 alliances - SEMIFINALS + FINAL
+        print("🎯 Generating SEMIFINALS");
+        
+        // Semifinal 1
+        String time1 = formatTime(currentHour, currentMinute);
         await conn.execute("""
           INSERT INTO tbl_championship_schedule 
             (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
           VALUES
-            (:catId, :a1, :a2, 1, :pos, :time, 'pending')
+            (:catId, :a1, :a4, 1, 1, :time, 'pending')
         """, {
           "catId": categoryId,
           "a1": alliances[0]['alliance_id'],
+          "a4": alliances[3]['alliance_id'],
+          "time": time1,
+        });
+        matchesInserted++;
+        
+        // Advance time for next match
+        currentMinute += settings.durationMinutes + settings.intervalMinutes;
+        while (currentMinute >= 60) {
+          currentMinute -= 60;
+          currentHour++;
+        }
+        
+        // Semifinal 2
+        String time2 = formatTime(currentHour, currentMinute);
+        await conn.execute("""
+          INSERT INTO tbl_championship_schedule 
+            (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
+          VALUES
+            (:catId, :a2, :a3, 1, 2, :time, 'pending')
+        """, {
+          "catId": categoryId,
           "a2": alliances[1]['alliance_id'],
-          "pos": matchNum,
-          "time": formatTime(currentHour, currentMinute),
+          "a3": alliances[2]['alliance_id'],
+          "time": time2,
         });
         matchesInserted++;
-        print("  ✅ Match $matchNum at ${formatTime(currentHour, currentMinute)}");
-        advanceTime(settings.durationMinutes + settings.intervalMinutes);
+        
+        // Advance time for final
+        currentMinute += settings.durationMinutes + settings.intervalMinutes;
+        while (currentMinute >= 60) {
+          currentMinute -= 60;
+          currentHour++;
+        }
+        
+        // Final matches
+        print("🎯 Generating FINAL with ${settings.matchesPerAlliance} matches");
+        
+        for (int matchNum = 1; matchNum <= settings.matchesPerAlliance; matchNum++) {
+          String timeStr = formatTime(currentHour, currentMinute);
+          
+          await conn.execute("""
+            INSERT INTO tbl_championship_schedule 
+              (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
+            VALUES
+              (:catId, 0, 0, 2, :pos, :time, 'pending')
+          """, {
+            "catId": categoryId,
+            "pos": matchNum,
+            "time": timeStr,
+          });
+          
+          matchesInserted++;
+          
+          // Advance time for next match
+          currentMinute += settings.durationMinutes + settings.intervalMinutes;
+          while (currentMinute >= 60) {
+            currentMinute -= 60;
+            currentHour++;
+          }
+        }
+        
+      } else if (numAlliances == 8) {
+        // CASE 3: 8 alliances - QUARTERFINALS + SEMIFINALS + FINAL
+        print("🎯 Generating QUARTERFINALS");
+        
+        // Quarterfinals
+        for (int i = 0; i < 4; i++) {
+          String timeStr = formatTime(currentHour, currentMinute);
+          
+          await conn.execute("""
+            INSERT INTO tbl_championship_schedule 
+              (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
+            VALUES
+              (:catId, :a1, :a2, 1, :pos, :time, 'pending')
+          """, {
+            "catId": categoryId,
+            "a1": alliances[i * 2]['alliance_id'],
+            "a2": alliances[i * 2 + 1]['alliance_id'],
+            "pos": i + 1,
+            "time": timeStr,
+          });
+          
+          matchesInserted++;
+          
+          // Advance time for next match
+          currentMinute += settings.durationMinutes + settings.intervalMinutes;
+          while (currentMinute >= 60) {
+            currentMinute -= 60;
+            currentHour++;
+          }
+        }
+        
+        print("🎯 Generating SEMIFINALS");
+        
+        // Semifinals
+        for (int i = 0; i < 2; i++) {
+          String timeStr = formatTime(currentHour, currentMinute);
+          
+          await conn.execute("""
+            INSERT INTO tbl_championship_schedule 
+              (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
+            VALUES
+              (:catId, 0, 0, 2, :pos, :time, 'pending')
+          """, {
+            "catId": categoryId,
+            "pos": i + 1,
+            "time": timeStr,
+          });
+          
+          matchesInserted++;
+          
+          // Advance time for next match
+          currentMinute += settings.durationMinutes + settings.intervalMinutes;
+          while (currentMinute >= 60) {
+            currentMinute -= 60;
+            currentHour++;
+          }
+        }
+        
+        print("🎯 Generating FINAL with ${settings.matchesPerAlliance} matches");
+        
+        // Final
+        for (int matchNum = 1; matchNum <= settings.matchesPerAlliance; matchNum++) {
+          String timeStr = formatTime(currentHour, currentMinute);
+          
+          await conn.execute("""
+            INSERT INTO tbl_championship_schedule 
+              (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
+            VALUES
+              (:catId, 0, 0, 3, :pos, :time, 'pending')
+          """, {
+            "catId": categoryId,
+            "pos": matchNum,
+            "time": timeStr,
+          });
+          
+          matchesInserted++;
+          
+          // Advance time for next match
+          currentMinute += settings.durationMinutes + settings.intervalMinutes;
+          while (currentMinute >= 60) {
+            currentMinute -= 60;
+            currentHour++;
+          }
+        }
       }
-    }
-    
-  } else if (numAlliances == 4) {
-    // CASE 2: 4 alliances - SEMIFINALS + FINAL
-    // Round 1: Semifinals
-    print("🎯 Generating SEMIFINALS");
-    
-    if (hasTimeRemaining()) {
-      await conn.execute("""
-        INSERT INTO tbl_championship_schedule 
-          (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
-        VALUES
-          (:catId, :a1, :a4, 1, 1, :time1, 'pending'),
-          (:catId, :a2, :a3, 1, 2, :time2, 'pending')
-      """, {
-        "catId": categoryId,
-        "a1": alliances[0]['alliance_id'],
-        "a2": alliances[1]['alliance_id'],
-        "a3": alliances[2]['alliance_id'],
-        "a4": alliances[3]['alliance_id'],
-        "time1": formatTime(currentHour, currentMinute),
-        "time2": formatTime(currentHour, currentMinute + settings.durationMinutes + settings.intervalMinutes),
-      });
-      matchesInserted += 2;
-      advanceTime(2 * (settings.durationMinutes + settings.intervalMinutes));
-    }
-    
-    // Round 2: Final (could be multiple matches)
-    print("🎯 Generating FINAL with ${settings.matchesPerAlliance} matches");
-    
-    for (int matchNum = 1; matchNum <= settings.matchesPerAlliance; matchNum++) {
-      if (hasTimeRemaining()) {
-        await conn.execute("""
-          INSERT INTO tbl_championship_schedule 
-            (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
-          VALUES
-            (:catId, 0, 0, 2, :pos, :time, 'pending')
-        """, {
-          "catId": categoryId,
-          "pos": matchNum,
-          "time": formatTime(currentHour, currentMinute),
-        });
-        matchesInserted++;
-        advanceTime(settings.durationMinutes + settings.intervalMinutes);
-      }
-    }
-    
-  } else if (numAlliances == 8) {
-    // CASE 3: 8 alliances - QUARTERFINALS + SEMIFINALS + FINAL
-    // Round 1: Quarterfinals
-    print("🎯 Generating QUARTERFINALS");
-    
-    for (int i = 0; i < 4; i++) {
-      if (hasTimeRemaining()) {
-        await conn.execute("""
-          INSERT INTO tbl_championship_schedule 
-            (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
-          VALUES
-            (:catId, :a1, :a2, 1, :pos, :time, 'pending')
-        """, {
-          "catId": categoryId,
-          "a1": alliances[i * 2]['alliance_id'],
-          "a2": alliances[i * 2 + 1]['alliance_id'],
-          "pos": i + 1,
-          "time": formatTime(currentHour, currentMinute),
-        });
-        matchesInserted++;
-        advanceTime(settings.durationMinutes + settings.intervalMinutes);
-      }
-    }
-    
-    // Round 2: Semifinals
-    print("🎯 Generating SEMIFINALS");
-    
-    for (int i = 0; i < 2; i++) {
-      if (hasTimeRemaining()) {
-        await conn.execute("""
-          INSERT INTO tbl_championship_schedule 
-            (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
-          VALUES
-            (:catId, 0, 0, 2, :pos, :time, 'pending')
-        """, {
-          "catId": categoryId,
-          "pos": i + 1,
-          "time": formatTime(currentHour, currentMinute),
-        });
-        matchesInserted++;
-        advanceTime(settings.durationMinutes + settings.intervalMinutes);
-      }
-    }
-    
-    // Round 3: Final (could be multiple matches)
-    print("🎯 Generating FINAL with ${settings.matchesPerAlliance} matches");
-    
-    for (int matchNum = 1; matchNum <= settings.matchesPerAlliance; matchNum++) {
-      if (hasTimeRemaining()) {
-        await conn.execute("""
-          INSERT INTO tbl_championship_schedule 
-            (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
-          VALUES
-            (:catId, 0, 0, 3, :pos, :time, 'pending')
-        """, {
-          "catId": categoryId,
-          "pos": matchNum,
-          "time": formatTime(currentHour, currentMinute),
-        });
-        matchesInserted++;
-        advanceTime(settings.durationMinutes + settings.intervalMinutes);
-      }
+      
+      print("✅ Generated $matchesInserted championship matches with settings");
+      
+    } catch (e, stackTrace) {
+      print("❌ Error generating championship schedule: $e");
+      print(stackTrace);
+      throw Exception('Failed to generate championship schedule: $e');
     }
   }
-  
-  print("✅ Generated $matchesInserted championship matches with settings");
-}
+
   // ── Connection ────────────────────────────────────────────────────────────
 
   static Future<MySQLConnection> getConnection() async {
@@ -486,40 +558,40 @@ static Future<void> generateChampionshipScheduleWithSettings(
 
   // ── SCHOOLS ───────────────────────────────────────────────────────────────
 
-static Future<List<Map<String, dynamic>>> getSchools() async {
-  final conn = await getConnection();
-  final result = await conn.execute(
-    "SELECT * FROM tbl_school ORDER BY school_name"
-  );
-  return result.rows.map((r) => r.assoc()).toList();
-}
-
-// ── CATEGORIES ────────────────────────────────────────────────────────────
-
-static Future<List<Map<String, dynamic>>> getCategories() async {
-  final conn = await getConnection();
-  final result = await conn.execute(
-    "SELECT * FROM tbl_category ORDER BY category_id"
-  );
-  return result.rows.map((r) => r.assoc()).toList();
-}
-
-static Future<void> seedCategories() async {
-  final conn = await getConnection();
-  const categories = [
-    'Aspiring Makers (mBot 1)',
-    'Emerging Innovators (mBot 2)',
-    'Navigation',
-    'Soccer',
-  ];
-  for (final cat in categories) {
-    await conn.execute(
-      "INSERT IGNORE INTO tbl_category (category_type) VALUES (:cat)",
-      {"cat": cat},
+  static Future<List<Map<String, dynamic>>> getSchools() async {
+    final conn = await getConnection();
+    final result = await conn.execute(
+      "SELECT * FROM tbl_school ORDER BY school_name"
     );
+    return result.rows.map((r) => r.assoc()).toList();
   }
-  print("✅ Categories seeded.");
-}
+
+  // ── CATEGORIES ────────────────────────────────────────────────────────────
+
+  static Future<List<Map<String, dynamic>>> getCategories() async {
+    final conn = await getConnection();
+    final result = await conn.execute(
+      "SELECT * FROM tbl_category ORDER BY category_id"
+    );
+    return result.rows.map((r) => r.assoc()).toList();
+  }
+
+  static Future<void> seedCategories() async {
+    final conn = await getConnection();
+    const categories = [
+      'Aspiring Makers (mBot 1)',
+      'Emerging Innovators (mBot 2)',
+      'Navigation',
+      'Soccer',
+    ];
+    for (final cat in categories) {
+      await conn.execute(
+        "INSERT IGNORE INTO tbl_category (category_type) VALUES (:cat)",
+        {"cat": cat},
+      );
+    }
+    print("✅ Categories seeded.");
+  }
 
   // ── TEAMS ─────────────────────────────────────────────────────────────────
 
@@ -558,7 +630,7 @@ static Future<void> seedCategories() async {
     await conn.execute("DELETE FROM tbl_teamschedule");
     await conn.execute("DELETE FROM tbl_match");
     await conn.execute("DELETE FROM tbl_schedule");
-    // ✅ Reset AUTO_INCREMENT so match IDs start from 1 again
+    // Reset AUTO_INCREMENT so match IDs start from 1 again
     await conn.execute("ALTER TABLE tbl_teamschedule AUTO_INCREMENT = 1");
     await conn.execute("ALTER TABLE tbl_match AUTO_INCREMENT = 1");
     await conn.execute("ALTER TABLE tbl_schedule AUTO_INCREMENT = 1");
@@ -586,52 +658,53 @@ static Future<void> seedCategories() async {
   }
 
   static Future<void> insertTeamSchedule({
-  required int matchId,
-  required int roundId,
-  required int teamId,
-  required int refereeId,
-  int arenaNumber = 1,
-}) async {
-  final conn = await getConnection();
-  
-  // Verify the round exists before inserting - if not, create it
-  final roundCheck = await conn.execute(
-    "SELECT COUNT(*) as cnt FROM tbl_round WHERE round_id = :roundId",
-    {"roundId": roundId},
-  );
-  final exists = int.tryParse(roundCheck.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
-  
-  if (exists == 0) {
-    print("⚠️ Round $roundId does not exist - creating it now");
-    try {
-      await conn.execute("""
-        INSERT INTO tbl_round (round_id, round_type, round_number)
-        VALUES (:id, :type, :number)
-      """, {
-        "id": roundId,
-        "type": 'Round $roundId',
-        "number": roundId,
-      });
-      print("✅ Created round $roundId");
-    } catch (e) {
-      print("❌ Failed to create round $roundId: $e");
-      return;
+    required int matchId,
+    required int roundId,
+    required int teamId,
+    required int refereeId,
+    int arenaNumber = 1,
+  }) async {
+    final conn = await getConnection();
+    
+    // Verify the round exists before inserting - if not, create it
+    final roundCheck = await conn.execute(
+      "SELECT COUNT(*) as cnt FROM tbl_round WHERE round_id = :roundId",
+      {"roundId": roundId},
+    );
+    final exists = int.tryParse(roundCheck.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
+    
+    if (exists == 0) {
+      print("⚠️ Round $roundId does not exist - creating it now");
+      try {
+        await conn.execute("""
+          INSERT INTO tbl_round (round_id, round_type, round_number)
+          VALUES (:id, :type, :number)
+        """, {
+          "id": roundId,
+          "type": 'Round $roundId',
+          "number": roundId,
+        });
+        print("✅ Created round $roundId");
+      } catch (e) {
+        print("❌ Failed to create round $roundId: $e");
+        return;
+      }
     }
+    
+    print("📝 Inserting: match=$matchId, round=$roundId, team=$teamId, arena=$arenaNumber");
+    
+    await conn.execute("""
+      INSERT INTO tbl_teamschedule (match_id, round_id, team_id, referee_id, arena_number)
+      VALUES (:match, :round, :team, :ref, :arena)
+    """, {
+      "match": matchId,
+      "round": roundId,
+      "team":  teamId,
+      "ref":   refereeId,
+      "arena": arenaNumber,
+    });
   }
-  
-  print("📝 Inserting: match=$matchId, round=$roundId, team=$teamId, arena=$arenaNumber");
-  
-  await conn.execute("""
-    INSERT INTO tbl_teamschedule (match_id, round_id, team_id, referee_id, arena_number)
-    VALUES (:match, :round, :team, :ref, :arena)
-  """, {
-    "match": matchId,
-    "round": roundId,
-    "team":  teamId,
-    "ref":   refereeId,
-    "arena": arenaNumber,
-  });
-}
+
   // ── ROUNDS ────────────────────────────────────────────────────────────────
 
   static Future<void> seedRounds(int maxRounds) async {
@@ -651,7 +724,7 @@ static Future<void> seedCategories() async {
           """, {
             "id": i,
             "type": 'Round $i',
-            "number": i,  // Add the round_number
+            "number": i,
           });
           print("✅ Added round $i");
         } catch (e) {
@@ -663,7 +736,7 @@ static Future<void> seedCategories() async {
     }
   }
 
-    static Future<void> generateSchedule({
+  static Future<void> generateSchedule({
     required Map<int, int> runsPerCategory,
     required Map<int, int> arenasPerCategory,
     required String startTime,
@@ -757,7 +830,7 @@ static Future<void> seedCategories() async {
 
       final teamCount = teams.length;
       final totalMatches = (teamCount * runs) ~/ 4;
-      final matchesPerRound = teamCount ~/ 4; // With 8 teams, this is 2 matches per round
+      final matchesPerRound = teamCount ~/ 4;
       
       print("\n=== SCHEDULING CATEGORY $categoryId with $teamCount teams ===");
       print("Matches per team: $runs");
@@ -791,7 +864,7 @@ static Future<void> seedCategories() async {
 
       skipLunch();
 
-      // ── FIXED: PROPER ROUND-ROBIN SCHEDULING ─────────────────────────────
+      // ── PROPER ROUND-ROBIN SCHEDULING ─────────────────────────────
       final random = Random();
       
       // Initialize fairness tracker
@@ -805,8 +878,8 @@ static Future<void> seedCategories() async {
       }
       
       // Target counts for RED/BLUE balance
-      final targetRed = (runs / 2).ceil();  // With runs=4, targetRed=2
-      final targetBlue = (runs / 2).floor(); // With runs=4, targetBlue=2
+      final targetRed = (runs / 2).ceil();
+      final targetBlue = (runs / 2).floor();
       
       int matchCounter = 0;
       
@@ -820,7 +893,6 @@ static Future<void> seedCategories() async {
           final teamId = int.parse(team['team_id'].toString());
           final stats = tracker.teamData[teamId]!;
           
-          // Team hasn't played this round yet
           if (!stats.playedRounds.contains(round)) {
             availableTeams.add(teamId);
           }
@@ -934,8 +1006,9 @@ static Future<void> seedCategories() async {
             final scheduleId = await insertSchedule(startTime: startStr, endTime: endStr);
             final matchId = await insertMatch(scheduleId);
             
-            // Insert RED teams
+            // Insert RED teams (Arena 1)
             for (final teamId in redIds) {
+              print("  Inserting RED team $teamId into Arena 1");
               await insertTeamSchedule(
                 matchId: matchId,
                 roundId: round,
@@ -945,8 +1018,9 @@ static Future<void> seedCategories() async {
               );
             }
             
-            // Insert BLUE teams
+            // Insert BLUE teams (Arena 2)
             for (final teamId in blueIds) {
+              print("  Inserting BLUE team $teamId into Arena 2");
               await insertTeamSchedule(
                 matchId: matchId,
                 roundId: round,
@@ -999,8 +1073,6 @@ static Future<void> seedCategories() async {
       ORDER BY c.category_id, t.team_id, ts.round_id
     """);
     
-    // Use FairnessTracker to verify
-    final teamsByCategory = <int, List<Map<String, dynamic>>>{};
     final scheduleRows = result.rows.map((r) => r.assoc()).toList();
     
     // Print fairness report
@@ -1038,7 +1110,6 @@ static Future<void> seedCategories() async {
     
     // Print fairness report
     teamStats.forEach((teamId, stats) {
-      // Check if any rounds are missing
       final roundsSet = stats['rounds'] as Set<int>;
       final maxRound = roundsSet.isEmpty ? 0 : roundsSet.reduce((a, b) => a > b ? a : b);
       final missingRounds = <int>[];
@@ -1048,12 +1119,10 @@ static Future<void> seedCategories() async {
         }
       }
       
-      // Check arena alternation pattern
       final sortedRounds = roundsSet.toList()..sort();
       final roundArena = stats['roundArena'] as Map<int, int>;
       final arenaSequence = sortedRounds.map((r) => roundArena[r] == 1 ? 'R' : 'B').join(' → ');
       
-      // Color code based on fairness
       String fairnessIcon = '✅';
       if (((stats['red'] as int) - (stats['blue'] as int)).abs() > 1) {
         fairnessIcon = '⚠️';
@@ -1081,7 +1150,6 @@ static Future<void> seedCategories() async {
     print("Total teams: $teamCount");
     print("Total matches: $totalMatches");
     
-    // Check if any team has perfect balance
     final perfectTeams = teamStats.values.where((stats) => stats['red'] == stats['blue']).length;
     
     print("Perfectly balanced teams (equal RED/BLUE): $perfectTeams/$teamCount");
@@ -1095,65 +1163,447 @@ static Future<void> seedCategories() async {
 
   // ── SCORES ────────────────────────────────────────────────────────────────
 
-  // In db_helper.dart, replace the getScoresByCategory method with this:
-
-static Future<List<Map<String, dynamic>>> getScoresByCategory(
-    int categoryId) async {
-  final conn = await getConnection();
-  final result = await conn.execute("""
-    SELECT
-      t.team_id,
-      t.team_name,
-      COALESCE(s.round_id, 0) as round_id,
-      COALESCE(s.score_totalscore, 0) as score_totalscore,
-      COALESCE(s.score_totalduration, '00:00') as score_totalduration
-    FROM tbl_team t
-    LEFT JOIN tbl_score s ON s.team_id = t.team_id
-    WHERE t.category_id = :categoryId
-    ORDER BY t.team_id, s.round_id
-  """, {"categoryId": categoryId});
-  
-  final rows = result.rows.map((r) => r.assoc()).toList();
-  print("📊 getScoresByCategory for category $categoryId returned ${rows.length} rows");
-  for (var row in rows) {
-    print("   Row: team_id=${row['team_id']}, round_id=${row['round_id']}, score=${row['score_totalscore']}");
+  static Future<List<Map<String, dynamic>>> getScoresByCategory(
+      int categoryId) async {
+    final conn = await getConnection();
+    final result = await conn.execute("""
+      SELECT
+        t.team_id,
+        t.team_name,
+        COALESCE(s.round_id, 0) as round_id,
+        COALESCE(s.score_totalscore, 0) as score_totalscore,
+        COALESCE(s.score_totalduration, '00:00') as score_totalduration
+      FROM tbl_team t
+      LEFT JOIN tbl_score s ON s.team_id = t.team_id
+      WHERE t.category_id = :categoryId
+      ORDER BY t.team_id, s.round_id
+    """, {"categoryId": categoryId});
+    
+    final rows = result.rows.map((r) => r.assoc()).toList();
+    print("📊 getScoresByCategory for category $categoryId returned ${rows.length} rows");
+    for (var row in rows) {
+      print("   Row: team_id=${row['team_id']}, round_id=${row['round_id']}, score=${row['score_totalscore']}");
+    }
+    return rows;
   }
-  return rows;
-}
 
   static Future<void> upsertScore({
     required int teamId,
     required int roundId,
     required int matchId,
-    required int refereeId,
+    int? refereeId,
     required int independentScore,
     required int violation,
+    int allianceScore = 0,
     required int totalScore,
     required String totalDuration,
   }) async {
     final conn = await getConnection();
+    final matchParam = (matchId > 0) ? matchId : null;
+    
+    print("📝 UPSERT SCORE CALLED:");
+    print("   teamId: $teamId");
+    print("   roundId: $roundId");
+    print("   matchId: $matchId");
+    print("   independentScore: $independentScore");
+    print("   allianceScore: $allianceScore");
+    print("   violation: $violation");
+    print("   totalScore: $totalScore");
+    
+    // Check if record exists
+    final checkResult = await conn.execute("""
+      SELECT COUNT(*) as cnt FROM tbl_score 
+      WHERE team_id = :teamId AND round_id = :roundId
+    """, {
+      "teamId": teamId,
+      "roundId": roundId,
+    });
+    
+    final exists = int.tryParse(checkResult.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
+    
+    if (exists > 0) {
+      // Update existing
+      print("🔄 Updating existing score record");
+      await conn.execute("""
+        UPDATE tbl_score
+        SET 
+          score_individual = :indep,
+          score_alliance = :alliance,
+          score_violation = :viol,
+          score_totalscore = :total,
+          score_totalduration = :duration,
+          match_id = :match,
+          referee_id = :ref
+        WHERE team_id = :team AND round_id = :round
+      """, {
+        "indep": independentScore,
+        "alliance": allianceScore,
+        "viol": violation,
+        "total": totalScore,
+        "duration": totalDuration,
+        "match": matchParam,
+        "ref": refereeId,
+        "team": teamId,
+        "round": roundId,
+      });
+    } else {
+      // Insert new
+      print("➕ Inserting new score record");
+      await conn.execute("""
+        INSERT INTO tbl_score
+          (score_individual, score_alliance, score_violation, score_totalscore,
+           score_totalduration, score_isapproved,
+           match_id, round_id, team_id, referee_id)
+        VALUES
+          (:indep, :alliance, :viol, :total, :duration, 0,
+           :match, :round, :team, :ref)
+      """, {
+        "indep": independentScore,
+        "alliance": allianceScore,
+        "viol": violation,
+        "total": totalScore,
+        "duration": totalDuration,
+        "match": matchParam,
+        "round": roundId,
+        "team": teamId,
+        "ref": refereeId,
+      });
+    }
+    
+    print("✅ Score saved successfully for team $teamId, round $roundId");
+  }
+
+// db_helper.dart - Fix the propagateAllianceScoreForMatch method
+
+static Future<void> propagateAllianceScoreForMatch({
+  required int matchId,
+  required int roundId,
+  required int sourceTeamId,
+  required int allianceScore,
+}) async {
+  print("\n🔍🔍🔍 PROPAGATE CALLED 🔍🔍🔍");
+  print("   matchId: $matchId");
+  print("   roundId: $roundId");
+  print("   sourceTeamId: $sourceTeamId");
+  print("   allianceScore: $allianceScore");
+  
+  if (matchId <= 0) {
+    print("❌ Cannot propagate: matchId is $matchId (invalid)");
+    return;
+  }
+
+  final conn = await getConnection();
+
+  try {
+    // First, let's check what teams are in this match
+    print("\n📋 STEP 1: Getting all teams in match $matchId, round $roundId");
+    final allTeamsRes = await conn.execute("""
+      SELECT 
+        ts.team_id,
+        t.team_name,
+        ts.arena_number,
+        ts.round_id
+      FROM tbl_teamschedule ts
+      JOIN tbl_team t ON ts.team_id = t.team_id
+      WHERE ts.match_id = :matchId AND ts.round_id = :roundId
+      ORDER BY ts.arena_number, ts.team_id
+    """, {
+      "matchId": matchId,
+      "roundId": roundId,
+    });
+
+    final allTeams = allTeamsRes.rows.map((r) => r.assoc()).toList();
+    
+    if (allTeams.isEmpty) {
+      print("❌ No teams found in match $matchId, round $roundId");
+      return;
+    }
+
+    print("✅ Found ${allTeams.length} total teams in match:");
+    for (final team in allTeams) {
+      print("   - Team ${team['team_id']} (${team['team_name']}), Arena ${team['arena_number']}");
+    }
+    
+    // Determine if this is a 1v1 or 2v2 match based on number of teams
+    final bool isOneVsOne = allTeams.length == 2;
+    print("\n📋 Match type: ${isOneVsOne ? '1v1' : '2v2'}");
+
+    // Group by arena
+    final Map<int, List<Map<String, dynamic>>> teamsByArena = {};
+    for (final team in allTeams) {
+      final arena = int.parse(team['arena_number'].toString());
+      teamsByArena.putIfAbsent(arena, () => []).add(team);
+    }
+    
+    print("\n📋 Teams by arena:");
+    for (final entry in teamsByArena.entries) {
+      print("  Arena ${entry.key}:");
+      for (final team in entry.value) {
+        print("    - Team ${team['team_id']} (${team['team_name']})");
+      }
+    }
+
+    // Find which arena the source team is in
+    int? sourceArena;
+    Map<String, dynamic>? sourceTeam;
+    for (final arenaEntry in teamsByArena.entries) {
+      for (final team in arenaEntry.value) {
+        if (int.parse(team['team_id'].toString()) == sourceTeamId) {
+          sourceArena = arenaEntry.key;
+          sourceTeam = team;
+          break;
+        }
+      }
+      if (sourceArena != null) break;
+    }
+
+    if (sourceArena == null) {
+      print("❌ Could not find source team $sourceTeamId in any arena");
+      return;
+    }
+
+    print("\n✅ Source team found: ${sourceTeam!['team_name']} in Arena $sourceArena");
+
+    // IMPORTANT FIX: For 1v1 matches, the partner is in the OTHER arena
+    // For 2v2 matches, partners are in the SAME arena
+    List<int> targetTeamIds = [];
+    
+    // In db_helper.dart, this part is already correct:
+if (isOneVsOne) {
+  // 1v1 match: Partner is the opponent in the other arena
+  print("\n🔄 1v1 match detected - sharing with opponent");
+  final opponentArena = sourceArena == 1 ? 2 : 1;
+  final opponentTeams = teamsByArena[opponentArena] ?? [];
+  
+  for (final opponent in opponentTeams) {
+    targetTeamIds.add(int.parse(opponent['team_id'].toString()));
+  }
+  print("   Target opponent teams: $targetTeamIds");
+  
+} else {
+  // 2v2 match: Partners are teammates in the same arena (excluding self)
+  print("\n🔄 2v2 match detected - sharing with teammates");
+  final partnerTeams = teamsByArena[sourceArena]?.where((team) {
+    return int.parse(team['team_id'].toString()) != sourceTeamId;
+  }).toList() ?? [];
+  
+  for (final partner in partnerTeams) {
+    targetTeamIds.add(int.parse(partner['team_id'].toString()));
+  }
+  print("   Target partner teams: $targetTeamIds");
+}
+
+    // Propagate to all target teams using the SAME roundId
+    for (final targetTeamId in targetTeamIds) {
+      print("\n🔄 Propagating to team $targetTeamId for round $roundId");
+      await _updateTeamScore(
+        conn, 
+        targetTeamId, 
+        roundId,  // Use the SAME roundId as the source
+        matchId, 
+        allianceScore
+      );
+    }
+
+    // Verify the updates worked
+    print("\n📋 STEP 3: Verifying updates...");
+    for (final team in allTeams) {
+      final teamId = int.parse(team['team_id'].toString());
+      final verifyResult = await conn.execute("""
+        SELECT score_alliance, score_totalscore
+        FROM tbl_score
+        WHERE team_id = :teamId AND round_id = :roundId
+      """, {
+        "teamId": teamId,
+        "roundId": roundId,
+      });
+
+      if (verifyResult.rows.isNotEmpty) {
+        final data = verifyResult.rows.first.assoc();
+        print("   Team ${team['team_name']}: ALL=${data['score_alliance']}, TOTAL=${data['score_totalscore']}");
+      } else {
+        print("   Team ${team['team_name']}: No score record found!");
+      }
+    }
+
+    print("\n✅✅✅ Propagation complete for match $matchId ✅✅✅");
+
+  } catch (e, stackTrace) {
+    print('❌ Error in propagateAllianceScoreForMatch: $e');
+    print(stackTrace);
+  }
+}
+
+// Helper method to update a team's score
+static Future<void> _updateTeamScore(
+  MySQLConnection conn,
+  int teamId,
+  int roundId,
+  int matchId,
+  int allianceScore,
+) async {
+  print("  📝 Processing team $teamId for round $roundId");
+  print("     Alliance score to add: $allianceScore");
+
+  // First, check if the team has a score record for this round
+  final checkRes = await conn.execute("""
+    SELECT COUNT(*) as cnt FROM tbl_score
+    WHERE team_id = :teamId AND round_id = :roundId
+  """, {
+    "teamId": teamId,
+    "roundId": roundId,
+  });
+
+  final exists = int.parse(checkRes.rows.first.assoc()['cnt'].toString());
+
+  if (exists > 0) {
+    // Update existing score
+    print("    ✅ Score record exists - updating");
+    
+    // Get current scores
+    final currentRes = await conn.execute("""
+      SELECT score_individual, score_alliance, score_violation
+      FROM tbl_score
+      WHERE team_id = :teamId AND round_id = :roundId
+    """, {
+      "teamId": teamId,
+      "roundId": roundId,
+    });
+
+    final current = currentRes.rows.first.assoc();
+    final individual = int.parse(current['score_individual'].toString());
+    final currentAlliance = int.parse(current['score_alliance'].toString());
+    final violation = int.parse(current['score_violation'].toString());
+    
+    // Add the new alliance score to existing alliance score
+    final newAlliance = currentAlliance + allianceScore;
+    final newTotal = individual + newAlliance - violation;
+
+    print("     Current: IND=$individual, ALL=$currentAlliance, VIO=$violation, TOTAL=${individual + currentAlliance - violation}");
+    print("     New: ALL=$newAlliance, TOTAL=$newTotal");
+
+    await conn.execute("""
+      UPDATE tbl_score
+      SET 
+        score_alliance = :alliance,
+        score_totalscore = :total
+      WHERE team_id = :teamId AND round_id = :roundId
+    """, {
+      "alliance": newAlliance,
+      "total": newTotal,
+      "teamId": teamId,
+      "roundId": roundId,
+    });
+
+    print("    ✅ Updated: ALL=$newAlliance, TOTAL=$newTotal");
+  } else {
+    // Insert new score
+    print("    ⚠️ No score record exists - creating new");
+    
     await conn.execute("""
       INSERT INTO tbl_score
-        (score_independentscore, score_violation, score_totalscore,
-         score_totalduration, score_isapproved,
-         match_id, round_id, team_id, referee_id)
+        (team_id, round_id, score_individual, score_alliance, score_violation, 
+         score_totalscore, score_totalduration, score_isapproved, match_id, referee_id)
       VALUES
-        (:indep, :viol, :total, :duration, 0,
-         :match, :round, :team, :ref)
-      ON DUPLICATE KEY UPDATE
-        score_independentscore = :indep,
-        score_violation        = :viol,
-        score_totalscore       = :total,
-        score_totalduration    = :duration
+        (:teamId, :roundId, 0, :alliance, 0, :total, '00:00', 0, :matchId, NULL)
     """, {
-      "indep":    independentScore,
-      "viol":     violation,
-      "total":    totalScore,
-      "duration": totalDuration,
-      "match":    matchId,
-      "round":    roundId,
-      "team":     teamId,
-      "ref":      refereeId,
+      "teamId": teamId,
+      "roundId": roundId,
+      "alliance": allianceScore,
+      "total": allianceScore,
+      "matchId": matchId,
     });
+
+    print("    ✅ Created new: TOTAL=$allianceScore");
+  }
+  
+  // Verify the update
+  final verifyRes = await conn.execute("""
+    SELECT score_alliance, score_totalscore
+    FROM tbl_score
+    WHERE team_id = :teamId AND round_id = :roundId
+  """, {
+    "teamId": teamId,
+    "roundId": roundId,
+  });
+  
+  if (verifyRes.rows.isNotEmpty) {
+    final data = verifyRes.rows.first.assoc();
+    print("     Verification: ALL=${data['score_alliance']}, TOTAL=${data['score_totalscore']}");
+  }
+}
+
+  // Debug method to check match structure
+  static Future<void> debugCheckMatch(int matchId, int roundId) async {
+    final conn = await getConnection();
+    
+    print("\n🔍 DEBUG: Checking match $matchId, round $roundId");
+    
+    final result = await conn.execute("""
+      SELECT 
+        ts.match_id,
+        ts.round_id,
+        ts.team_id,
+        t.team_name,
+        ts.arena_number
+      FROM tbl_teamschedule ts
+      JOIN tbl_team t ON ts.team_id = t.team_id
+      WHERE ts.match_id = :matchId AND ts.round_id = :roundId
+      ORDER BY ts.arena_number, ts.team_id
+    """, {
+      "matchId": matchId,
+      "roundId": roundId,
+    });
+    
+    final rows = result.rows.map((r) => r.assoc()).toList();
+    
+    if (rows.isEmpty) {
+      print("❌ No teams found for match $matchId, round $roundId");
+      return;
+    }
+    
+    print("📊 Found ${rows.length} teams in this match:");
+    
+    // Group by arena
+    final Map<int, List<Map<String, dynamic>>> byArena = {};
+    for (final row in rows) {
+      final arena = int.parse(row['arena_number'].toString());
+      byArena.putIfAbsent(arena, () => []).add(row);
+    }
+    
+    for (final arenaEntry in byArena.entries) {
+      print("  Arena ${arenaEntry.key}:");
+      for (final team in arenaEntry.value) {
+        print("    - Team ${team['team_id']}: ${team['team_name']}");
+      }
+    }
+  }
+
+  // Helper method to get match partner for a team
+  static Future<int?> getMatchPartner(int matchId, int teamId, int roundId) async {
+    final conn = await getConnection();
+    
+    final result = await conn.execute("""
+      SELECT ts2.team_id
+      FROM tbl_teamschedule ts1
+      JOIN tbl_teamschedule ts2 
+        ON ts1.match_id = ts2.match_id 
+        AND ts1.round_id = ts2.round_id
+        AND ts1.arena_number = ts2.arena_number
+        AND ts1.team_id != ts2.team_id
+      WHERE ts1.match_id = :matchId 
+        AND ts1.round_id = :roundId
+        AND ts1.team_id = :teamId
+      LIMIT 1
+    """, {
+      "matchId": matchId,
+      "roundId": roundId,
+      "teamId": teamId,
+    });
+    
+    if (result.rows.isNotEmpty) {
+      return int.tryParse(result.rows.first.assoc()['team_id']?.toString() ?? '0');
+    }
+    return null;
   }
 }

@@ -278,121 +278,203 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
   // Show alliance selection ceremony
   void _showAllianceSelection(int categoryId, String categoryName) async {
-    try {
-      print("🎯 Starting alliance selection for $categoryName");
-      
-      if (!mounted) return;
+  try {
+    print("🎯 Starting alliance selection for $categoryName");
+    
+    if (!mounted) return;
 
-      // Get real scores from standings
-      final standings = await DBHelper.getScoresByCategory(categoryId);
-      print("📊 Found ${standings.length} score entries");
-      
-      // Get all teams in this category
-      final teams = await DBHelper.getTeamsByCategory(categoryId);
-      print("📊 Found ${teams.length} teams");
-      
-      if (teams.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No teams found in this category'),
-            backgroundColor: Colors.orange,
-          ),
-        );
-        return;
-      }
-
-      // Calculate total scores per team
-      final Map<int, Map<String, dynamic>> teamScores = {};
-      
-      // Initialize all teams with zero scores
-      for (final team in teams) {
-        final teamId = int.tryParse(team['team_id'].toString()) ?? 0;
-        final teamName = team['team_name']?.toString() ?? '';
-        
-        teamScores[teamId] = {
-          'team_id': teamId,
-          'team_name': teamName,
-          'totalScore': 0,
-        };
-      }
-      
-      // Sum scores from each round
-      for (final row in standings) {
-        final teamId = int.tryParse(row['team_id'].toString()) ?? 0;
-        final score = int.tryParse(row['score_totalscore']?.toString() ?? '0') ?? 0;
-        
-        if (teamScores.containsKey(teamId)) {
-          teamScores[teamId]!['totalScore'] = (teamScores[teamId]!['totalScore'] as int) + score;
-        }
-      }
-      
-      // Convert to list and filter teams with scores > 0
-      final qualifiedTeams = teamScores.values
-          .where((t) => (t['totalScore'] as int) > 0)
-          .toList()
-        ..sort((a, b) => (b['totalScore'] as int).compareTo(a['totalScore'] as int));
-      
-      print("✅ Found ${qualifiedTeams.length} qualified teams with scores");
-      for (var team in qualifiedTeams) {
-        print("   ${team['team_name']}: ${team['totalScore']} pts");
-      }
-      
-      if (qualifiedTeams.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No qualified teams found. Enter scores in Standings first.'),
-            backgroundColor: Colors.orange,
-          ),
-        );
-        return;
-      }
-
-      if (!mounted) return;
-
-      // Navigate to alliance selection page
-      final result = await Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (context) => AllianceSelectionPage(
-            categoryId: categoryId,
-            categoryName: categoryName,
-            qualifiedTeams: qualifiedTeams,
-            onComplete: () {
-              print("✅ Alliance selection completed");
-              Navigator.of(context).pop();
-              if (!mounted) return;
-              setState(() {
-                _championshipRefreshVersionByCategory[categoryId] =
-                    (_championshipRefreshVersionByCategory[categoryId] ?? 0) + 1;
-              });
-              _showChampionshipRoundPrompt(categoryId, categoryName);
-            },
-            onCancel: () {
-              print("❌ Alliance selection cancelled");
-              Navigator.of(context).pop();
-            },
-          ),
-          fullscreenDialog: true,
+    // Get real scores from standings (keep your existing code for this part)
+    final standings = await DBHelper.getScoresByCategory(categoryId);
+    final teams = await DBHelper.getTeamsByCategory(categoryId);
+    
+    if (teams.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No teams found in this category'),
+          backgroundColor: Colors.orange,
         ),
       );
+      return;
+    }
+
+    // Calculate total scores per team
+    final Map<int, Map<String, dynamic>> teamScores = {};
+    
+    for (final team in teams) {
+      final teamId = int.tryParse(team['team_id'].toString()) ?? 0;
+      final teamName = team['team_name']?.toString() ?? '';
       
-    } catch (e, stackTrace) {
-      print("❌ Error in _showAllianceSelection: $e");
-      print(stackTrace);
+      teamScores[teamId] = {
+        'team_id': teamId,
+        'team_name': teamName,
+        'totalScore': 0,
+      };
+    }
+    
+    for (final row in standings) {
+      final teamId = int.tryParse(row['team_id'].toString()) ?? 0;
+      final score = int.tryParse(row['score_totalscore']?.toString() ?? '0') ?? 0;
       
-      if (!mounted) return;
-      
+      if (teamScores.containsKey(teamId)) {
+        teamScores[teamId]!['totalScore'] = (teamScores[teamId]!['totalScore'] as int) + score;
+      }
+    }
+    
+    final qualifiedTeams = teamScores.values
+        .where((t) => (t['totalScore'] as int) > 0)
+        .toList()
+      ..sort((a, b) => (b['totalScore'] as int).compareTo(a['totalScore'] as int));
+    
+    if (qualifiedTeams.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error: $e'),
-          backgroundColor: Colors.red,
+        const SnackBar(
+          content: Text('No qualified teams found. Enter scores in Standings first.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    if (!mounted) return;
+
+    // Navigate to alliance selection page and wait for result
+    final result = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (context) => AllianceSelectionPage(
+          categoryId: categoryId,
+          categoryName: categoryName,
+          qualifiedTeams: qualifiedTeams,
+          onComplete: () {
+            // This won't be used anymore since we're using pop result
+            print("onComplete called");
+          },
+          onCancel: () {
+            print("❌ Alliance selection cancelled");
+            Navigator.of(context).pop(false);
+          },
+        ),
+        fullscreenDialog: true,
+      ),
+    );
+    
+    // If alliance formation was successful, show the proceed dialog
+    if (result == true && mounted) {
+      print("✅ Alliance selection completed - showing proceed dialog");
+      
+      // Refresh championship data
+      setState(() {
+        _championshipRefreshVersionByCategory[categoryId] =
+            (_championshipRefreshVersionByCategory[categoryId] ?? 0) + 1;
+      });
+      
+      // Show the proceed dialog immediately
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => Dialog(
+          backgroundColor: Colors.transparent,
+          child: Container(
+            width: 500,
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)],
+              ),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: const Color(0xFF00E5A0).withOpacity(0.5), width: 2),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: const Color(0xFF00E5A0).withOpacity(0.15),
+                  ),
+                  child: const Icon(Icons.emoji_events, color: Color(0xFF00E5A0), size: 48),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'CHAMPIONSHIP ROUND',
+                  style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w900, letterSpacing: 2),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Alliances are now formed for $categoryName',
+                  style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 14),
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  'Proceed to Championship Round?',
+                  style: TextStyle(color: Colors.white, fontSize: 16),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 24),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          // Stay on current tab
+                        },
+                        style: OutlinedButton.styleFrom(
+                          side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          // Switch to championship tab
+                          final tabContext = _categoryTabContexts[categoryId];
+                          final controller = tabContext == null ? null : DefaultTabController.maybeOf(tabContext);
+                          if (controller != null) {
+                            controller.animateTo(1);
+                          }
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF00E5A0),
+                          foregroundColor: Colors.black,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        child: const Text('PROCEED', style: TextStyle(fontWeight: FontWeight.bold)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
       );
     }
+    
+  } catch (e, stackTrace) {
+    print("❌ Error in _showAllianceSelection: $e");
+    print(stackTrace);
+    
+    if (!mounted) return;
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Error: $e'),
+        backgroundColor: Colors.red,
+      ),
+    );
   }
+}
+
 
   void _showChampionshipRoundPrompt(int categoryId, String categoryName) {
     showDialog(
       context: context,
+      barrierDismissible: false, // Prevent dismissing by tapping outside
       builder: (ctx) => Dialog(
         backgroundColor: Colors.transparent,
         child: Container(
@@ -437,12 +519,16 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => Navigator.pop(ctx),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        // Optionally switch to championship tab
+                        _openChampionshipTab(categoryId);
+                      },
                       style: OutlinedButton.styleFrom(
                         side: BorderSide(color: Colors.white.withOpacity(0.3)),
                         padding: const EdgeInsets.symmetric(vertical: 14),
                       ),
-                      child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
+                      child: const Text('OPEN TAB', style: TextStyle(color: Colors.white54)),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -450,6 +536,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     child: ElevatedButton(
                       onPressed: () {
                         Navigator.pop(ctx);
+                        // Navigate to championship tab
                         _openChampionshipTab(categoryId);
                       },
                       style: ElevatedButton.styleFrom(
@@ -457,7 +544,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                         foregroundColor: Colors.black,
                         padding: const EdgeInsets.symmetric(vertical: 14),
                       ),
-                      child: const Text('OPEN TAB', style: TextStyle(fontWeight: FontWeight.bold)),
+                      child: const Text('GENERATE', style: TextStyle(fontWeight: FontWeight.bold)),
                     ),
                   ),
                 ],
@@ -467,24 +554,27 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         ),
       ),
     );
-  }
+  } 
 
   void _openChampionshipTab(int categoryId) {
-    final tabContext = _categoryTabContexts[categoryId];
-    final controller = tabContext == null ? null : DefaultTabController.maybeOf(tabContext);
-    if (controller != null) {
-      controller.animateTo(1);
-      return;
-    }
+  final tabContext = _categoryTabContexts[categoryId];
+  final controller = tabContext == null ? null : DefaultTabController.maybeOf(tabContext);
+  if (controller != null) {
+    controller.animateTo(1);
+    return;
+  }
 
-    if (!mounted) return;
+  // Just show a snackbar, not a dialog
+  if (mounted) {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Championship tab is ready. Open it to generate the schedule.'),
+      SnackBar(
+        content: Text('Switched to Championship tab'),
         backgroundColor: Colors.blue,
+        duration: const Duration(seconds: 1),
       ),
     );
   }
+}
 
   Future<void> _generateChampionshipSchedule(int categoryId) async {
     try {
