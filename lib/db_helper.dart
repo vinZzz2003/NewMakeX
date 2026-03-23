@@ -109,6 +109,38 @@ class DBHelper {
       print("ℹ️  Migration: category_id already present on tbl_championship_schedule.");
     }
     
+    // In db_helper.dart, add this to runMigrations():
+
+// Create Explorer double elimination bracket table
+try {
+  await conn.execute("""
+    CREATE TABLE IF NOT EXISTS tbl_explorer_double_elimination (
+      match_id INT AUTO_INCREMENT PRIMARY KEY,
+      category_id INT NOT NULL,
+      round_name VARCHAR(50) NOT NULL,
+      match_position INT NOT NULL,
+      bracket_side ENUM('winners', 'losers', 'grand') NOT NULL,
+      round_number INT NOT NULL,
+      alliance1_id INT,
+      alliance2_id INT,
+      winner_alliance_id INT,
+      next_match_id_winner INT,
+      next_match_id_loser INT,
+      next_match_position_winner INT,
+      next_match_position_loser INT,
+      status VARCHAR(20) DEFAULT 'pending',
+      schedule_time VARCHAR(20),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (category_id) REFERENCES tbl_category(category_id) ON DELETE CASCADE,
+      FOREIGN KEY (alliance1_id) REFERENCES tbl_alliance_selections(alliance_id) ON DELETE SET NULL,
+      FOREIGN KEY (alliance2_id) REFERENCES tbl_alliance_selections(alliance_id) ON DELETE SET NULL,
+      FOREIGN KEY (winner_alliance_id) REFERENCES tbl_alliance_selections(alliance_id) ON DELETE SET NULL
+    )
+  """);
+  print("✅ Explorer double elimination bracket table created");
+} catch (e) {
+  print("ℹ️ Explorer bracket table check: $e");
+}
     // Add database indexes for performance
     await addDatabaseIndexes();
   }

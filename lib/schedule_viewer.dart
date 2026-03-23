@@ -1438,6 +1438,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       ),
     );
   }
+  
+
+
 
   Widget _buildQualificationActions(int catId, String categoryName) {
     return Padding(
@@ -2438,67 +2441,70 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   }
 
   Widget _buildCategoryView(
-      Map<String, dynamic> category, int catId,
-      List<Map<String, dynamic>> matches) {
-    final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
-    final isSoccer = catId == _soccerCategoryId;
-    
-    return DefaultTabController(
-      length: 2, // Qualification + Championship
-      child: Builder(builder: (tabContext) {
+    Map<String, dynamic> category, int catId,
+    List<Map<String, dynamic>> matches) {
+  final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
+  final isSoccer = catId == _soccerCategoryId;
+  
+  return DefaultTabController(
+    length: 2,
+    child: Builder(
+      builder: (tabContext) {
         _categoryTabContexts[catId] = tabContext;
-        return Column(children: [
-        _buildCategoryTitleBar(category, categoryName, matches),
-        
-        // Add tab bar for non-soccer categories
-        Container(
-          color: const Color(0xFF130742),
-          child: TabBar(
-            indicatorColor: const Color(0xFFFFD700),
-            indicatorWeight: 3,
-            labelColor: const Color(0xFFFFD700),
-            unselectedLabelColor: Colors.white30,
-            labelStyle: const TextStyle(
-                fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1.2),
-            tabs: const [
-              Tab(
-                icon: Icon(Icons.calendar_today, size: 16),
-                text: 'QUALIFICATION',
+        return Column(
+          children: [
+            _buildCategoryTitleBar(category, categoryName, matches),
+            
+            Container(
+              color: const Color(0xFF130742),
+              child: TabBar(
+                indicatorColor: const Color(0xFFFFD700),
+                indicatorWeight: 3,
+                labelColor: const Color(0xFFFFD700),
+                unselectedLabelColor: Colors.white30,
+                labelStyle: const TextStyle(
+                    fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1.2),
+                tabs: const [
+                  Tab(
+                    icon: Icon(Icons.calendar_today, size: 16),
+                    text: 'QUALIFICATION',
+                  ),
+                  Tab(
+                    icon: Icon(Icons.emoji_events, size: 16),
+                    text: 'CHAMPIONSHIP',
+                  ),
+                ],
               ),
-              Tab(
-                icon: Icon(Icons.emoji_events, size: 16),
-                text: 'CHAMPIONSHIP',
+            ),
+            
+            Expanded(
+              child: TabBarView(
+                children: [
+                  Column(
+                    children: [
+                      _buildQualificationActions(catId, categoryName),
+                      _buildAllianceSelectionButton(catId, categoryName),
+                      Expanded(
+                        child: isSoccer 
+                            ? _buildSoccerScheduleTab(catId, matches, _bracketSize(_soccerTeams.length), !_bracketSeeded)
+                            : _buildScheduleTable(category, catId, matches),
+                      ),
+                    ],
+                  ),
+                  ChampionshipSchedule(
+                    key: ValueKey('championship-$catId-${_championshipRefreshVersionByCategory[catId] ?? 0}'),
+                    categoryId: catId,
+                    categoryName: categoryName,
+                  ),
+                ],
               ),
-            ],
-          ),
-        ),
-        
-        Expanded(
-          child: TabBarView(
-            children: [
-              // Qualification tab (existing schedule)
-              Column(children: [
-                _buildQualificationActions(catId, categoryName),
-
-                // Alliance Selection Button (shown when all matches are done)
-                _buildAllianceSelectionButton(catId, categoryName),
-                
-                Expanded(child: _buildScheduleTable(category, catId, matches)),
-              ]),
-              
-              // Championship tab - using the fixed widget
-              ChampionshipSchedule(
-                key: ValueKey('championship-$catId-${_championshipRefreshVersionByCategory[catId] ?? 0}'),
-                categoryId: catId,
-                categoryName: categoryName,
-              ),
-            ],
-          ),
-        ),
-      ]);
-      }),
-    );
-  }
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
 
   // Add these new methods to _ScheduleViewerState:
 
