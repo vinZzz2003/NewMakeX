@@ -475,7 +475,7 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       } catch (e) {
         print("❌ tbl_alliance_selections table does not exist: $e");
         // Try to create the table
-        await conn.execute("""
+        await DBHelper.executeDual("""
           CREATE TABLE IF NOT EXISTS tbl_alliance_selections (
             alliance_id INT AUTO_INCREMENT PRIMARY KEY,
             category_id INT NOT NULL,
@@ -490,7 +490,7 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       
       // Clear existing alliances for this category
       print("🗑️ Clearing existing alliances for category ${widget.categoryId}");
-      await conn.execute(
+      await DBHelper.executeDual(
         "DELETE FROM tbl_alliance_selections WHERE category_id = :catId",
         {"catId": widget.categoryId},
       );
@@ -500,7 +500,7 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
         final alliance = _formedAlliances[i];
         print("📝 Saving alliance ${i + 1}: Captain ${alliance.captain.teamId} (${alliance.captain.teamName}) + Partner ${alliance.partner.teamId} (${alliance.partner.teamName})");
         
-        await conn.execute("""
+        await DBHelper.executeDual("""
           INSERT INTO tbl_alliance_selections 
             (category_id, captain_team_id, partner_team_id, selection_round)
           VALUES

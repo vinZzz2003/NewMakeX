@@ -173,7 +173,7 @@ class _Step4PlayerState extends State<Step4Player> {
           "present":   _p2Present! ? 1 : 0,
         },
       ]) {
-        await conn.execute(
+        await DBHelper.executeDual(
           """INSERT INTO tbl_player
                (player_name, player_birthdate, player_ispresent, team_id)
              VALUES (:name, :birthdate, :present, :teamId)""",

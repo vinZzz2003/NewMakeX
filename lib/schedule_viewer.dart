@@ -619,8 +619,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       
       print("📊 Found ${alliances.length} alliances");
       
-      // Clear existing championship schedule for this category
-      await conn.execute("""
+      // Clear existing championship schedule for this category (also explorer variant)
+      await DBHelper.executeDual("""
         DELETE FROM tbl_championship_schedule 
         WHERE category_id = :catId
       """, {"catId": categoryId});
@@ -635,7 +635,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         // Final: Winners of semifinals
         
         // Semifinals
-        await conn.execute("""
+        await DBHelper.executeDual("""
           INSERT INTO tbl_championship_schedule 
             (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time)
           VALUES
@@ -650,7 +650,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         });
         
         // Final (to be filled after semifinals)
-        await conn.execute("""
+        await DBHelper.executeDual("""
           INSERT INTO tbl_championship_schedule 
             (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
           VALUES
@@ -661,7 +661,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         // 8-team bracket
         // Quarterfinals, Semifinals, Final
         for (int i = 0; i < 4; i++) {
-          await conn.execute("""
+          await DBHelper.executeDual("""
             INSERT INTO tbl_championship_schedule 
               (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time)
             VALUES
@@ -677,7 +677,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         
         // Semifinals and final placeholders
         for (int i = 0; i < 2; i++) {
-          await conn.execute("""
+          await DBHelper.executeDual("""
             INSERT INTO tbl_championship_schedule 
               (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
             VALUES
@@ -690,7 +690,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         }
         
         // Final placeholder
-        await conn.execute("""
+        await DBHelper.executeDual("""
           INSERT INTO tbl_championship_schedule 
             (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
           VALUES
@@ -699,7 +699,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         
       } else if (numAlliances == 2) {
         // Direct final
-        await conn.execute("""
+        await DBHelper.executeDual("""
           INSERT INTO tbl_championship_schedule 
             (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time)
           VALUES
@@ -2566,21 +2566,21 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       final conn = await DBHelper.getConnection();
       
       // Delete only matches for this category
-      await conn.execute("""
+      await DBHelper.executeDual("""
         DELETE ts FROM tbl_teamschedule ts
         JOIN tbl_team t ON ts.team_id = t.team_id
         WHERE t.category_id = :catId
       """, {"catId": categoryId});
       
       // Also delete orphaned matches and schedules
-      await conn.execute("""
+      await DBHelper.executeDual("""
         DELETE m FROM tbl_match m
         WHERE NOT EXISTS (
           SELECT 1 FROM tbl_teamschedule ts WHERE ts.match_id = m.match_id
         )
       """);
       
-      await conn.execute("""
+      await DBHelper.executeDual("""
         DELETE s FROM tbl_schedule s
         WHERE NOT EXISTS (
           SELECT 1 FROM tbl_match m WHERE m.schedule_id = s.schedule_id

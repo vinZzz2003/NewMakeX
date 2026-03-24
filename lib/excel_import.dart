@@ -554,7 +554,7 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
           } else {
             // Auto-create school with a default region
             debugPrint('ROW ${row.rowNum}: school "${row.schoolName}" not found, auto-creating...');
-            await conn.execute(
+            await DBHelper.executeDual(
               "INSERT INTO tbl_school (school_name, school_region) VALUES (:name, :region)",
               {"name": row.schoolName.trim(), "region": "NCR - National Capital Region"},
             );
@@ -593,7 +593,7 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
         if (menId == null) {
           try {
             debugPrint('ROW ${row.rowNum}: mentor "${row.mentorName}" not found, auto-creating...');
-            await conn.execute(
+            await DBHelper.executeDual(
               "INSERT INTO tbl_mentor (mentor_name, mentor_phone, school_id) "
               "VALUES (:name, :number, :schoolId)",
               {
@@ -653,7 +653,7 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
 
         try {
           debugPrint('ROW ${row.rowNum}: inserting team...');
-          await conn.execute(
+          await DBHelper.executeDual(
             """INSERT INTO tbl_team (team_name, team_ispresent, mentor_id, category_id)
                VALUES (:name, 1, :mentorId, :categoryId)""",
             {
@@ -682,14 +682,14 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
 
           debugPrint('ROW ${row.rowNum}: team_id=$teamId, inserting players...');
 
-          await conn.execute(
+          await DBHelper.executeDual(
             """INSERT INTO tbl_player
                  (player_name, player_birthdate, player_ispresent, team_id)
                VALUES (:name, :birth, 1, :teamId)""",
             {"name": row.p1Name, "birth": row.p1Birthdate, "teamId": teamId},
           );
 
-          await conn.execute(
+          await DBHelper.executeDual(
             """INSERT INTO tbl_player
                  (player_name, player_birthdate, player_ispresent, team_id)
                VALUES (:name, :birth, 1, :teamId)""",

@@ -645,7 +645,7 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
           ) ?? 0;
           
           if (exists == 0) {
-            await conn.execute("""
+            await DBHelper.executeDual("""
               INSERT INTO tbl_score
                 (team_id, round_id, score_totalscore, score_individual, score_alliance, score_violation, score_totalduration)
               VALUES
@@ -710,7 +710,7 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
     
     try {
       final conn = await DBHelper.getConnection();
-      await conn.execute("""
+      await DBHelper.executeDual("""
         DELETE s FROM tbl_score s
         JOIN tbl_team t ON s.team_id = t.team_id
         WHERE t.category_id = :catId
@@ -1620,27 +1620,22 @@ if (isOneVsOne) {
                           // Save to database
                           final conn = await DBHelper.getConnection();
                           
-                          // Check if championship_scores table exists, if not create it
-                          try {
-                            await conn.execute("""
-                              CREATE TABLE IF NOT EXISTS tbl_championship_scores (
-                                score_id INT AUTO_INCREMENT PRIMARY KEY,
-                                alliance_id INT NOT NULL,
-                                match_position INT NOT NULL,
-                                score INT NOT NULL DEFAULT 0,
-                                violation INT NOT NULL DEFAULT 0,
-                                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                                FOREIGN KEY (alliance_id) REFERENCES tbl_alliance_selections(alliance_id) ON DELETE CASCADE,
-                                UNIQUE KEY unique_alliance_match (alliance_id, match_position)
-                              )
-                            """);
-                            print("✅ Championship scores table created or already exists");
-                          } catch (e) {
-                            print("⚠️ Error creating championship scores table: $e");
-                          }
-                          
-                          // Upsert the score
-                          await conn.execute("""
+                          // Create championship_scores table and write score to both
+                          // original and explorer variants (best-effort).
+                          await DBHelper.executeDual("""
+                            CREATE TABLE IF NOT EXISTS tbl_championship_scores (
+                              score_id INT AUTO_INCREMENT PRIMARY KEY,
+                              alliance_id INT NOT NULL,
+                              match_position INT NOT NULL,
+                              score INT NOT NULL DEFAULT 0,
+                              violation INT NOT NULL DEFAULT 0,
+                              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                              FOREIGN KEY (alliance_id) REFERENCES tbl_alliance_selections(alliance_id) ON DELETE CASCADE,
+                              UNIQUE KEY unique_alliance_match (alliance_id, match_position)
+                            )
+                          """);
+
+                          await DBHelper.executeDual("""
                             INSERT INTO tbl_championship_scores 
                               (alliance_id, match_position, score, violation)
                             VALUES

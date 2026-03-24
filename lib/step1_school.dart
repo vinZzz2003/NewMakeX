@@ -86,14 +86,11 @@ class _Step1SchoolState extends State<Step1School> {
       }
 
       // ── Insert ───────────────────────────────────────────────────
-      await conn.execute(
+      final insertRes = await DBHelper.executeDual(
         "INSERT INTO tbl_school (school_name, school_region) VALUES (:name, :region)",
         {"name": fullName, "region": _selectedRegion},
       );
-
-      final result   = await conn.execute("SELECT LAST_INSERT_ID() as id");
-      final schoolId = int.parse(
-          result.rows.first.assoc()['LAST_INSERT_ID()'] ?? '0');
+      final schoolId = insertRes.lastInsertID.toInt();
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(

@@ -175,8 +175,8 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     }
 
     // Create table for category settings if it doesn't exist
-    try {
-      await conn.execute("""
+      try {
+      await DBHelper.executeDual("""
         CREATE TABLE IF NOT EXISTS tbl_category_settings (
           category_id INT PRIMARY KEY,
           matches_per_team INT NOT NULL DEFAULT 4,
@@ -194,7 +194,7 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
       final categoryId = entry.key;
       final matchesPerTeam = entry.value;
       
-      await conn.execute("""
+      await DBHelper.executeDual("""
         INSERT INTO tbl_category_settings (category_id, matches_per_team)
         VALUES (:catId, :matches)
         ON DUPLICATE KEY UPDATE matches_per_team = :matches
@@ -451,21 +451,21 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     final conn = await DBHelper.getConnection();
     
     // Delete only matches for this category
-    await conn.execute("""
+    await DBHelper.executeDual("""
       DELETE ts FROM tbl_teamschedule ts
       JOIN tbl_team t ON ts.team_id = t.team_id
       WHERE t.category_id = :catId
     """, {"catId": categoryId});
     
     // Delete orphaned matches and schedules
-    await conn.execute("""
+    await DBHelper.executeDual("""
       DELETE m FROM tbl_match m
       WHERE NOT EXISTS (
         SELECT 1 FROM tbl_teamschedule ts WHERE ts.match_id = m.match_id
       )
     """);
     
-    await conn.execute("""
+    await DBHelper.executeDual("""
       DELETE s FROM tbl_schedule s
       WHERE NOT EXISTS (
         SELECT 1 FROM tbl_match m WHERE m.schedule_id = s.schedule_id

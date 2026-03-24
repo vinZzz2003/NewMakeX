@@ -91,7 +91,7 @@ class _Step3TeamState extends State<Step3Team> {
     setState(() => _isLoading = true);
     try {
       final conn = await DBHelper.getConnection();
-      await conn.execute(
+      final insertRes = await DBHelper.executeDual(
         """INSERT INTO tbl_team (team_name, team_ispresent, mentor_id, category_id)
            VALUES (:name, :present, :mentorId, :categoryId)""",
         {
@@ -101,8 +101,7 @@ class _Step3TeamState extends State<Step3Team> {
           "categoryId": _selectedCategoryId,
         },
       );
-      final result = await conn.execute("SELECT LAST_INSERT_ID() as id");
-      final teamId = int.parse(result.rows.first.assoc()['LAST_INSERT_ID()'] ?? '0');
+      final teamId = insertRes.lastInsertID.toInt();
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
         content: Text('✅ Team registered successfully!'),
         backgroundColor: Colors.green));

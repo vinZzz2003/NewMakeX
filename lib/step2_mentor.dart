@@ -83,12 +83,11 @@ class _Step2MentorState extends State<Step2Mentor> {
     setState(() => _isLoading = true);
     try {
       final conn = await DBHelper.getConnection();
-      await conn.execute(
+      final insertRes = await DBHelper.executeDual(
         "INSERT INTO tbl_mentor (mentor_name, mentor_phone, school_id) VALUES (:name, :number, :schoolId)",
         {"name": _nameController.text.trim(), "number": contact, "schoolId": _selectedSchoolId},
       );
-      final result   = await conn.execute("SELECT LAST_INSERT_ID() as id");
-      final mentorId = int.parse(result.rows.first.assoc()['LAST_INSERT_ID()'] ?? '0');
+      final mentorId = insertRes.lastInsertID.toInt();
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
         content: Text('✅ Mentor registered successfully!'),
         backgroundColor: Colors.green));

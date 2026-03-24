@@ -41,7 +41,7 @@ class DBHelper {
 
     // Create alliance selections table
     try {
-      await conn.execute("""
+      await executeDual("""
         CREATE TABLE IF NOT EXISTS tbl_alliance_selections (
           alliance_id INT AUTO_INCREMENT PRIMARY KEY,
           category_id INT NOT NULL,
@@ -61,7 +61,7 @@ class DBHelper {
     
     // Create championship schedule table
     try {
-      await conn.execute("""
+      await executeDual("""
         CREATE TABLE IF NOT EXISTS tbl_championship_schedule (
           match_id INT AUTO_INCREMENT PRIMARY KEY,
           category_id INT NOT NULL,
@@ -81,7 +81,7 @@ class DBHelper {
 
     // Create championship settings table
     try {
-      await conn.execute("""
+      await executeDual("""
         CREATE TABLE IF NOT EXISTS tbl_championship_settings (
           category_id INT PRIMARY KEY,
           matches_per_alliance INT NOT NULL DEFAULT 1,
@@ -113,7 +113,7 @@ class DBHelper {
 
 // Create Explorer double elimination bracket table
 try {
-  await conn.execute("""
+  await executeDual("""
     CREATE TABLE IF NOT EXISTS tbl_explorer_double_elimination (
       match_id INT AUTO_INCREMENT PRIMARY KEY,
       category_id INT NOT NULL,
@@ -238,13 +238,222 @@ try {
     }
   }
 
+  // Tables that have explorer-specific counterparts (base names without 'tbl_' prefix)
+  static const List<String> _explorerTableBases = [
+    'alliance_selections',
+    'championship_scores',
+    'championship_schedule',
+    'championship_settings',
+    'double_elimination',
+    'match',
+    'schedule',
+    'teamschedule',
+    'player',
+    'mentor',
+    'school',
+    'category_settings',
+    'score',
+    'team',
+    'round',
+    'category',
+  ];
+
+  // Executes the given SQL against the original tables, then attempts to run
+  // a transformed copy against explorer-specific tables (tbl_explorer_...)
+  // Non-fatal: explorer writes are best-effort and errors are logged only.
+  static Future<dynamic> executeDual(String sql, [Map<String, dynamic>? params]) async {
+    final conn = await getConnection();
+
+    // Execute against original tables first and keep the result
+    final result = await conn.execute(sql, params ?? {});
+
+    // Build explorer variant by replacing table names where applicable
+    String explorerSql = sql;
+    bool explorerGenerated = false;
+    bool explorerExecuted = false;
+    try {
+      for (final base in _explorerTableBases) {
+        final original = 'tbl_' + base;
+        final explorer = 'tbl_explorer_' + base;
+        explorerSql = explorerSql.replaceAll(RegExp(r'\b' + original + r'\b'), explorer);
+      }
+
+      if (explorerSql != sql) {
+        explorerGenerated = true;
+      }
+    } catch (e) {
+      print('ℹ️ executeDual failed to generate explorer SQL: $e');
+      explorerGenerated = false;
+      explorerSql = sql;
+    }
+
+    // Resolve category slug for category-specific mirrors (tbl_<slug>_...)
+    String? resolvedSlug;
+    try {
+      final p = params ?? {};
+      int? parseInt(dynamic v) {
+        if (v == null) return null;
+        try { return int.tryParse(v.toString()); } catch (_) { return null; }
+      }
+
+      // Look for category id directly
+      final potentialCatKeys = ['catId', 'categoryId', 'category_id', 'cat'];
+      int? catId;
+      for (final k in potentialCatKeys) {
+        if (p.containsKey(k)) { catId = parseInt(p[k]); if (catId != null) break; }
+      }
+
+      // If no catId, try via teamId
+      if (catId == null) {
+        final teamKeys = ['teamId', 'team_id', 'team'];
+        int? teamId;
+        for (final k in teamKeys) {
+          if (p.containsKey(k)) { teamId = parseInt(p[k]); if (teamId != null) break; }
+        }
+        if (teamId != null) {
+          try {
+            final res = await conn.execute("""
+              SELECT c.category_type FROM tbl_team t
+              JOIN tbl_category c ON t.category_id = c.category_id
+              WHERE t.team_id = :teamId LIMIT 1
+            """, {"teamId": teamId});
+            if (res.rows.isNotEmpty) {
+              resolvedSlug = res.rows.first.assoc()['category_type']?.toString();
+            }
+          } catch (_) {}
+        } else {
+          // If no teamId, try via allianceId (championship scores)
+          final allianceKeys = ['allianceId', 'alliance_id', 'alliance'];
+          int? allianceId;
+          for (final k in allianceKeys) {
+            if (p.containsKey(k)) { allianceId = parseInt(p[k]); if (allianceId != null) break; }
+          }
+          if (allianceId != null) {
+            try {
+              final ares = await conn.execute("""
+                SELECT c.category_type FROM tbl_alliance_selections a
+                JOIN tbl_category c ON a.category_id = c.category_id
+                WHERE a.alliance_id = :allianceId LIMIT 1
+              """, {"allianceId": allianceId});
+              if (ares.rows.isNotEmpty) {
+                resolvedSlug = ares.rows.first.assoc()['category_type']?.toString();
+              }
+            } catch (_) {}
+          }
+        }
+      } else {
+        try {
+          final cres = await conn.execute("SELECT category_type FROM tbl_category WHERE category_id = :id LIMIT 1", {"id": catId});
+          if (cres.rows.isNotEmpty) resolvedSlug = cres.rows.first.assoc()['category_type']?.toString();
+        } catch (_) {}
+      }
+
+      if (resolvedSlug != null && resolvedSlug.trim().isNotEmpty) {
+        resolvedSlug = resolvedSlug.replaceAll(RegExp(r"\(.*?\)"), '').toLowerCase();
+        resolvedSlug = resolvedSlug.replaceAll(RegExp(r"[^a-z0-9]+"), '_').replaceAll(RegExp(r"_+"), '_');
+        resolvedSlug = resolvedSlug.replaceAll(RegExp(r"^_+|_+"), '').trim();
+        if (resolvedSlug.isEmpty) resolvedSlug = null;
+      }
+    } catch (e) {
+      print('ℹ️ executeDual: category slug resolution failed: $e');
+    }
+
+    if (resolvedSlug != null) {
+      try {
+        String catSql = sql;
+        for (final base in _explorerTableBases) {
+          final original = 'tbl_' + base;
+          final replacement = 'tbl_' + resolvedSlug + '_' + base;
+          catSql = catSql.replaceAll(RegExp(r'\b' + original + r'\b'), replacement);
+        }
+
+        if (catSql != sql) {
+          print('ℹ️ executeDual: attempting category-specific SQL for "$resolvedSlug":\n$catSql');
+          try {
+            await _ensureCategoryParents(conn, resolvedSlug, params ?? {});
+            // If category-specific SQL exactly matches the explorer SQL, execute explorer SQL once
+            if (explorerGenerated && explorerSql.trim() == catSql.trim()) {
+              try {
+                await conn.execute(explorerSql, params ?? {});
+                explorerExecuted = true;
+                print('ℹ️ executeDual: wrote explorer/category mirror (single execution) for "$resolvedSlug"');
+              } catch (e) {
+                print('ℹ️ executeDual explorer/category mirror skipped or failed: $e');
+              }
+            } else {
+              await conn.execute(catSql, params ?? {});
+              print('ℹ️ executeDual: wrote category-specific mirror using slug "$resolvedSlug"');
+            }
+          } catch (e) {
+            print('ℹ️ executeDual category mirror skipped or failed: $e');
+          }
+        }
+      } catch (e) {
+        print('ℹ️ executeDual category mirror generation failed: $e');
+      }
+    }
+
+    // If no category-specific slug was resolved, execute the explorer variant now (one-time).
+    if (explorerGenerated && !explorerExecuted && (resolvedSlug == null)) {
+      try {
+        await conn.execute(explorerSql, params ?? {});
+        print('ℹ️ executeDual: wrote explorer mirror');
+      } catch (e) {
+        print('ℹ️ executeDual explorer write skipped or failed: $e');
+      }
+    }
+
+    return result;
+  }
+
+  // Ensure parent rows exist in category-specific tables before inserting dependent rows.
+  // This creates minimal team/match rows in tbl_<slug>_team and tbl_<slug>_match using data copied from the canonical tables.
+  static Future<void> _ensureCategoryParents(MySQLConnection conn, String slug, Map<String, dynamic> params) async {
+    try {
+      int? parseInt(dynamic v) {
+        if (v == null) return null;
+        try { return int.tryParse(v.toString()); } catch (_) { return null; }
+      }
+
+      final p = params ?? {};
+
+      // Mirror team if needed
+      int? teamId;
+      for (final k in ['teamId', 'team_id', 'team']) { if (p.containsKey(k)) { teamId = parseInt(p[k]); if (teamId != null) break; } }
+      if (teamId != null) {
+        try {
+          await conn.execute("""
+            INSERT IGNORE INTO tbl_${slug}_team (team_id, team_name, mentor_id, category_id, team_ispresent)
+            SELECT team_id, team_name, mentor_id, category_id, team_ispresent FROM tbl_team WHERE team_id = :teamId
+          """, {"teamId": teamId});
+          print('ℹ️ _ensureCategoryParents: ensured team_id=$teamId in tbl_${slug}_team');
+        } catch (e) { print('ℹ️ _ensureCategoryParents team mirror failed: $e'); }
+      }
+
+      // Mirror match if needed
+      int? matchId;
+      for (final k in ['matchId', 'match_id', 'match']) { if (p.containsKey(k)) { matchId = parseInt(p[k]); if (matchId != null) break; } }
+      if (matchId != null) {
+        try {
+          await conn.execute("""
+            INSERT IGNORE INTO tbl_${slug}_match (match_id)
+            SELECT match_id FROM tbl_match WHERE match_id = :matchId
+          """, {"matchId": matchId});
+          print('ℹ️ _ensureCategoryParents: ensured match_id=$matchId in tbl_${slug}_match');
+        } catch (e) { print('ℹ️ _ensureCategoryParents match mirror failed: $e'); }
+      }
+    } catch (e) {
+      print('ℹ️ _ensureCategoryParents failed: $e');
+    }
+  }
+
   // ── CHAMPIONSHIP SETTINGS ─────────────────────────────────────────────────
 
   // Save championship settings
   static Future<void> saveChampionshipSettings(ChampionshipSettings settings) async {
     final conn = await getConnection();
     
-    await conn.execute("""
+    await executeDual("""
       INSERT INTO tbl_championship_settings 
         (category_id, matches_per_alliance, start_time, end_time, duration_minutes, interval_minutes, lunch_break_enabled)
       VALUES
@@ -296,14 +505,14 @@ try {
     
     try {
       // Delete championship schedule entries that reference non-existent categories
-      await conn.execute("""
+      await executeDual("""
         DELETE cs FROM tbl_championship_schedule cs
         LEFT JOIN tbl_category c ON cs.category_id = c.category_id
         WHERE c.category_id IS NULL
       """);
       
       // Delete championship settings for non-existent categories
-      await conn.execute("""
+      await executeDual("""
         DELETE cs FROM tbl_championship_settings cs
         LEFT JOIN tbl_category c ON cs.category_id = c.category_id
         WHERE c.category_id IS NULL
@@ -340,7 +549,7 @@ try {
       }
       
       // First, delete existing schedule for this category
-      await conn.execute(
+      await executeDual(
         "DELETE FROM tbl_championship_schedule WHERE category_id = :catId",
         {"catId": categoryId},
       );
@@ -363,7 +572,7 @@ try {
         for (int matchNum = 1; matchNum <= settings.matchesPerAlliance; matchNum++) {
           final timeStr = formatTime(currentHour, currentMinute);
           
-          await conn.execute("""
+          await DBHelper.executeDual("""
             INSERT INTO tbl_championship_schedule 
               (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
             VALUES
@@ -393,7 +602,7 @@ try {
         
         // Semifinal 1
         String time1 = formatTime(currentHour, currentMinute);
-        await conn.execute("""
+        await DBHelper.executeDual("""
           INSERT INTO tbl_championship_schedule 
             (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
           VALUES
@@ -415,7 +624,7 @@ try {
         
         // Semifinal 2
         String time2 = formatTime(currentHour, currentMinute);
-        await conn.execute("""
+        await DBHelper.executeDual("""
           INSERT INTO tbl_championship_schedule 
             (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
           VALUES
@@ -441,7 +650,7 @@ try {
         for (int matchNum = 1; matchNum <= settings.matchesPerAlliance; matchNum++) {
           String timeStr = formatTime(currentHour, currentMinute);
           
-          await conn.execute("""
+          await DBHelper.executeDual("""
             INSERT INTO tbl_championship_schedule 
               (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
             VALUES
@@ -470,7 +679,7 @@ try {
         for (int i = 0; i < 4; i++) {
           String timeStr = formatTime(currentHour, currentMinute);
           
-          await conn.execute("""
+          await DBHelper.executeDual("""
             INSERT INTO tbl_championship_schedule 
               (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
             VALUES
@@ -496,10 +705,10 @@ try {
         print("🎯 Generating SEMIFINALS");
         
         // Semifinals
-        for (int i = 0; i < 2; i++) {
+          for (int i = 0; i < 2; i++) {
           String timeStr = formatTime(currentHour, currentMinute);
           
-          await conn.execute("""
+          await DBHelper.executeDual("""
             INSERT INTO tbl_championship_schedule 
               (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
             VALUES
@@ -523,10 +732,10 @@ try {
         print("🎯 Generating FINAL with ${settings.matchesPerAlliance} matches");
         
         // Final
-        for (int matchNum = 1; matchNum <= settings.matchesPerAlliance; matchNum++) {
+          for (int matchNum = 1; matchNum <= settings.matchesPerAlliance; matchNum++) {
           String timeStr = formatTime(currentHour, currentMinute);
           
-          await conn.execute("""
+          await DBHelper.executeDual("""
             INSERT INTO tbl_championship_schedule 
               (category_id, alliance1_id, alliance2_id, match_round, match_position, schedule_time, status)
             VALUES
@@ -659,13 +868,13 @@ try {
 
   static Future<void> clearSchedule() async {
     final conn = await getConnection();
-    await conn.execute("DELETE FROM tbl_teamschedule");
-    await conn.execute("DELETE FROM tbl_match");
-    await conn.execute("DELETE FROM tbl_schedule");
+    await executeDual("DELETE FROM tbl_teamschedule");
+    await executeDual("DELETE FROM tbl_match");
+    await executeDual("DELETE FROM tbl_schedule");
     // Reset AUTO_INCREMENT so match IDs start from 1 again
-    await conn.execute("ALTER TABLE tbl_teamschedule AUTO_INCREMENT = 1");
-    await conn.execute("ALTER TABLE tbl_match AUTO_INCREMENT = 1");
-    await conn.execute("ALTER TABLE tbl_schedule AUTO_INCREMENT = 1");
+    await executeDual("ALTER TABLE tbl_teamschedule AUTO_INCREMENT = 1");
+    await executeDual("ALTER TABLE tbl_match AUTO_INCREMENT = 1");
+    await executeDual("ALTER TABLE tbl_schedule AUTO_INCREMENT = 1");
     print("✅ Schedule cleared and IDs reset.");
   }
 
@@ -674,7 +883,7 @@ try {
     required String endTime,
   }) async {
     final conn = await getConnection();
-    final result = await conn.execute("""
+    final result = await executeDual("""
       INSERT INTO tbl_schedule (schedule_start, schedule_end)
       VALUES (:start, :end)
     """, {"start": startTime, "end": endTime});
@@ -683,7 +892,7 @@ try {
 
   static Future<int> insertMatch(int scheduleId) async {
     final conn = await getConnection();
-    final result = await conn.execute("""
+    final result = await executeDual("""
       INSERT INTO tbl_match (schedule_id) VALUES (:scheduleId)
     """, {"scheduleId": scheduleId});
     return result.lastInsertID.toInt();
@@ -708,7 +917,7 @@ try {
     if (exists == 0) {
       print("⚠️ Round $roundId does not exist - creating it now");
       try {
-        await conn.execute("""
+        await executeDual("""
           INSERT INTO tbl_round (round_id, round_type, round_number)
           VALUES (:id, :type, :number)
         """, {
@@ -725,7 +934,7 @@ try {
     
     print("📝 Inserting: match=$matchId, round=$roundId, team=$teamId, arena=$arenaNumber");
     
-    await conn.execute("""
+    await executeDual("""
       INSERT INTO tbl_teamschedule (match_id, round_id, team_id, referee_id, arena_number)
       VALUES (:match, :round, :team, :ref, :arena)
     """, {
@@ -750,7 +959,7 @@ try {
       // Add missing rounds
       for (int i = count + 1; i <= maxRounds; i++) {
         try {
-          await conn.execute("""
+          await executeDual("""
             INSERT INTO tbl_round (round_id, round_type, round_number)
             VALUES (:id, :type, :number)
           """, {
@@ -785,7 +994,7 @@ try {
     // ── Store the matches per team setting in a new table or settings table ──
     // First, create a table to store category settings if it doesn't exist
     try {
-      await conn.execute("""
+      await executeDual("""
         CREATE TABLE IF NOT EXISTS tbl_category_settings (
           category_id INT PRIMARY KEY,
           matches_per_team INT NOT NULL DEFAULT 4,
@@ -819,8 +1028,8 @@ try {
         ? 1
         : runsPerCategory.values.reduce((a, b) => a > b ? a : b);
     
-    await conn.execute("DELETE FROM tbl_round");
-    await conn.execute("ALTER TABLE tbl_round AUTO_INCREMENT = 1");
+    await executeDual("DELETE FROM tbl_round");
+    await executeDual("ALTER TABLE tbl_round AUTO_INCREMENT = 1");
     await seedRounds(maxRuns);
     
     final roundCheck = await conn.execute("SELECT COUNT(*) as cnt FROM tbl_round");
@@ -1256,7 +1465,7 @@ try {
     if (exists > 0) {
       // Update existing
       print("🔄 Updating existing score record");
-      await conn.execute("""
+      await executeDual("""
         UPDATE tbl_score
         SET 
           score_individual = :indep,
@@ -1281,7 +1490,7 @@ try {
     } else {
       // Insert new
       print("➕ Inserting new score record");
-      await conn.execute("""
+      await executeDual("""
         INSERT INTO tbl_score
           (score_individual, score_alliance, score_violation, score_totalscore,
            score_totalduration, score_isapproved,
@@ -1514,7 +1723,7 @@ static Future<void> _updateTeamScore(
     print("     Current: IND=$individual, ALL=$currentAlliance, VIO=$violation, TOTAL=${individual + currentAlliance - violation}");
     print("     New: ALL=$newAlliance, TOTAL=$newTotal");
 
-    await conn.execute("""
+    await executeDual("""
       UPDATE tbl_score
       SET 
         score_alliance = :alliance,
@@ -1532,7 +1741,7 @@ static Future<void> _updateTeamScore(
     // Insert new score
     print("    ⚠️ No score record exists - creating new");
     
-    await conn.execute("""
+    await executeDual("""
       INSERT INTO tbl_score
         (team_id, round_id, score_individual, score_alliance, score_violation, 
          score_totalscore, score_totalduration, score_isapproved, match_id, referee_id)

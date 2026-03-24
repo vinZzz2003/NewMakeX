@@ -191,7 +191,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
 
   Future<void> _createDoubleEliminationTable(MySQLConnection conn) async {
     try {
-      await conn.execute("""
+      await DBHelper.executeDual("""
         CREATE TABLE IF NOT EXISTS tbl_double_elimination (
           match_id INT AUTO_INCREMENT PRIMARY KEY,
           category_id INT NOT NULL,
@@ -243,14 +243,14 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
       });
       
       if (scheduleMatch.rows.isNotEmpty) {
-        await conn.execute("""
-          UPDATE tbl_championship_schedule 
-          SET status = 'completed', winner_alliance_id = :winnerId
-          WHERE match_id = :matchId
-        """, {
-          "winnerId": winnerId,
-          "matchId": matchId,
-        });
+        await DBHelper.executeDual("""
+            UPDATE tbl_championship_schedule 
+            SET status = 'completed', winner_alliance_id = :winnerId
+            WHERE match_id = :matchId
+          """, {
+            "winnerId": winnerId,
+            "matchId": matchId,
+          });
         print("✅ Synced with schedule tab: Match $matchId completed");
       }
       
@@ -292,7 +292,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
       if (roundName.startsWith('W1_') && hasTeam1 && !hasTeam2) {
         final winnerId = int.parse(alliance1IdStr!);
         print("🔄 Auto-advancing bye match: $roundName");
-        await conn.execute("""
+        await DBHelper.executeDual("""
           UPDATE tbl_double_elimination
           SET winner_alliance_id = :winnerId, status = 'completed'
           WHERE match_id = :matchId
@@ -308,7 +308,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
       } else if (roundName.startsWith('W1_') && !hasTeam1 && hasTeam2) {
         final winnerId = int.parse(alliance2IdStr!);
         print("🔄 Auto-advancing bye match: $roundName");
-        await conn.execute("""
+        await DBHelper.executeDual("""
           UPDATE tbl_double_elimination
           SET winner_alliance_id = :winnerId, status = 'completed'
           WHERE match_id = :matchId
@@ -359,7 +359,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
         print("🎯 Propagating winner to match ID $nextMatchId at position $winnerPos");
         
         if (winnerPos == 1) {
-          await conn.execute("""
+          await DBHelper.executeDual("""
             UPDATE tbl_double_elimination 
             SET alliance1_id = :winnerId
             WHERE match_id = :nextMatchId
@@ -368,7 +368,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
             "nextMatchId": nextMatchId,
           });
         } else {
-          await conn.execute("""
+          await DBHelper.executeDual("""
             UPDATE tbl_double_elimination 
             SET alliance2_id = :winnerId
             WHERE match_id = :nextMatchId
@@ -390,7 +390,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
           print("🎯 Propagating loser to match ID $nextMatchIdLoser at position $loserPos");
           
           if (loserPos == 1) {
-            await conn.execute("""
+            await DBHelper.executeDual("""
               UPDATE tbl_double_elimination 
               SET alliance1_id = :loserId
               WHERE match_id = :nextMatchId
@@ -399,7 +399,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
               "nextMatchId": nextMatchIdLoser,
             });
           } else {
-            await conn.execute("""
+            await DBHelper.executeDual("""
               UPDATE tbl_double_elimination 
               SET alliance2_id = :loserId
               WHERE match_id = :nextMatchId
@@ -471,11 +471,11 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
       _autoProcessEnabled = false;
       
       final conn = await DBHelper.getConnection();
-      await conn.execute(
+      await DBHelper.executeDual(
         "DELETE FROM tbl_double_elimination WHERE category_id = :catId",
         {"catId": widget.categoryId}
       );
-      await conn.execute(
+      await DBHelper.executeDual(
         "DELETE FROM tbl_championship_schedule WHERE category_id = :catId",
         {"catId": widget.categoryId}
       );
@@ -572,7 +572,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
     
     await _createDoubleEliminationTable(conn);
     
-    await conn.execute(
+    await DBHelper.executeDual(
       "DELETE FROM tbl_double_elimination WHERE category_id = :catId",
       {"catId": widget.categoryId}
     );
@@ -929,7 +929,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
       String timeStr = formatTime(currentHour, currentMinute);
       String roundName = node['id'];
       
-      var result = await conn.execute("""
+      var result = await DBHelper.executeDual("""
         INSERT INTO tbl_double_elimination 
           (category_id, round_name, match_position, bracket_side, round_number, 
            alliance1_id, alliance2_id, schedule_time, status)
@@ -960,7 +960,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
       if (node['nextWinnerId'] != null) {
         var nextNode = _matchNodes[node['nextWinnerId']];
         if (nextNode != null && nextNode['dbId'] != null) {
-          await conn.execute("""
+          await DBHelper.executeDual("""
             UPDATE tbl_double_elimination 
             SET next_match_id_winner = :nextId, next_match_position_winner = :pos
             WHERE match_id = :currentId
@@ -975,7 +975,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
       if (node['nextLoserId'] != null) {
         var nextNode = _matchNodes[node['nextLoserId']];
         if (nextNode != null && nextNode['dbId'] != null) {
-          await conn.execute("""
+          await DBHelper.executeDual("""
             UPDATE tbl_double_elimination 
             SET next_match_id_loser = :nextId, next_match_position_loser = :pos
             WHERE match_id = :currentId
@@ -1681,7 +1681,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
       
       print("📝 Updating match $roundName: Winner ID=$winnerId, Loser ID=$loserId");
       
-      await conn.execute("""
+      await DBHelper.executeDual("""
         UPDATE tbl_double_elimination 
         SET winner_alliance_id = :winnerId, status = 'completed'
         WHERE match_id = :matchId
@@ -1701,7 +1701,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
           print("🎯 Propagating winner to match ID $nextMatchId at position $winnerPos");
           
           if (winnerPos == 1) {
-            await conn.execute("""
+            await DBHelper.executeDual("""
               UPDATE tbl_double_elimination 
               SET alliance1_id = :winnerId
               WHERE match_id = :nextMatchId
@@ -1710,7 +1710,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
               "nextMatchId": nextMatchId,
             });
           } else {
-            await conn.execute("""
+            await DBHelper.executeDual("""
               UPDATE tbl_double_elimination 
               SET alliance2_id = :winnerId
               WHERE match_id = :nextMatchId
@@ -1728,7 +1728,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
           print("🎯 Propagating loser to match ID $nextMatchIdLoser at position $loserPos");
           
           if (loserPos == 1) {
-            await conn.execute("""
+            await DBHelper.executeDual("""
               UPDATE tbl_double_elimination 
               SET alliance1_id = :loserId
               WHERE match_id = :nextMatchId
@@ -1737,7 +1737,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
               "nextMatchId": nextMatchIdLoser,
             });
           } else {
-            await conn.execute("""
+            await DBHelper.executeDual("""
               UPDATE tbl_double_elimination 
               SET alliance2_id = :loserId
               WHERE match_id = :nextMatchId
@@ -1795,7 +1795,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
           if (gf2Result.rows.isNotEmpty) {
             final gf2Id = int.parse(gf2Result.rows.first.assoc()['match_id'].toString());
             
-            await conn.execute("""
+            await DBHelper.executeDual("""
               UPDATE tbl_double_elimination 
               SET 
                 alliance1_id = :loserId,
@@ -1809,7 +1809,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
               "gf2Id": gf2Id,
             });
             
-            await conn.execute("""
+            await DBHelper.executeDual("""
               UPDATE tbl_double_elimination 
               SET next_match_id_winner = :gf2Id, next_match_position_winner = 1
               WHERE match_id = :matchId
