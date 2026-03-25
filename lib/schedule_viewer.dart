@@ -17,17 +17,359 @@ enum MatchStatus { pending, inProgress, done }
 extension MatchStatusExt on MatchStatus {
   String get label {
     switch (this) {
-      case MatchStatus.pending:    return 'Pending';
-      case MatchStatus.inProgress: return 'In Progress';
-      case MatchStatus.done:       return 'Done';
+      case MatchStatus.pending:
+        return 'Pending';
+      case MatchStatus.inProgress:
+        return 'In Progress';
+      case MatchStatus.done:
+        return 'Done';
     }
   }
+
   Color get color {
     switch (this) {
-      case MatchStatus.pending:    return const Color(0xFFAAAAAA);
-      case MatchStatus.inProgress: return const Color(0xFF00CFFF);
-      case MatchStatus.done:       return Colors.green;
+      case MatchStatus.pending:
+        return const Color(0xFFAAAAAA);
+      case MatchStatus.inProgress:
+        return const Color(0xFF00CFFF);
+      case MatchStatus.done:
+        return Colors.green;
     }
+  }
+
+  IconData get icon {
+    switch (this) {
+      case MatchStatus.pending:
+        return Icons.schedule;
+      case MatchStatus.inProgress:
+        return Icons.play_circle_outline;
+      case MatchStatus.done:
+        return Icons.check_circle;
+    }
+  }
+}
+
+// ── Enhanced Match Card Widget (Compact version) ────────────────────────
+class _EnhancedMatchCard extends StatefulWidget {
+  final Map<String, dynamic> match;
+  final int matchNumber;
+  final String schedule;
+  final List<Map<String, String>> redTeam;
+  final List<Map<String, String>> blueTeam;
+  final VoidCallback onStatusTap;
+  final MatchStatus status;
+
+  const _EnhancedMatchCard({
+    required this.match,
+    required this.matchNumber,
+    required this.schedule,
+    required this.redTeam,
+    required this.blueTeam,
+    required this.onStatusTap,
+    required this.status,
+  });
+
+  @override
+  State<_EnhancedMatchCard> createState() => _EnhancedMatchCardState();
+}
+
+class _EnhancedMatchCardState extends State<_EnhancedMatchCard>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _hoverController;
+  late Animation<double> _scaleAnimation;
+  bool _isHovered = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _hoverController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 200),
+    );
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.01).animate(
+      CurvedAnimation(parent: _hoverController, curve: Curves.easeOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _hoverController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) {
+        setState(() => _isHovered = true);
+        _hoverController.forward();
+      },
+      onExit: (_) {
+        setState(() => _isHovered = false);
+        _hoverController.reverse();
+      },
+      child: AnimatedBuilder(
+        animation: _scaleAnimation,
+        builder: (context, child) {
+          return Transform.scale(
+            scale: _scaleAnimation.value,
+            child: Container(
+              margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 12),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    const Color(0xFF2D0E7A).withOpacity(0.9),
+                    const Color(0xFF1A0A4A).withOpacity(0.9),
+                  ],
+                ),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: _isHovered
+                      ? const Color(0xFFFFD700).withOpacity(0.6)
+                      : const Color(0xFFFFD700).withOpacity(0.2),
+                  width: 1,
+                ),
+                boxShadow: _isHovered
+                    ? [
+                        BoxShadow(
+                          color: const Color(0xFFFFD700).withOpacity(0.15),
+                          blurRadius: 8,
+                          spreadRadius: 1,
+                        ),
+                      ]
+                    : [],
+              ),
+              child: Column(
+                children: [
+                  // Compact Header
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          const Color(0xFFFFD700).withOpacity(0.15),
+                          Colors.transparent,
+                        ],
+                      ),
+                      borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        // Match Number Badge
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFFD700).withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.sports_esports_rounded,
+                                  size: 12, color: Color(0xFFFFD700)),
+                              const SizedBox(width: 4),
+                              Text(
+                                'MATCH ${widget.matchNumber}',
+                                style: const TextStyle(
+                                  color: Color(0xFFFFD700),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        // Time Badge
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.05),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.access_time,
+                                  size: 10, color: Colors.white54),
+                              const SizedBox(width: 4),
+                              Text(
+                                widget.schedule,
+                                style: const TextStyle(
+                                    color: Colors.white70, fontSize: 10),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // Match Content - Compact Row
+                  Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Row(
+                      children: [
+                        // RED Alliance
+                        Expanded(
+                          child: _buildCompactAllianceCard(
+                            name: 'RED',
+                            teams: widget.redTeam,
+                            color: Colors.redAccent,
+                          ),
+                        ),
+
+                        // VS Badge
+                        Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 8),
+                          width: 28,
+                          height: 28,
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFFFFD700), Color(0xFFCCAC00)],
+                            ),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Center(
+                            child: Text(
+                              'VS',
+                              style: TextStyle(
+                                color: Colors.black,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 10,
+                              ),
+                            ),
+                          ),
+                        ),
+
+                        // BLUE Alliance
+                        Expanded(
+                          child: _buildCompactAllianceCard(
+                            name: 'BLUE',
+                            teams: widget.blueTeam,
+                            color: Colors.blue,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // Status Footer - Compact
+                  GestureDetector(
+                    onTap: widget.onStatusTap,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      decoration: BoxDecoration(
+                        color: widget.status.color.withOpacity(0.1),
+                        borderRadius: const BorderRadius.vertical(
+                            bottom: Radius.circular(12)),
+                        border: Border(
+                          top: BorderSide(
+                            color: widget.status.color.withOpacity(0.2),
+                            width: 0.5,
+                          ),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            widget.status.icon,
+                            color: widget.status.color,
+                            size: 12,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            widget.status.label.toUpperCase(),
+                            style: TextStyle(
+                              color: widget.status.color,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 9,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildCompactAllianceCard({
+    required String name,
+    required List<Map<String, String>> teams,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            color.withOpacity(0.12),
+            color.withOpacity(0.04),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: color.withOpacity(0.25),
+          width: 0.5,
+        ),
+      ),
+      child: Column(
+        children: [
+          Text(
+            name,
+            style: TextStyle(
+              color: color,
+              fontWeight: FontWeight.bold,
+              fontSize: 9,
+              letterSpacing: 0.5,
+            ),
+          ),
+          const SizedBox(height: 4),
+          ...teams.take(2).map((team) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 1),
+                child: Column(
+                  children: [
+                    Text(
+                      team['team_name']!,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w500,
+                        fontSize: 10,
+                      ),
+                      textAlign: TextAlign.center,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Text(
+                      'ID: ${team['team_id']}',
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(0.4),
+                        fontSize: 7,
+                      ),
+                    ),
+                  ],
+                ),
+              )),
+          if (teams.isEmpty)
+            const Text(
+              '—',
+              style: TextStyle(color: Colors.white24, fontSize: 12),
+            ),
+        ],
+      ),
+    );
   }
 }
 
@@ -36,34 +378,34 @@ class SoccerScore {
   int? home;
   int? away;
   bool get isFinished => home != null && away != null;
-  bool get isHomeWin  => isFinished && home! > away!;
-  bool get isAwayWin  => isFinished && away! > home!;
-  bool get isDraw     => isFinished && home! == away!;
+  bool get isHomeWin => isFinished && home! > away!;
+  bool get isAwayWin => isFinished && away! > home!;
+  bool get isDraw => isFinished && home! == away!;
 }
 
 // ── Bracket data models ──────────────────────────────────────────────────────
 class BracketTeam {
-  final int    teamId;
+  final int teamId;
   final String teamName;
-  bool   isBye;
-  int?   score;
+  bool isBye;
+  int? score;
 
   BracketTeam({
     required this.teamId,
     required this.teamName,
-    this.isBye  = false,
+    this.isBye = false,
     this.score,
   });
 }
 
 class BracketMatch {
-  final String  id;
-  BracketTeam   team1;
-  BracketTeam   team2;
-  BracketTeam?  winner;
-  final int     round;
-  final int     position;
-  String?       scheduleTime;
+  final String id;
+  BracketTeam team1;
+  BracketTeam team2;
+  BracketTeam? winner;
+  final int round;
+  final int position;
+  String? scheduleTime;
 
   BracketMatch({
     required this.id,
@@ -126,6 +468,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
   @override
   void dispose() {
+    _categoryTabContexts.clear();
     _autoRefreshTimer?.cancel();
     _tabController?.dispose();
     super.dispose();
@@ -177,22 +520,22 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   Future<List<Map<String, dynamic>>> _getQualifiedTeams(int categoryId) async {
     try {
       print("🎯 Getting qualified teams for category: $categoryId");
-      
+
       // Get all teams in this category first
       final teams = await DBHelper.getTeamsByCategory(categoryId);
       print("🔍 DEBUG: Found ${teams.length} teams in category");
-      
+
       if (teams.isEmpty) {
         print("⚠️ No teams found in category");
         return [];
       }
-      
+
       // Get standings (scores)
       final standings = await DBHelper.getScoresByCategory(categoryId);
       print("🔍 DEBUG: Found ${standings.length} score entries");
-      
+
       final Map<int, Map<String, dynamic>> teamMap = {};
-      
+
       // Initialize all teams with zero scores
       for (final team in teams) {
         final teamIdObj = team['team_id'];
@@ -200,15 +543,15 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           print("⚠️ Team has null team_id: $team");
           continue;
         }
-        
+
         final teamId = int.tryParse(teamIdObj.toString());
         if (teamId == null || teamId == 0) {
           print("⚠️ Invalid team_id: $teamIdObj");
           continue;
         }
-        
+
         final teamName = team['team_name']?.toString() ?? 'Unknown Team';
-        
+
         teamMap[teamId] = {
           'team_id': teamId,
           'team_name': teamName,
@@ -216,12 +559,12 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         };
         print("✅ Added team: $teamName (ID: $teamId)");
       }
-      
+
       if (teamMap.isEmpty) {
         print("⚠️ No valid teams found after filtering");
         return [];
       }
-      
+
       // Sum scores from each round
       for (final row in standings) {
         final teamIdObj = row['team_id'];
@@ -229,27 +572,29 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           print("⚠️ Score row has null team_id: $row");
           continue;
         }
-        
+
         final teamId = int.tryParse(teamIdObj.toString());
         if (teamId == null || teamId == 0) {
           print("⚠️ Invalid team_id in score: $teamIdObj");
           continue;
         }
-        
+
         int score = 0;
-        if (row.containsKey('score_totalscore') && row['score_totalscore'] != null) {
+        if (row.containsKey('score_totalscore') &&
+            row['score_totalscore'] != null) {
           final scoreObj = row['score_totalscore'];
           score = int.tryParse(scoreObj.toString()) ?? 0;
         }
         print("➕ Score for team $teamId: $score");
-        
+
         if (teamMap.containsKey(teamId)) {
-          teamMap[teamId]!['totalScore'] = (teamMap[teamId]!['totalScore'] as int) + score;
+          teamMap[teamId]!['totalScore'] =
+              (teamMap[teamId]!['totalScore'] as int) + score;
         } else {
           print("⚠️ Score for unknown team $teamId, skipping");
         }
       }
-      
+
       // Filter teams with scores > 0 and sort
       final qualified = <Map<String, dynamic>>[];
       for (final entry in teamMap.entries) {
@@ -262,13 +607,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           print("❌ Not qualified: ${team['team_name']} has 0 pts");
         }
       }
-      
+
       // Sort by score descending
-      qualified.sort((a, b) => (b['totalScore'] as int).compareTo(a['totalScore'] as int));
-      
+      qualified.sort((a, b) =>
+          (b['totalScore'] as int).compareTo(a['totalScore'] as int));
+
       print("🎯 Final qualified teams count: ${qualified.length}");
       return qualified;
-      
     } catch (e, stackTrace) {
       print("❌ CRITICAL ERROR in _getQualifiedTeams: $e");
       print(stackTrace);
@@ -278,198 +623,212 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
   // Show alliance selection ceremony
   void _showAllianceSelection(int categoryId, String categoryName) async {
-  try {
-    print("🎯 Starting alliance selection for $categoryName");
-    
-    if (!mounted) return;
+    try {
+      print("🎯 Starting alliance selection for $categoryName");
 
-    // Get real scores from standings (keep your existing code for this part)
-    final standings = await DBHelper.getScoresByCategory(categoryId);
-    final teams = await DBHelper.getTeamsByCategory(categoryId);
-    
-    if (teams.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No teams found in this category'),
-          backgroundColor: Colors.orange,
-        ),
-      );
-      return;
-    }
+      if (!mounted) return;
 
-    // Calculate total scores per team
-    final Map<int, Map<String, dynamic>> teamScores = {};
-    
-    for (final team in teams) {
-      final teamId = int.tryParse(team['team_id'].toString()) ?? 0;
-      final teamName = team['team_name']?.toString() ?? '';
-      
-      teamScores[teamId] = {
-        'team_id': teamId,
-        'team_name': teamName,
-        'totalScore': 0,
-      };
-    }
-    
-    for (final row in standings) {
-      final teamId = int.tryParse(row['team_id'].toString()) ?? 0;
-      final score = int.tryParse(row['score_totalscore']?.toString() ?? '0') ?? 0;
-      
-      if (teamScores.containsKey(teamId)) {
-        teamScores[teamId]!['totalScore'] = (teamScores[teamId]!['totalScore'] as int) + score;
+      // Get real scores from standings (keep your existing code for this part)
+      final standings = await DBHelper.getScoresByCategory(categoryId);
+      final teams = await DBHelper.getTeamsByCategory(categoryId);
+
+      if (teams.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No teams found in this category'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
       }
-    }
-    
-    final qualifiedTeams = teamScores.values
-        .where((t) => (t['totalScore'] as int) > 0)
-        .toList()
-      ..sort((a, b) => (b['totalScore'] as int).compareTo(a['totalScore'] as int));
-    
-    if (qualifiedTeams.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No qualified teams found. Enter scores in Standings first.'),
-          backgroundColor: Colors.orange,
+
+      // Calculate total scores per team
+      final Map<int, Map<String, dynamic>> teamScores = {};
+
+      for (final team in teams) {
+        final teamId = int.tryParse(team['team_id'].toString()) ?? 0;
+        final teamName = team['team_name']?.toString() ?? '';
+
+        teamScores[teamId] = {
+          'team_id': teamId,
+          'team_name': teamName,
+          'totalScore': 0,
+        };
+      }
+
+      for (final row in standings) {
+        final teamId = int.tryParse(row['team_id'].toString()) ?? 0;
+        final score =
+            int.tryParse(row['score_totalscore']?.toString() ?? '0') ?? 0;
+
+        if (teamScores.containsKey(teamId)) {
+          teamScores[teamId]!['totalScore'] =
+              (teamScores[teamId]!['totalScore'] as int) + score;
+        }
+      }
+
+      final qualifiedTeams = teamScores.values
+          .where((t) => (t['totalScore'] as int) > 0)
+          .toList()
+        ..sort((a, b) =>
+            (b['totalScore'] as int).compareTo(a['totalScore'] as int));
+
+      if (qualifiedTeams.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'No qualified teams found. Enter scores in Standings first.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
+
+      if (!mounted) return;
+
+      // Navigate to alliance selection page and wait for result
+      final result = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(
+          builder: (context) => AllianceSelectionPage(
+            categoryId: categoryId,
+            categoryName: categoryName,
+            qualifiedTeams: qualifiedTeams,
+            onComplete: () {
+              // This won't be used anymore since we're using pop result
+              print("onComplete called");
+            },
+            onCancel: () {
+              print("❌ Alliance selection cancelled");
+              Navigator.of(context).pop(false);
+            },
+          ),
+          fullscreenDialog: true,
         ),
       );
-      return;
-    }
 
-    if (!mounted) return;
+      // If alliance formation was successful, show the proceed dialog
+      if (result == true && mounted) {
+        print("✅ Alliance selection completed - showing proceed dialog");
 
-    // Navigate to alliance selection page and wait for result
-    final result = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(
-        builder: (context) => AllianceSelectionPage(
-          categoryId: categoryId,
-          categoryName: categoryName,
-          qualifiedTeams: qualifiedTeams,
-          onComplete: () {
-            // This won't be used anymore since we're using pop result
-            print("onComplete called");
-          },
-          onCancel: () {
-            print("❌ Alliance selection cancelled");
-            Navigator.of(context).pop(false);
-          },
-        ),
-        fullscreenDialog: true,
-      ),
-    );
-    
-    // If alliance formation was successful, show the proceed dialog
-    if (result == true && mounted) {
-      print("✅ Alliance selection completed - showing proceed dialog");
-      
-      // Refresh championship data
-      setState(() {
-        _championshipRefreshVersionByCategory[categoryId] =
-            (_championshipRefreshVersionByCategory[categoryId] ?? 0) + 1;
-      });
-      
-      // Show the proceed dialog immediately
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) => Dialog(
-          backgroundColor: Colors.transparent,
-          child: Container(
-            width: 500,
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)],
+        // Refresh championship data
+        setState(() {
+          _championshipRefreshVersionByCategory[categoryId] =
+              (_championshipRefreshVersionByCategory[categoryId] ?? 0) + 1;
+        });
+
+        // Show the proceed dialog immediately
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => Dialog(
+            backgroundColor: Colors.transparent,
+            child: Container(
+              width: 500,
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)],
+                ),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                    color: const Color(0xFF00E5A0).withOpacity(0.5), width: 2),
               ),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: const Color(0xFF00E5A0).withOpacity(0.5), width: 2),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: const Color(0xFF00E5A0).withOpacity(0.15),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: const Color(0xFF00E5A0).withOpacity(0.15),
+                    ),
+                    child: const Icon(Icons.emoji_events,
+                        color: Color(0xFF00E5A0), size: 48),
                   ),
-                  child: const Icon(Icons.emoji_events, color: Color(0xFF00E5A0), size: 48),
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  'CHAMPIONSHIP ROUND',
-                  style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w900, letterSpacing: 2),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Alliances are now formed for $categoryName',
-                  style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 14),
-                ),
-                const SizedBox(height: 20),
-                const Text(
-                  'Proceed to Championship Round?',
-                  style: TextStyle(color: Colors.white, fontSize: 16),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 24),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: () {
-                          Navigator.pop(ctx);
-                          // Stay on current tab
-                        },
-                        style: OutlinedButton.styleFrom(
-                          side: BorderSide(color: Colors.white.withOpacity(0.3)),
-                          padding: const EdgeInsets.symmetric(vertical: 14),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'CHAMPIONSHIP ROUND',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 2),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Alliances are now formed for $categoryName',
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.7), fontSize: 14),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text(
+                    'Proceed to Championship Round?',
+                    style: TextStyle(color: Colors.white, fontSize: 16),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 24),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () {
+                            Navigator.pop(ctx);
+                            // Stay on current tab
+                          },
+                          style: OutlinedButton.styleFrom(
+                            side: BorderSide(
+                                color: Colors.white.withOpacity(0.3)),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                          child: const Text('CANCEL',
+                              style: TextStyle(color: Colors.white54)),
                         ),
-                        child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
                       ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: ElevatedButton(
-                        onPressed: () {
-                          Navigator.pop(ctx);
-                          // Switch to championship tab
-                          final tabContext = _categoryTabContexts[categoryId];
-                          final controller = tabContext == null ? null : DefaultTabController.maybeOf(tabContext);
-                          if (controller != null) {
-                            controller.animateTo(1);
-                          }
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF00E5A0),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(vertical: 14),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: () {
+                            Navigator.pop(ctx);
+                            // Switch to championship tab
+                            final tabContext = _categoryTabContexts[categoryId];
+                            final controller = tabContext == null
+                                ? null
+                                : DefaultTabController.maybeOf(tabContext);
+                            if (controller != null) {
+                              controller.animateTo(1);
+                            }
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF00E5A0),
+                            foregroundColor: Colors.black,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                          child: const Text('PROCEED',
+                              style: TextStyle(fontWeight: FontWeight.bold)),
                         ),
-                        child: const Text('PROCEED', style: TextStyle(fontWeight: FontWeight.bold)),
                       ),
-                    ),
-                  ],
-                ),
-              ],
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
+        );
+      }
+    } catch (e, stackTrace) {
+      print("❌ Error in _showAllianceSelection: $e");
+      print(stackTrace);
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: Colors.red,
         ),
       );
     }
-    
-  } catch (e, stackTrace) {
-    print("❌ Error in _showAllianceSelection: $e");
-    print(stackTrace);
-    
-    if (!mounted) return;
-    
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Error: $e'),
-        backgroundColor: Colors.red,
-      ),
-    );
   }
-}
-
 
   void _showChampionshipRoundPrompt(int categoryId, String categoryName) {
     showDialog(
@@ -485,7 +844,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)],
             ),
             borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: const Color(0xFF00E5A0).withOpacity(0.5), width: 2),
+            border: Border.all(
+                color: const Color(0xFF00E5A0).withOpacity(0.5), width: 2),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -496,12 +856,17 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                   shape: BoxShape.circle,
                   color: const Color(0xFF00E5A0).withOpacity(0.15),
                 ),
-                child: const Icon(Icons.emoji_events, color: Color(0xFF00E5A0), size: 48),
+                child:
+                    const Icon(Icons.emoji_events, color: Color(0xFF00E5A0), size: 48),
               ),
               const SizedBox(height: 16),
               const Text(
                 'CHAMPIONSHIP ROUND',
-                style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w900, letterSpacing: 2),
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 2),
               ),
               const SizedBox(height: 8),
               Text(
@@ -528,7 +893,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                         side: BorderSide(color: Colors.white.withOpacity(0.3)),
                         padding: const EdgeInsets.symmetric(vertical: 14),
                       ),
-                      child: const Text('OPEN TAB', style: TextStyle(color: Colors.white54)),
+                      child: const Text('OPEN TAB',
+                          style: TextStyle(color: Colors.white54)),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -544,7 +910,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                         foregroundColor: Colors.black,
                         padding: const EdgeInsets.symmetric(vertical: 14),
                       ),
-                      child: const Text('GENERATE', style: TextStyle(fontWeight: FontWeight.bold)),
+                      child: const Text('GENERATE',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
                     ),
                   ),
                 ],
@@ -554,36 +921,38 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         ),
       ),
     );
-  } 
+  }
 
   void _openChampionshipTab(int categoryId) {
-  final tabContext = _categoryTabContexts[categoryId];
-  final controller = tabContext == null ? null : DefaultTabController.maybeOf(tabContext);
-  if (controller != null) {
-    controller.animateTo(1);
-    return;
-  }
+    final tabContext = _categoryTabContexts[categoryId];
+    final controller = tabContext == null
+        ? null
+        : DefaultTabController.maybeOf(tabContext);
+    if (controller != null) {
+      controller.animateTo(1);
+      return;
+    }
 
-  // Just show a snackbar, not a dialog
-  if (mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Switched to Championship tab'),
-        backgroundColor: Colors.blue,
-        duration: const Duration(seconds: 1),
-      ),
-    );
+    // Just show a snackbar, not a dialog
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Switched to Championship tab'),
+          backgroundColor: Colors.blue,
+          duration: const Duration(seconds: 1),
+        ),
+      );
+    }
   }
-}
 
   Future<void> _generateChampionshipSchedule(int categoryId) async {
     try {
       print("🏆 _generateChampionshipSchedule called for category $categoryId");
-      
+
       print("🏆 Generating championship schedule for category $categoryId");
-      
+
       if (!mounted) return;
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Generating championship schedule...'),
@@ -592,7 +961,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       );
 
       final conn = await DBHelper.getConnection();
-      
+
       // Get the formed alliances from the database
       final alliancesResult = await conn.execute("""
         SELECT 
@@ -604,36 +973,37 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         WHERE category_id = :catId
         ORDER BY selection_round
       """, {"catId": categoryId});
-      
+
       final alliances = alliancesResult.rows.map((r) => r.assoc()).toList();
-      
+
       if (alliances.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('No alliances found. Please complete alliance selection first.'),
+            content: Text(
+                'No alliances found. Please complete alliance selection first.'),
             backgroundColor: Colors.orange,
           ),
         );
         return;
       }
-      
+
       print("📊 Found ${alliances.length} alliances");
-      
+
       // Clear existing championship schedule for this category (also explorer variant)
       await DBHelper.executeDual("""
         DELETE FROM tbl_championship_schedule 
         WHERE category_id = :catId
       """, {"catId": categoryId});
-      
+
       // Generate bracket based on number of alliances
       final numAlliances = alliances.length;
-      
+
       if (numAlliances == 4) {
         // Standard 4-team bracket
         // Semifinal 1: Alliance 1 vs Alliance 4
         // Semifinal 2: Alliance 2 vs Alliance 3
         // Final: Winners of semifinals
-        
+
         // Semifinals
         await DBHelper.executeDual("""
           INSERT INTO tbl_championship_schedule 
@@ -648,7 +1018,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           "a3": alliances[2]['alliance_id'],
           "a4": alliances[3]['alliance_id'],
         });
-        
+
         // Final (to be filled after semifinals)
         await DBHelper.executeDual("""
           INSERT INTO tbl_championship_schedule 
@@ -656,7 +1026,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           VALUES
             (:catId, 0, 0, 2, 1, '13:30', 'pending')
         """, {"catId": categoryId});
-        
       } else if (numAlliances == 8) {
         // 8-team bracket
         // Quarterfinals, Semifinals, Final
@@ -674,7 +1043,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             "time": '${13 + i * 10}:00',
           });
         }
-        
+
         // Semifinals and final placeholders
         for (int i = 0; i < 2; i++) {
           await DBHelper.executeDual("""
@@ -688,7 +1057,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             "time": '${14 + i * 10}:00',
           });
         }
-        
+
         // Final placeholder
         await DBHelper.executeDual("""
           INSERT INTO tbl_championship_schedule 
@@ -696,7 +1065,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           VALUES
             (:catId, 0, 0, 3, 1, '15:00', 'pending')
         """, {"catId": categoryId});
-        
       } else if (numAlliances == 2) {
         // Direct final
         await DBHelper.executeDual("""
@@ -710,9 +1078,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           "a2": alliances[1]['alliance_id'],
         });
       }
-      
+
       print("✅ Championship schedule generated");
-      
+
       // Verify the matches were inserted
       final verifyResult = await conn.execute("""
         SELECT COUNT(*) as cnt 
@@ -723,25 +1091,24 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       final count = verifyResult.rows.first.assoc()['cnt'];
       print("🔍 Verification: Found $count championship matches in database");
       print("✅ Championship schedule generated with $count matches");
-      
+
       if (!mounted) return;
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('✅ Championship schedule generated with $count matches!'),
           backgroundColor: Colors.green,
         ),
       );
-      
+
       // Refresh schedule data to show the new championship tab
       _loadData(initial: true);
-      
     } catch (e, stackTrace) {
       print("❌ Error generating championship schedule: $e");
       print(stackTrace);
-      
+
       if (!mounted) return;
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error generating championship schedule: $e'),
@@ -758,9 +1125,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       final result = await conn.execute("""
         SELECT c.category_id, ts.match_id, t.team_name, s.schedule_start
         FROM tbl_teamschedule ts
-        JOIN tbl_team t     ON ts.team_id    = t.team_id
+        JOIN tbl_team t ON ts.team_id = t.team_id
         JOIN tbl_category c ON t.category_id = c.category_id
-        JOIN tbl_match m    ON ts.match_id   = m.match_id
+        JOIN tbl_match m ON ts.match_id = m.match_id
         JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
         ORDER BY c.category_id, s.schedule_start, ts.match_id
       """);
@@ -778,7 +1145,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     if (initial) setState(() => _isLoading = true);
     try {
       final categories = await DBHelper.getCategories();
-      
+
       if (categories.isEmpty) {
         setState(() {
           _categories = [];
@@ -788,7 +1155,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         });
         return;
       }
-      
+
       final conn = await DBHelper.getConnection();
 
       final result = await conn.execute("""
@@ -813,7 +1180,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
       final rows = result.rows.map((r) => r.assoc()).toList();
       _lastDataSignature = _buildSignature(rows);
-      
+
       final Map<int, List<Map<String, dynamic>>> rowsByCategory = {};
       for (final row in rows) {
         final catId = int.tryParse(row['category_id'].toString()) ?? 0;
@@ -825,9 +1192,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       for (final cat in categories) {
         final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
         if (catId == 0) continue;
-        
+
         final catRows = rowsByCategory[catId] ?? [];
-        
+
         if (catRows.isEmpty) {
           scheduleByCategory[catId] = [];
           continue;
@@ -838,8 +1205,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         for (final row in catRows) {
           final matchId = int.tryParse(row['match_id'].toString()) ?? 0;
           if (matchId == 0) continue;
-          
-          final arenaNum = int.tryParse(row['arena_number']?.toString() ?? '1') ?? 1;
+
+          final arenaNum =
+              int.tryParse(row['arena_number']?.toString() ?? '1') ?? 1;
           final teamId = row['team_id']?.toString() ?? '';
           final teamName = row['team_name']?.toString() ?? '';
           final scheduleStart = row['schedule_start']?.toString() ?? '';
@@ -874,7 +1242,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         }
 
         var matchesList = matchesByMatchId.values.toList();
-        
+
         matchesList.sort((a, b) {
           final aTime = a['schedule_start'] as String;
           final bTime = b['schedule_start'] as String;
@@ -925,7 +1293,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         _isLoading = false;
         _lastUpdated = DateTime.now();
       });
-
     } catch (e) {
       print("Error loading schedule: $e");
       setState(() => _isLoading = false);
@@ -947,7 +1314,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     return teamCount.clamp(2, 4);
   }
 
-  void _assignBracketTimes(List<List<BracketMatch>> rounds, int durationMinutes) {
+  void _assignBracketTimes(
+      List<List<BracketMatch>> rounds, int durationMinutes) {
     if (_lastSoccerEndTime == null) return;
     final parts = _lastSoccerEndTime!.split(':');
     if (parts.length < 2) return;
@@ -990,7 +1358,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     }
     int byeN = 0;
     while (bracketTeams.length < size) {
-      bracketTeams.add(BracketTeam(teamId: -(++byeN), teamName: 'BYE', isBye: true));
+      bracketTeams
+          .add(BracketTeam(teamId: -(++byeN), teamName: 'BYE', isBye: true));
     }
 
     final rounds = _buildBracketFromTeams(bracketTeams);
@@ -1005,8 +1374,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     List<BracketMatch> firstRound = [];
     for (int i = 0; i < teams.length; i += 2) {
       final m = BracketMatch(
-          id: 'r0m${i ~/ 2}', team1: teams[i], team2: teams[i + 1],
-          round: 0, position: i ~/ 2);
+          id: 'r0m${i ~/ 2}',
+          team1: teams[i],
+          team2: teams[i + 1],
+          round: 0,
+          position: i ~/ 2);
       if (!teams[i].isBye && teams[i + 1].isBye) m.winner = teams[i];
       if (teams[i].isBye && !teams[i + 1].isBye) m.winner = teams[i + 1];
       firstRound.add(m);
@@ -1020,8 +1392,10 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         current.add(BracketMatch(
             id: 'r${roundNum}m${i ~/ 2}',
             team1: prev[i].winner ?? BracketTeam(teamId: -99, teamName: 'TBD'),
-            team2: prev[i + 1].winner ?? BracketTeam(teamId: -99, teamName: 'TBD'),
-            round: roundNum, position: i ~/ 2));
+            team2: prev[i + 1].winner ??
+                BracketTeam(teamId: -99, teamName: 'TBD'),
+            round: roundNum,
+            position: i ~/ 2));
       }
       rounds.add(current);
       prev = current;
@@ -1084,8 +1458,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     });
   }
 
-  void _showScoreDialog(
-      String matchId, String team1Name, String team2Name,
+  void _showScoreDialog(String matchId, String team1Name, String team2Name,
       List<Map<String, dynamic>> allMatches) {
     final existing = _soccerScores[matchId];
     final c1 = TextEditingController(text: existing?.home?.toString() ?? '');
@@ -1120,14 +1493,18 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                 Container(
                   padding: const EdgeInsets.all(6),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF3D1E88).withOpacity(0.5),
-                    borderRadius: BorderRadius.circular(8)),
-                  child: const Icon(Icons.sports_soccer, color: Color(0xFF9B6FE8), size: 18),
+                      color: const Color(0xFF3D1E88).withOpacity(0.5),
+                      borderRadius: BorderRadius.circular(8)),
+                  child: const Icon(Icons.sports_soccer,
+                      color: Color(0xFF9B6FE8), size: 18),
                 ),
                 const SizedBox(width: 10),
                 const Text('ENTER MATCH SCORE',
-                    style: TextStyle(color: Colors.white, fontSize: 16,
-                        fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1.5)),
                 const Spacer(),
                 GestureDetector(
                   onTap: () => Navigator.pop(ctx),
@@ -1136,7 +1513,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     decoration: BoxDecoration(
                         color: Colors.white.withOpacity(0.06),
                         borderRadius: BorderRadius.circular(6)),
-                    child: Icon(Icons.close, color: Colors.white.withOpacity(0.4), size: 18),
+                    child: Icon(Icons.close,
+                        color: Colors.white.withOpacity(0.4), size: 18),
                   ),
                 ),
               ]),
@@ -1150,15 +1528,18 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       textAlign: TextAlign.center,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Colors.white,
-                          fontSize: 14, fontWeight: FontWeight.bold)),
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold)),
                   const SizedBox(height: 10),
                   _scoreField(c1, const Color(0xFF00CFFF)),
                 ])),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 14),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                     decoration: BoxDecoration(
                       gradient: const LinearGradient(
                           colors: [Color(0xFF8B3FE8), Color(0xFF5218A8)]),
@@ -1170,8 +1551,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       ],
                     ),
                     child: const Text('VS',
-                        style: TextStyle(color: Colors.white, fontSize: 15,
-                            fontWeight: FontWeight.w900, letterSpacing: 2,
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 2,
                             fontStyle: FontStyle.italic)),
                   ),
                 ),
@@ -1181,8 +1565,10 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       textAlign: TextAlign.center,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Colors.white,
-                          fontSize: 14, fontWeight: FontWeight.bold)),
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold)),
                   const SizedBox(height: 10),
                   _scoreField(c2, const Color(0xFF00FF88)),
                 ])),
@@ -1198,11 +1584,14 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       setState(() => _soccerScores.remove(matchId));
                       Navigator.pop(ctx);
                     },
-                    icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 16),
-                    label: const Text('Clear', style: TextStyle(color: Colors.redAccent, fontSize: 13)),
+                    icon: const Icon(Icons.delete_outline,
+                        color: Colors.redAccent, size: 16),
+                    label: const Text('Clear',
+                        style: TextStyle(color: Colors.redAccent, fontSize: 13)),
                     style: OutlinedButton.styleFrom(
                       side: const BorderSide(color: Colors.redAccent),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
                     ),
                   )),
                   const SizedBox(width: 8),
@@ -1214,24 +1603,29 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       final h = int.tryParse(c1.text.trim());
                       final a = int.tryParse(c2.text.trim());
                       if (h == null || a == null) {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                            content: Text('Please enter valid scores'),
-                            backgroundColor: Colors.orange));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text('Please enter valid scores'),
+                                backgroundColor: Colors.orange));
                         return;
                       }
                       setState(() {
-                        _soccerScores[matchId] = SoccerScore()..home = h..away = a;
+                        _soccerScores[matchId] =
+                            SoccerScore()..home = h..away = a;
                       });
                       Navigator.pop(ctx);
                     },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF5B2CC0),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
                       padding: const EdgeInsets.symmetric(vertical: 12),
                     ),
                     child: const Text('Save Score',
-                        style: TextStyle(color: Colors.white,
-                            fontSize: 14, fontWeight: FontWeight.bold)),
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold)),
                   ),
                 ),
               ]),
@@ -1256,7 +1650,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           keyboardType: TextInputType.number,
           inputFormatters: [FilteringTextInputFormatter.digitsOnly],
           textAlign: TextAlign.center,
-          style: TextStyle(color: accentColor, fontSize: 26, fontWeight: FontWeight.bold),
+          style: TextStyle(
+              color: accentColor, fontSize: 26, fontWeight: FontWeight.bold),
           decoration: const InputDecoration(
             border: InputBorder.none,
             contentPadding: EdgeInsets.zero,
@@ -1268,11 +1663,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     );
   }
 
-  Future<void> _exportPdf(
-      Map<String, dynamic> category,
+  Future<void> _exportPdf(Map<String, dynamic> category,
       List<Map<String, dynamic>> matches) async {
     final doc = pw.Document();
-    final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
+    final categoryName =
+        (category['category_type'] ?? '').toString().toUpperCase();
     int maxArenas = 1;
     for (final m in matches) {
       final count = m['arenaCount'] as int? ?? 1;
@@ -1289,9 +1684,18 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             child: pw.Row(
               mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
               children: [
-                pw.Text('ROBOVENTURE', style: pw.TextStyle(color: PdfColors.white, fontSize: 14, fontWeight: pw.FontWeight.bold)),
-                pw.Text(categoryName, style: pw.TextStyle(color: PdfColors.white, fontSize: 20, fontWeight: pw.FontWeight.bold)),
-                pw.Text('4TH ROBOTICS COMPETITION', style: const pw.TextStyle(color: PdfColors.white, fontSize: 10)),
+                pw.Text('ROBOVENTURE',
+                    style: pw.TextStyle(
+                        color: PdfColors.white,
+                        fontSize: 14,
+                        fontWeight: pw.FontWeight.bold)),
+                pw.Text(categoryName,
+                    style: pw.TextStyle(
+                        color: PdfColors.white,
+                        fontSize: 20,
+                        fontWeight: pw.FontWeight.bold)),
+                pw.Text('4TH ROBOTICS COMPETITION',
+                    style: const pw.TextStyle(color: PdfColors.white, fontSize: 10)),
               ],
             ),
           ),
@@ -1300,13 +1704,29 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             color: const PdfColor.fromInt(0xFF5C2ECC),
             padding: const pw.EdgeInsets.symmetric(vertical: 8, horizontal: 8),
             child: pw.Row(children: [
-              pw.Expanded(flex: 1, child: pw.Text('MATCH', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 11))),
-              pw.Expanded(flex: 2, child: pw.Text('SCHEDULE', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 11))),
+              pw.Expanded(
+                  flex: 1,
+                  child: pw.Text('MATCH',
+                      style: pw.TextStyle(
+                          color: PdfColors.white,
+                          fontWeight: pw.FontWeight.bold,
+                          fontSize: 11))),
+              pw.Expanded(
+                  flex: 2,
+                  child: pw.Text('SCHEDULE',
+                      style: pw.TextStyle(
+                          color: PdfColors.white,
+                          fontWeight: pw.FontWeight.bold,
+                          fontSize: 11))),
               ...List.generate(maxArenas, (i) => pw.Expanded(
-                flex: 2,
-                child: pw.Text('ARENA ${i + 1}', textAlign: pw.TextAlign.center,
-                    style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 11)),
-              )),
+                    flex: 2,
+                    child: pw.Text('ARENA ${i + 1}',
+                        textAlign: pw.TextAlign.center,
+                        style: pw.TextStyle(
+                            color: PdfColors.white,
+                            fontWeight: pw.FontWeight.bold,
+                            fontSize: 11)),
+                  )),
             ]),
           ),
           ...matches.asMap().entries.map((entry) {
@@ -1314,27 +1734,43 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             final m = entry.value;
             final arenas = m['arenas'] as List;
             return pw.Container(
-              color: i % 2 == 0 ? PdfColors.white : const PdfColor.fromInt(0xFFF3EEFF),
+              color: i % 2 == 0
+                  ? PdfColors.white
+                  : const PdfColor.fromInt(0xFFF3EEFF),
               padding: const pw.EdgeInsets.symmetric(vertical: 10, horizontal: 8),
               child: pw.Row(children: [
-                pw.Expanded(flex: 1, child: pw.Text('${m['matchNumber']}', style: const pw.TextStyle(fontSize: 11))),
-                pw.Expanded(flex: 2, child: pw.Text('${m['schedule']}', style: const pw.TextStyle(fontSize: 11))),
+                pw.Expanded(
+                    flex: 1,
+                    child: pw.Text('${m['matchNumber']}',
+                        style: const pw.TextStyle(fontSize: 11))),
+                pw.Expanded(
+                    flex: 2,
+                    child: pw.Text('${m['schedule']}',
+                        style: const pw.TextStyle(fontSize: 11))),
                 ...List.generate(maxArenas, (ai) {
                   final team = ai < arenas.length ? arenas[ai] as Map? : null;
                   if (team != null) {
-                    return pw.Expanded(flex: 2, child: pw.Column(
-                      crossAxisAlignment: pw.CrossAxisAlignment.center,
-                      children: [
-                        pw.Text(team['team_id']?.toString() ?? '', textAlign: pw.TextAlign.center,
-                            style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
-                        pw.Text(team['team_name']?.toString() ?? '', textAlign: pw.TextAlign.center,
-                            style: const pw.TextStyle(fontSize: 9)),
-                      ],
-                    ));
+                    return pw.Expanded(
+                      flex: 2,
+                      child: pw.Column(
+                        crossAxisAlignment: pw.CrossAxisAlignment.center,
+                        children: [
+                          pw.Text(team['team_id']?.toString() ?? '',
+                              textAlign: pw.TextAlign.center,
+                              style: pw.TextStyle(
+                                  fontSize: 10, fontWeight: pw.FontWeight.bold)),
+                          pw.Text(team['team_name']?.toString() ?? '',
+                              textAlign: pw.TextAlign.center,
+                              style: const pw.TextStyle(fontSize: 9)),
+                        ],
+                      ),
+                    );
                   }
-                  return pw.Expanded(flex: 2, child: pw.Text('—',
-                      textAlign: pw.TextAlign.center,
-                      style: const pw.TextStyle(color: PdfColors.grey400)));
+                  return pw.Expanded(
+                      flex: 2,
+                      child: pw.Text('—',
+                          textAlign: pw.TextAlign.center,
+                          style: const pw.TextStyle(color: PdfColors.grey400)));
                 }),
               ]),
             );
@@ -1376,7 +1812,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           end: Alignment.bottomRight,
         ),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.45), width: 1.5),
+        border: Border.all(
+            color: const Color(0xFFFFD700).withOpacity(0.45), width: 1.5),
         boxShadow: [
           BoxShadow(
             color: const Color(0xFFFFD700).withOpacity(0.14),
@@ -1395,7 +1832,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               color: const Color(0xFFFFD700).withOpacity(0.12),
               shape: BoxShape.circle,
             ),
-            child: const Icon(Icons.celebration, color: Color(0xFFFFD700), size: 20),
+            child:
+                const Icon(Icons.celebration, color: Color(0xFFFFD700), size: 20),
           ),
           const SizedBox(width: 14),
           const Expanded(
@@ -1427,7 +1865,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               backgroundColor: const Color(0xFFFFD700),
               foregroundColor: Colors.black,
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
             ),
             child: const Text(
               'START CEREMONY',
@@ -1438,9 +1877,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       ),
     );
   }
-  
-
-
 
   Widget _buildQualificationActions(int catId, String categoryName) {
     return Padding(
@@ -1455,7 +1891,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               backgroundColor: const Color(0xFF00CFFF),
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
             ),
             icon: const Icon(Icons.auto_awesome_rounded, size: 18),
             label: Text(
@@ -1493,12 +1930,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // FIXED: Championship tab that uses the ChampionshipSchedule widget
+  // Championship tab that uses the ChampionshipSchedule widget
   // ═══════════════════════════════════════════════════════════════════════════
   Widget _buildChampionshipTab(int catId) {
     // Simply return the ChampionshipSchedule widget which now handles everything
     return ChampionshipSchedule(
-      key: ValueKey('championship-$catId-${_championshipRefreshVersionByCategory[catId] ?? 0}'),
+      key: ValueKey(
+          'championship-$catId-${_championshipRefreshVersionByCategory[catId] ?? 0}'),
       categoryId: catId,
       categoryName: categoryName(catId),
     );
@@ -1512,7 +1950,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         "SELECT COUNT(*) as cnt FROM tbl_alliance_selections WHERE category_id = :catId",
         {"catId": categoryId},
       );
-      final count = int.tryParse(result.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
+      final count =
+          int.tryParse(result.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
       return count > 0;
     } catch (e) {
       return false;
@@ -1547,7 +1986,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               indicatorWeight: 3,
               labelColor: const Color(0xFF00CFFF),
               unselectedLabelColor: Colors.white38,
-              labelStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1),
+              labelStyle: const TextStyle(
+                  fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1),
               tabs: _categories
                   .map((c) => Tab(
                       text: (c['category_type'] ?? '').toString().toUpperCase()))
@@ -1572,8 +2012,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     );
   }
 
-  Widget _buildSoccerView(
-      Map<String, dynamic> category, int catId,
+  Widget _buildSoccerView(Map<String, dynamic> category, int catId,
       List<Map<String, dynamic>> matches) {
     final bracketSize = _bracketSize(_soccerTeams.length);
     final canSeed = !_bracketSeeded;
@@ -1628,9 +2067,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     Icon(
                       allDone ? Icons.account_tree : Icons.lock,
                       size: 16,
-                      color: allDone
-                          ? const Color(0xFF00FF88)
-                          : Colors.white24,
+                      color: allDone ? const Color(0xFF00FF88) : Colors.white24,
                     ),
                     const SizedBox(width: 6),
                     Text(
@@ -1708,9 +2145,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           const SizedBox(height: 10),
           Text(
             'Complete all group-stage matches to unlock.',
-            style: TextStyle(
-                color: Colors.white.withOpacity(0.45),
-                fontSize: 15),
+            style: TextStyle(color: Colors.white.withOpacity(0.45), fontSize: 15),
           ),
           const SizedBox(height: 20),
           Container(
@@ -1743,8 +2178,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                   value: total > 0 ? doneCount / total : 0,
                   minHeight: 8,
                   backgroundColor: Colors.white.withOpacity(0.08),
-                  valueColor: const AlwaysStoppedAnimation<Color>(
-                      Color(0xFF00FF88)),
+                  valueColor:
+                      const AlwaysStoppedAnimation<Color>(Color(0xFF00FF88)),
                 ),
               ),
               const SizedBox(height: 10),
@@ -1766,11 +2201,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   }
 
   // Soccer Schedule sub-tab
-  Widget _buildSoccerScheduleTab(
-      int catId,
-      List<Map<String, dynamic>> matches,
-      int bracketSize,
-      bool canSeed) {
+  Widget _buildSoccerScheduleTab(int catId, List<Map<String, dynamic>> matches,
+      int bracketSize, bool canSeed) {
     final List<Map<String, dynamic>> rows = [];
     int i = 0;
     while (i < matches.length) {
@@ -1805,7 +2237,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           decoration: BoxDecoration(
-            gradient: const LinearGradient(colors: [Color(0xFF00803A), Color(0xFF005728)]),
+            gradient: const LinearGradient(
+                colors: [Color(0xFF00803A), Color(0xFF005728)]),
             borderRadius: BorderRadius.circular(10),
             boxShadow: [
               BoxShadow(
@@ -1818,7 +2251,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             Expanded(
               child: Text(
                 'Top $bracketSize teams ready to advance to the bracket.',
-                style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
               ),
             ),
             const SizedBox(width: 10),
@@ -1830,7 +2264,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF00CFFF),
                 foregroundColor: const Color(0xFF0E0730),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8)),
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
               ),
             ),
@@ -1842,7 +2277,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
       Container(
         decoration: const BoxDecoration(
-            gradient: LinearGradient(colors: [Color(0xFF4A22AA), Color(0xFF3A1880)])),
+            gradient: LinearGradient(
+                colors: [Color(0xFF4A22AA), Color(0xFF3A1880)])),
         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
         child: Row(children: [
           _headerCell('#', flex: 1),
@@ -1870,12 +2306,18 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                   final status = _getStatus(catId, matchNum);
                   final score = _soccerScores[matchId];
 
-                  Map<String, dynamic>? t1 = row['team1'] as Map<String, dynamic>?;
-                  Map<String, dynamic>? t2 = row['team2'] as Map<String, dynamic>?;
+                  Map<String, dynamic>? t1 =
+                      row['team1'] as Map<String, dynamic>?;
+                  Map<String, dynamic>? t2 =
+                      row['team2'] as Map<String, dynamic>?;
                   if (t1 == null && row.containsKey('arenas')) {
                     final arenas = row['arenas'] as List? ?? [];
-                    t1 = arenas.isNotEmpty ? arenas[0] as Map<String, dynamic>? : null;
-                    t2 = arenas.length > 1 ? arenas[1] as Map<String, dynamic>? : null;
+                    t1 = arenas.isNotEmpty
+                        ? arenas[0] as Map<String, dynamic>?
+                        : null;
+                    t2 = arenas.length > 1
+                        ? arenas[1] as Map<String, dynamic>?
+                        : null;
                   }
 
                   final team1Name = t1?['team_name']?.toString() ?? '—';
@@ -1892,7 +2334,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
                   return Container(
                     decoration: BoxDecoration(
-                      color: isEven ? const Color(0xFF160C40) : const Color(0xFF100830),
+                      color: isEven
+                          ? const Color(0xFF160C40)
+                          : const Color(0xFF100830),
                       border: const Border(
                           bottom: BorderSide(color: Color(0xFF1A1050), width: 1)),
                     ),
@@ -1933,7 +2377,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                         decoration: BoxDecoration(
                                           color: const Color(0xFF00CFFF)
                                               .withOpacity(0.15),
-                                          borderRadius: BorderRadius.circular(4),
+                                          borderRadius:
+                                              BorderRadius.circular(4),
                                           border: Border.all(
                                               color: const Color(0xFF00CFFF)
                                                   .withOpacity(0.5),
@@ -2046,7 +2491,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                         decoration: BoxDecoration(
                                           color: const Color(0xFF00CFFF)
                                               .withOpacity(0.15),
-                                          borderRadius: BorderRadius.circular(4),
+                                          borderRadius:
+                                              BorderRadius.circular(4),
                                           border: Border.all(
                                               color: const Color(0xFF00CFFF)
                                                   .withOpacity(0.5),
@@ -2089,8 +2535,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                     decoration: BoxDecoration(
                                       color: status.color.withOpacity(0.12),
                                       borderRadius: BorderRadius.circular(20),
-                                      border: Border.all(
-                                          color: status.color, width: 1.5),
+                                      border:
+                                          Border.all(color: status.color, width: 1.5),
                                     ),
                                     child: Text(status.label,
                                         textAlign: TextAlign.center,
@@ -2118,7 +2564,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       final bracketSize = _bracketSize(totalTeams);
       return Center(
         child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Icon(Icons.account_tree, size: 64, color: Colors.white.withOpacity(0.08)),
+          Icon(Icons.account_tree, size: 64,
+              color: Colors.white.withOpacity(0.08)),
           const SizedBox(height: 16),
           const Text('Bracket not seeded yet.',
               style: TextStyle(color: Colors.white38, fontSize: 18)),
@@ -2140,7 +2587,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF5B2CC0),
                 foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                shape:
+                    RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                 padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
               ),
             ),
@@ -2169,7 +2617,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               decoration: BoxDecoration(
                 color: const Color(0xFFFFD700).withOpacity(0.1),
                 borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.6)),
+                border: Border.all(
+                    color: const Color(0xFFFFD700).withOpacity(0.6)),
               ),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
                 const Icon(Icons.star, color: Color(0xFFFFD700), size: 14),
@@ -2279,12 +2728,16 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     decoration: BoxDecoration(
                         color: const Color(0xFF3D1E88).withOpacity(0.5),
                         borderRadius: BorderRadius.circular(8)),
-                    child: const Icon(Icons.sports_soccer, color: Color(0xFF9B6FE8), size: 18),
+                    child: const Icon(Icons.sports_soccer,
+                        color: Color(0xFF9B6FE8), size: 18),
                   ),
                   const SizedBox(width: 10),
                   const Text('SELECT MATCH WINNER',
-                      style: TextStyle(color: Colors.white, fontSize: 16,
-                          fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 1.5)),
                   const Spacer(),
                   GestureDetector(
                     onTap: () => Navigator.pop(ctx),
@@ -2293,7 +2746,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       decoration: BoxDecoration(
                           color: Colors.white.withOpacity(0.06),
                           borderRadius: BorderRadius.circular(6)),
-                      child: Icon(Icons.close, color: Colors.white.withOpacity(0.4), size: 18),
+                      child: Icon(Icons.close,
+                          color: Colors.white.withOpacity(0.4), size: 18),
                     ),
                   ),
                 ]),
@@ -2315,7 +2769,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                               ])))),
                       Container(
                         margin: const EdgeInsets.symmetric(horizontal: 14),
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
                         decoration: BoxDecoration(
                           gradient: const LinearGradient(
                               colors: [Color(0xFF8B3FE8), Color(0xFF5218A8)]),
@@ -2327,8 +2782,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                           ],
                         ),
                         child: const Text('VS',
-                            style: TextStyle(color: Colors.white, fontSize: 17,
-                                fontWeight: FontWeight.w900, letterSpacing: 3,
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 17,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 3,
                                 fontStyle: FontStyle.italic)),
                       ),
                       Expanded(
@@ -2352,7 +2810,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       _clearMatchResult(match);
                       Navigator.pop(ctx);
                     },
-                    icon: const Icon(Icons.restart_alt, color: Colors.redAccent, size: 16),
+                    icon: const Icon(Icons.restart_alt,
+                        color: Colors.redAccent, size: 16),
                     label: const Text('Clear result',
                         style: TextStyle(color: Colors.redAccent, fontSize: 14)),
                   ),
@@ -2365,8 +2824,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     );
   }
 
-  Widget _dialogTeamButton(
-      BuildContext ctx, StateSetter setDlgState,
+  Widget _dialogTeamButton(BuildContext ctx, StateSetter setDlgState,
       BracketMatch match, BracketTeam team) {
     final isWinner = match.winner?.teamId == team.teamId;
     final initial = team.teamName.isNotEmpty ? team.teamName[0].toUpperCase() : '?';
@@ -2381,7 +2839,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
         decoration: BoxDecoration(
           gradient: isWinner
-              ? const LinearGradient(colors: [Color(0xFF00B86A), Color(0xFF006B3E)])
+              ? const LinearGradient(
+                  colors: [Color(0xFF00B86A), Color(0xFF006B3E)])
               : null,
           color: isWinner ? null : const Color(0xFF1C0F4A),
           borderRadius: BorderRadius.circular(10),
@@ -2407,7 +2866,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       Colors.white.withOpacity(0.25),
                       Colors.white.withOpacity(0.10)
                     ])
-                  : const LinearGradient(colors: [Color(0xFF2E1A62), Color(0xFF1C0F42)]),
+                  : const LinearGradient(
+                      colors: [Color(0xFF2E1A62), Color(0xFF1C0F42)]),
               border: Border.all(
                   color: isWinner
                       ? Colors.white.withOpacity(0.5)
@@ -2440,75 +2900,79 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     );
   }
 
-  Widget _buildCategoryView(
-    Map<String, dynamic> category, int catId,
-    List<Map<String, dynamic>> matches) {
-  final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
-  final isSoccer = catId == _soccerCategoryId;
-  
-  return DefaultTabController(
-    length: 2,
-    child: Builder(
-      builder: (tabContext) {
-        _categoryTabContexts[catId] = tabContext;
-        return Column(
-          children: [
-            _buildCategoryTitleBar(category, categoryName, matches),
-            
-            Container(
-              color: const Color(0xFF130742),
-              child: TabBar(
-                indicatorColor: const Color(0xFFFFD700),
-                indicatorWeight: 3,
-                labelColor: const Color(0xFFFFD700),
-                unselectedLabelColor: Colors.white30,
-                labelStyle: const TextStyle(
-                    fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1.2),
-                tabs: const [
-                  Tab(
-                    icon: Icon(Icons.calendar_today, size: 16),
-                    text: 'QUALIFICATION',
-                  ),
-                  Tab(
-                    icon: Icon(Icons.emoji_events, size: 16),
-                    text: 'CHAMPIONSHIP',
-                  ),
-                ],
+  Widget _buildCategoryView(Map<String, dynamic> category, int catId,
+      List<Map<String, dynamic>> matches) {
+    final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
+    final isSoccer = catId == _soccerCategoryId;
+
+    return DefaultTabController(
+      length: 2,
+      child: Builder(
+        builder: (tabContext) {
+          _categoryTabContexts[catId] = tabContext;
+          return Column(
+            children: [
+              _buildCategoryTitleBar(category, categoryName, matches),
+
+              Container(
+                color: const Color(0xFF130742),
+                child: TabBar(
+                  indicatorColor: const Color(0xFFFFD700),
+                  indicatorWeight: 3,
+                  labelColor: const Color(0xFFFFD700),
+                  unselectedLabelColor: Colors.white30,
+                  labelStyle: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                      letterSpacing: 1.2),
+                  tabs: const [
+                    Tab(
+                      icon: Icon(Icons.calendar_today, size: 16),
+                      text: 'QUALIFICATION',
+                    ),
+                    Tab(
+                      icon: Icon(Icons.emoji_events, size: 16),
+                      text: 'CHAMPIONSHIP',
+                    ),
+                  ],
+                ),
               ),
-            ),
-            
-            Expanded(
-              child: TabBarView(
-                children: [
-                  Column(
-                    children: [
-                      _buildQualificationActions(catId, categoryName),
-                      _buildAllianceSelectionButton(catId, categoryName),
-                      Expanded(
-                        child: isSoccer 
-                            ? _buildSoccerScheduleTab(catId, matches, _bracketSize(_soccerTeams.length), !_bracketSeeded)
-                            : _buildScheduleTable(category, catId, matches),
-                      ),
-                    ],
-                  ),
-                  ChampionshipSchedule(
-                    key: ValueKey('championship-$catId-${_championshipRefreshVersionByCategory[catId] ?? 0}'),
-                    categoryId: catId,
-                    categoryName: categoryName,
-                  ),
-                ],
+
+              Expanded(
+                child: TabBarView(
+                  children: [
+                    Column(
+                      children: [
+                        _buildQualificationActions(catId, categoryName),
+                        _buildAllianceSelectionButton(catId, categoryName),
+                        Expanded(
+                          child: isSoccer
+                              ? _buildSoccerScheduleTab(catId, matches,
+                                  _bracketSize(_soccerTeams.length), !_bracketSeeded)
+                              : _buildScheduleTable(category, catId, matches),
+                        ),
+                      ],
+                    ),
+                    ChampionshipSchedule(
+                      key: ValueKey(
+                          'championship-$catId-${_championshipRefreshVersionByCategory[catId] ?? 0}'),
+                      categoryId: catId,
+                      categoryName: categoryName,
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
-        );
-      },
-    ),
-  );
-}
+            ],
+          );
+        },
+      ),
+    );
+  }
 
   // Add these new methods to _ScheduleViewerState:
 
-  Future<void> _goToGenerateScheduleForCategory(int categoryId, String categoryName) async {
+  Future<void> _goToGenerateScheduleForCategory(
+      int categoryId, String categoryName) async {
     // Navigate to generate schedule page with pre-selected category
     final result = await Navigator.of(context).push(
       MaterialPageRoute(
@@ -2532,12 +2996,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     );
   }
 
-  Future<void> _confirmClearCategorySchedule(int categoryId, String categoryName) async {
+  Future<void> _confirmClearCategorySchedule(
+      int categoryId, String categoryName) async {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF2D0E7A),
-        title: Text('Clear $categoryName Schedule?', 
+        title: Text('Clear $categoryName Schedule?',
             style: const TextStyle(color: Colors.white)),
         content: Text(
           'This will delete ALL matches for $categoryName. This action cannot be undone.',
@@ -2555,7 +3020,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         ],
       ),
     );
-    
+
     if (confirm == true) {
       await _clearCategorySchedule(categoryId);
     }
@@ -2564,14 +3029,14 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   Future<void> _clearCategorySchedule(int categoryId) async {
     try {
       final conn = await DBHelper.getConnection();
-      
+
       // Delete only matches for this category
       await DBHelper.executeDual("""
         DELETE ts FROM tbl_teamschedule ts
         JOIN tbl_team t ON ts.team_id = t.team_id
         WHERE t.category_id = :catId
       """, {"catId": categoryId});
-      
+
       // Also delete orphaned matches and schedules
       await DBHelper.executeDual("""
         DELETE m FROM tbl_match m
@@ -2579,17 +3044,17 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           SELECT 1 FROM tbl_teamschedule ts WHERE ts.match_id = m.match_id
         )
       """);
-      
+
       await DBHelper.executeDual("""
         DELETE s FROM tbl_schedule s
         WHERE NOT EXISTS (
           SELECT 1 FROM tbl_match m WHERE m.schedule_id = s.schedule_id
         )
       """);
-      
+
       // Refresh the view
       _loadData(initial: true);
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('✅ Schedule cleared for category'),
@@ -2607,8 +3072,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     }
   }
 
-  Widget _buildCategoryTitleBar(
-      Map<String, dynamic> category, String title,
+  Widget _buildCategoryTitleBar(Map<String, dynamic> category, String title,
       List<Map<String, dynamic>> matches) {
     return Container(
       width: double.infinity,
@@ -2629,12 +3093,16 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                 letterSpacing: 2)),
         const Spacer(),
         Text(title,
-            style: const TextStyle(color: Colors.white, fontSize: 26,
-                fontWeight: FontWeight.w900, letterSpacing: 3)),
+            style: const TextStyle(
+                color: Colors.white,
+                fontSize: 26,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 3)),
         const Spacer(),
         IconButton(
             tooltip: 'Export PDF',
-            icon: const Icon(Icons.picture_as_pdf, color: Color(0xFF00CFFF), size: 22),
+            icon: const Icon(Icons.picture_as_pdf,
+                color: Color(0xFF00CFFF), size: 22),
             onPressed: () => _exportPdf(category, matches)),
         _buildLiveIndicator(),
         IconButton(
@@ -2649,130 +3117,46 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     );
   }
 
-  Widget _buildScheduleTable(
-      Map<String, dynamic> category, int catId,
+  // UPDATED: New schedule table using enhanced cards
+  Widget _buildScheduleTable(Map<String, dynamic> category, int catId,
       List<Map<String, dynamic>> matches) {
-    return Column(children: [
-      Container(
-        decoration: const BoxDecoration(
-            gradient: LinearGradient(colors: [Color(0xFF4A22AA), Color(0xFF3A1880)])),
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
-        child: Row(children: [
-          _headerCell('MATCH', flex: 1),
-          _headerCell('SCHEDULE', flex: 2),
-          _headerCell('RED ALLIANCE (Arena 1)', flex: 4, center: true),
-          _headerCell('BLUE ALLIANCE (Arena 2)', flex: 4, center: true),
-          _headerCell('STATUS', flex: 2, center: true),
-        ]),
-      ),
-      Expanded(
-        child: matches.isEmpty
-            ? const Center(
-                child: Text('No matches scheduled.',
-                    style: TextStyle(color: Colors.white38, fontSize: 16)))
-            : ListView.builder(
-                itemCount: matches.length,
-                itemBuilder: (context, index) {
-                  final match = matches[index];
-                  final matchNum = match['matchNumber'] as int;
-                  final schedule = match['schedule'] as String;
-                  final arena1Teams = match['arena1_teams'] as List? ?? [];
-                  final arena2Teams = match['arena2_teams'] as List? ?? [];
-                  final isEven = index % 2 == 0;
-                  final status = _getStatus(catId, matchNum);
+    return matches.isEmpty
+        ? const Center(
+            child: Text('No matches scheduled.',
+                style: TextStyle(color: Colors.white38, fontSize: 16)))
+        : ListView.builder(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            itemCount: matches.length,
+            itemBuilder: (context, index) {
+              final match = matches[index];
+              final matchNum = match['matchNumber'] as int;
+              final schedule = match['schedule'] as String;
+              final arena1Teams = match['arena1_teams'] as List? ?? [];
+              final arena2Teams = match['arena2_teams'] as List? ?? [];
+              final status = _getStatus(catId, matchNum);
 
-                  return Container(
-                    color: isEven ? const Color(0xFF160C40) : const Color(0xFF100830),
-                    padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 24),
-                    child: Row(children: [
-                      Expanded(
-                          flex: 1,
-                          child: Text('$matchNum',
-                              style: const TextStyle(color: Colors.white,
-                                  fontWeight: FontWeight.bold, fontSize: 17))),
-                      Expanded(
-                          flex: 2,
-                          child: Text(schedule,
-                              style: TextStyle(
-                                  color: Colors.white.withOpacity(0.75), fontSize: 16))),
+              // Convert teams to the format expected by _EnhancedMatchCard
+              final redTeam = arena1Teams.map((team) => {
+                    'team_name': team['team_name'] as String,
+                    'team_id': team['team_id'] as String,
+                  }).toList();
 
-                      Expanded(
-                        flex: 4,
-                        child: arena1Teams.isEmpty
-                            ? const Text('—',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(color: Colors.white24, fontSize: 14))
-                            : Column(
-                                crossAxisAlignment: CrossAxisAlignment.center,
-                                children: arena1Teams.map((team) {
-                                  final teamName = team['team_name']?.toString() ?? '';
-                                  final teamId = team['team_id']?.toString() ?? '';
-                                  return Padding(
-                                    padding: const EdgeInsets.symmetric(vertical: 2),
-                                    child: Text(
-                                      teamName,
-                                      style: const TextStyle(
-                                        color: Colors.red,
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 13,
-                                      ),
-                                    ),
-                                  );
-                                }).toList(),
-                              ),
-                      ),
+              final blueTeam = arena2Teams.map((team) => {
+                    'team_name': team['team_name'] as String,
+                    'team_id': team['team_id'] as String,
+                  }).toList();
 
-                      Expanded(
-                        flex: 4,
-                        child: arena2Teams.isEmpty
-                            ? const Text('—',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(color: Colors.white24, fontSize: 14))
-                            : Column(
-                                crossAxisAlignment: CrossAxisAlignment.center,
-                                children: arena2Teams.map((team) {
-                                  final teamName = team['team_name']?.toString() ?? '';
-                                  return Padding(
-                                    padding: const EdgeInsets.symmetric(vertical: 2),
-                                    child: Text(
-                                      teamName,
-                                      style: const TextStyle(
-                                        color: Colors.blue,
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 13,
-                                      ),
-                                    ),
-                                  );
-                                }).toList(),
-                              ),
-                      ),
-
-                      Expanded(
-                          flex: 2,
-                          child: GestureDetector(
-                            onTap: () => _cycleStatus(catId, matchNum),
-                            child: Container(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                              decoration: BoxDecoration(
-                                color: status.color.withOpacity(0.12),
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(color: status.color, width: 1.5),
-                              ),
-                              child: Text(status.label,
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                      color: status.color,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13)),
-                            ),
-                          )),
-                    ]),
-                  );
-                },
-              ),
-      ),
-    ]);
+              return _EnhancedMatchCard(
+                match: match,
+                matchNumber: matchNum,
+                schedule: schedule,
+                redTeam: redTeam,
+                blueTeam: blueTeam,
+                onStatusTap: () => _cycleStatus(catId, matchNum),
+                status: status,
+              );
+            },
+          );
   }
 
   Widget _buildHeader() {
@@ -2807,7 +3191,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             const Text('Construct Your Dreams',
                 style: TextStyle(color: Colors.white38, fontSize: 13)),
           ]),
-          Image.asset('assets/images/MakeX_logo.png', height: 100, fit: BoxFit.contain),
+          Image.asset('assets/images/MakeX_logo.png',
+              height: 100, fit: BoxFit.contain),
           const Text('CREOTEC',
               style: TextStyle(
                   color: Colors.white,
@@ -2840,7 +3225,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       fontSize: 11,
                       fontWeight: FontWeight.bold,
                       letterSpacing: 1.2)),
-              Text(timeStr, style: const TextStyle(color: Colors.white38, fontSize: 11)),
+              Text(timeStr,
+                  style: const TextStyle(color: Colors.white38, fontSize: 11)),
             ]),
       ]),
     );
@@ -2884,15 +3270,10 @@ class _BracketCanvas extends StatelessWidget {
         CustomPaint(
           size: Size(totalW, totalH),
           painter: _BracketLinePainter(
-              rounds: rounds,
-              matchW: matchW,
-              matchH: matchH,
-              gapH: gapH,
-              gapW: gapW),
+              rounds: rounds, matchW: matchW, matchH: matchH, gapH: gapH, gapW: gapW),
         ),
         for (int r = 0; r < rounds.length; r++)
-          for (int m = 0; m < rounds[r].length; m++)
-            _positionedCard(r, m, totalH),
+          for (int m = 0; m < rounds[r].length; m++) _positionedCard(r, m, totalH),
       ]),
     );
   }
@@ -3001,7 +3382,8 @@ class _BracketLinePainter extends CustomPainter {
         if (nextM >= rounds[r + 1].length) continue;
         final nextIn = _leftMid(r + 1, nextM, size.height);
 
-        final hasWinner1 = rounds[r][m].winner != null && !rounds[r][m].winner!.isBye;
+        final hasWinner1 =
+            rounds[r][m].winner != null && !rounds[r][m].winner!.isBye;
         final hasWinner2 =
             rounds[r][m + 1].winner != null && !rounds[r][m + 1].winner!.isBye;
 
@@ -3141,7 +3523,8 @@ class _MatchCard extends StatelessWidget {
             Icon(Icons.emoji_events, color: const Color(0xFFFFD700),
                 size: (fontSize * 0.9).clamp(10.0, 14.0)),
           Text(name,
-              textAlign: align == CrossAxisAlignment.end ? TextAlign.right : TextAlign.left,
+              textAlign:
+                  align == CrossAxisAlignment.end ? TextAlign.right : TextAlign.left,
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
@@ -3214,7 +3597,8 @@ class _PulsingDotState extends State<_PulsingDot>
   @override
   void initState() {
     super.initState();
-    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))
+    _ctrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 900))
       ..repeat(reverse: true);
     _anim = Tween(begin: 0.25, end: 1.0)
         .animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
@@ -3232,7 +3616,7 @@ class _PulsingDotState extends State<_PulsingDot>
         child: Container(
             width: 8,
             height: 8,
-            decoration:
-                const BoxDecoration(color: Color(0xFF00FF88), shape: BoxShape.circle)),
+            decoration: const BoxDecoration(
+                color: Color(0xFF00FF88), shape: BoxShape.circle)),
       );
 }

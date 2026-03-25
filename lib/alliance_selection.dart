@@ -474,8 +474,8 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
         print("✅ tbl_alliance_selections table exists");
       } catch (e) {
         print("❌ tbl_alliance_selections table does not exist: $e");
-        // Try to create the table
-        await DBHelper.executeDual("""
+        // Try to create the table using the active connection
+        await conn.execute("""
           CREATE TABLE IF NOT EXISTS tbl_alliance_selections (
             alliance_id INT AUTO_INCREMENT PRIMARY KEY,
             category_id INT NOT NULL,

@@ -233,25 +233,36 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
     final conn = await DBHelper.getConnection();
     
     try {
-      final scheduleMatch = await conn.execute("""
-        SELECT match_id, status 
-        FROM tbl_championship_schedule 
-        WHERE category_id = :catId AND match_id = :matchId
-      """, {
-        "catId": widget.categoryId,
-        "matchId": matchId,
-      });
-      
-      if (scheduleMatch.rows.isNotEmpty) {
-        await DBHelper.executeDual("""
-            UPDATE tbl_championship_schedule 
-            SET status = 'completed', winner_alliance_id = :winnerId
-            WHERE match_id = :matchId
-          """, {
-            "winnerId": winnerId,
-            "matchId": matchId,
-          });
-        print("✅ Synced with schedule tab: Match $matchId completed");
+      // Find the round_number and match_position for this double-elimination match
+      final deRow = await conn.execute("""
+        SELECT round_number, match_position FROM tbl_double_elimination WHERE match_id = :matchId
+      """, {"matchId": matchId});
+
+      if (deRow.rows.isNotEmpty) {
+        final rd = deRow.rows.first.assoc();
+        final roundNum = int.tryParse(rd['round_number']?.toString() ?? '0') ?? 0;
+        final matchPos = int.tryParse(rd['match_position']?.toString() ?? '0') ?? 0;
+
+        if (roundNum > 0 && matchPos > 0) {
+          final scheduleMatch = await conn.execute("""
+            SELECT match_id, status FROM tbl_championship_schedule
+            WHERE category_id = :catId AND match_round = :roundNum AND match_position = :matchPos
+          """, {"catId": widget.categoryId, "roundNum": roundNum, "matchPos": matchPos});
+
+          if (scheduleMatch.rows.isNotEmpty) {
+            await DBHelper.executeDual("""
+                UPDATE tbl_championship_schedule 
+                SET status = 'completed', winner_alliance_id = :winnerId
+                WHERE category_id = :catId AND match_round = :roundNum AND match_position = :matchPos
+              """, {
+                "winnerId": winnerId,
+                "catId": widget.categoryId,
+                "roundNum": roundNum,
+                "matchPos": matchPos,
+              });
+            print("✅ Synced with schedule tab: Match $matchId completed (round $roundNum pos $matchPos)");
+          }
+        }
       }
       
     } catch (e) {
@@ -1667,199 +1678,24 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
   }
 
   Future<void> _updateMatchResult(Map<String, dynamic> match, int winnerId) async {
-    final conn = await DBHelper.getConnection();
-    
     try {
-      await conn.execute("START TRANSACTION");
-      
-      final int alliance1Id = int.parse(match['alliance1_id']?.toString() ?? '0');
-      final int alliance2Id = int.parse(match['alliance2_id']?.toString() ?? '0');
-      final int loserId = winnerId == alliance1Id ? alliance2Id : alliance1Id;
-      
-      final roundName = match['round_name'] as String;
       final matchId = int.parse(match['match_id'].toString());
-      
-      print("📝 Updating match $roundName: Winner ID=$winnerId, Loser ID=$loserId");
-      
-      await DBHelper.executeDual("""
-        UPDATE tbl_double_elimination 
-        SET winner_alliance_id = :winnerId, status = 'completed'
-        WHERE match_id = :matchId
-      """, {
-        "winnerId": winnerId,
-        "matchId": matchId,
-      });
-      
-      final nextWinnerId = await _getNextMatchId(conn, matchId, 'winner');
-      final nextLoserId = await _getNextMatchId(conn, matchId, 'loser');
-      final winnerPos = await _getNextMatchPosition(conn, matchId, 'winner');
-      final loserPos = await _getNextMatchPosition(conn, matchId, 'loser');
-      
-      if (nextWinnerId != null && nextWinnerId != '0') {
-        final nextMatchId = int.tryParse(nextWinnerId);
-        if (nextMatchId != null) {
-          print("🎯 Propagating winner to match ID $nextMatchId at position $winnerPos");
-          
-          if (winnerPos == 1) {
-            await DBHelper.executeDual("""
-              UPDATE tbl_double_elimination 
-              SET alliance1_id = :winnerId
-              WHERE match_id = :nextMatchId
-            """, {
-              "winnerId": winnerId,
-              "nextMatchId": nextMatchId,
-            });
-          } else {
-            await DBHelper.executeDual("""
-              UPDATE tbl_double_elimination 
-              SET alliance2_id = :winnerId
-              WHERE match_id = :nextMatchId
-            """, {
-              "winnerId": winnerId,
-              "nextMatchId": nextMatchId,
-            });
-          }
-        }
-      }
-      
-      if (nextLoserId != null && nextLoserId != '0' && loserId > 0) {
-        final nextMatchIdLoser = int.tryParse(nextLoserId);
-        if (nextMatchIdLoser != null) {
-          print("🎯 Propagating loser to match ID $nextMatchIdLoser at position $loserPos");
-          
-          if (loserPos == 1) {
-            await DBHelper.executeDual("""
-              UPDATE tbl_double_elimination 
-              SET alliance1_id = :loserId
-              WHERE match_id = :nextMatchId
-            """, {
-              "loserId": loserId,
-              "nextMatchId": nextMatchIdLoser,
-            });
-          } else {
-            await DBHelper.executeDual("""
-              UPDATE tbl_double_elimination 
-              SET alliance2_id = :loserId
-              WHERE match_id = :nextMatchId
-            """, {
-              "loserId": loserId,
-              "nextMatchId": nextMatchIdLoser,
-            });
-          }
-        }
-      }
-      
-      if (roundName == 'GF1') {
-        print("🏆 Processing Grand Final GF1 result...");
-        
-        int? winnerFinalChampion;
-        int? loserFinalChampion;
-        
-        final winnerFinalResult = await conn.execute("""
-          SELECT winner_alliance_id FROM tbl_double_elimination 
-          WHERE category_id = :catId AND bracket_side = 'winners'
-          ORDER BY round_number DESC LIMIT 1
-        """, {"catId": widget.categoryId});
-        
-        if (winnerFinalResult.rows.isNotEmpty) {
-          final winnerStr = winnerFinalResult.rows.first.assoc()['winner_alliance_id']?.toString();
-          winnerFinalChampion = winnerStr != null ? int.tryParse(winnerStr) : null;
-        }
-        
-        final loserFinalResult = await conn.execute("""
-          SELECT winner_alliance_id FROM tbl_double_elimination 
-          WHERE category_id = :catId AND bracket_side = 'losers'
-          ORDER BY round_number DESC LIMIT 1
-        """, {"catId": widget.categoryId});
-        
-        if (loserFinalResult.rows.isNotEmpty) {
-          final loserStr = loserFinalResult.rows.first.assoc()['winner_alliance_id']?.toString();
-          loserFinalChampion = loserStr != null ? int.tryParse(loserStr) : null;
-        }
-        
-        bool winnerIsFromLosersBracket = (winnerId == loserFinalChampion);
-        
-        print("🏆 Winner's Final Champion: $winnerFinalChampion");
-        print("🏆 Loser's Final Champion: $loserFinalChampion");
-        print("🏆 GF1 Winner: $winnerId");
-        print("🏆 Winner from Loser's Bracket: $winnerIsFromLosersBracket");
-        
-        if (winnerIsFromLosersBracket) {
-          print("🏆 Loser's Bracket team won Grand Final - Setting up reset match GF2");
-          
-          final gf2Result = await conn.execute("""
-            SELECT match_id FROM tbl_double_elimination 
-            WHERE round_name = 'GF2' AND category_id = :catId
-          """, {"catId": widget.categoryId});
-          
-          if (gf2Result.rows.isNotEmpty) {
-            final gf2Id = int.parse(gf2Result.rows.first.assoc()['match_id'].toString());
-            
-            await DBHelper.executeDual("""
-              UPDATE tbl_double_elimination 
-              SET 
-                alliance1_id = :loserId,
-                alliance2_id = :winnerId,
-                winner_alliance_id = NULL,
-                status = 'pending'
-              WHERE match_id = :gf2Id
-            """, {
-              "loserId": loserId,
-              "winnerId": winnerId,
-              "gf2Id": gf2Id,
-            });
-            
-            await DBHelper.executeDual("""
-              UPDATE tbl_double_elimination 
-              SET next_match_id_winner = :gf2Id, next_match_position_winner = 1
-              WHERE match_id = :matchId
-            """, {
-              "gf2Id": gf2Id,
-              "matchId": matchId,
-            });
-            
-            print("✅ Reset match GF2 configured with Alliance1=$loserId, Alliance2=$winnerId");
-          }
-        }
-      }
-      
-      await conn.execute("COMMIT");
-      
-      await _syncWithScheduleTab(matchId, winnerId);
+      await DBHelper.updateBracketWinner(matchId, winnerId);
+
+      // Reload matches and notify listeners
       await _loadMatches(autoProcessByes: false);
       widget.onMatchUpdated?.call();
-      
+
       if (mounted) {
-        String message = '✅ Match result recorded';
-        if (roundName == 'GF1') {
-          final gf2Check = await conn.execute("""
-            SELECT alliance1_id, alliance2_id FROM tbl_double_elimination 
-            WHERE round_name = 'GF2' AND category_id = :catId
-          """, {"catId": widget.categoryId});
-          
-          if (gf2Check.rows.isNotEmpty) {
-            final gf2 = gf2Check.rows.first.assoc();
-            if (gf2['alliance1_id'] != null && gf2['alliance2_id'] != null &&
-                int.parse(gf2['alliance1_id'].toString()) > 0 && 
-                int.parse(gf2['alliance2_id'].toString()) > 0) {
-              message = '🏆 Loser\'s Bracket won! Reset match (GF2) is now available.';
-            } else {
-              message = '🏆 Champion crowned! Tournament complete.';
-            }
-          }
-        }
-        
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(message),
+          const SnackBar(
+            content: Text('✅ Match result recorded'),
             backgroundColor: Colors.green,
-            duration: const Duration(seconds: 3),
+            duration: Duration(seconds: 3),
           ),
         );
       }
-      
     } catch (e) {
-      await conn.execute("ROLLBACK");
       print("❌ Error updating match: $e");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

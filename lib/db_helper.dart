@@ -406,6 +406,262 @@ try {
     return result;
   }
 
+  // Update a double-elimination match with a winner and propagate to next matches.
+  // This centralizes the bracket propagation logic so other UI layers can call it.
+  static Future<void> updateBracketWinner(int matchId, int winnerId) async {
+    final conn = await getConnection();
+    try {
+      await conn.execute("START TRANSACTION");
+
+      // Set winner on current match
+      await executeDual("""
+        UPDATE tbl_double_elimination
+        SET winner_alliance_id = :winnerId, status = 'completed'
+        WHERE match_id = :matchId
+      """, {"winnerId": winnerId, "matchId": matchId});
+
+      // Read match details needed to propagate
+      final matchDetails = await conn.execute("""
+        SELECT category_id, round_name, round_number, match_position,
+               next_match_id_winner, next_match_position_winner,
+               next_match_id_loser, next_match_position_loser, alliance1_id, alliance2_id
+        FROM tbl_double_elimination
+        WHERE match_id = :matchId
+      """, {"matchId": matchId});
+
+      if (matchDetails.rows.isNotEmpty) {
+        final data = matchDetails.rows.first.assoc();
+        final categoryId = int.tryParse(data['category_id']?.toString() ?? '0') ?? 0;
+        final roundName = data['round_name']?.toString() ?? '';
+        final alliance1Id = int.tryParse(data['alliance1_id']?.toString() ?? '0') ?? 0;
+        final alliance2Id = int.tryParse(data['alliance2_id']?.toString() ?? '0') ?? 0;
+        final loserId = (winnerId == alliance1Id) ? alliance2Id : alliance1Id;
+
+        final nextWinnerIdStr = data['next_match_id_winner']?.toString() ?? '0';
+        final nextWinnerPos = int.tryParse(data['next_match_position_winner']?.toString() ?? '1') ?? 1;
+        if (nextWinnerIdStr != null && nextWinnerIdStr != '0') {
+          final nextMatchId = int.tryParse(nextWinnerIdStr);
+          if (nextMatchId != null) {
+            if (nextWinnerPos == 1) {
+              await executeDual("""
+                UPDATE tbl_double_elimination
+                SET alliance1_id = :winnerId
+                WHERE match_id = :nextMatchId
+              """, {"winnerId": winnerId, "nextMatchId": nextMatchId});
+            } else {
+              await executeDual("""
+                UPDATE tbl_double_elimination
+                SET alliance2_id = :winnerId
+                WHERE match_id = :nextMatchId
+              """, {"winnerId": winnerId, "nextMatchId": nextMatchId});
+            }
+          }
+        }
+
+        final nextLoserIdStr = data['next_match_id_loser']?.toString() ?? '0';
+        final nextLoserPos = int.tryParse(data['next_match_position_loser']?.toString() ?? '1') ?? 1;
+        if (nextLoserIdStr != null && nextLoserIdStr != '0' && loserId > 0) {
+          final nextMatchIdLoser = int.tryParse(nextLoserIdStr);
+          if (nextMatchIdLoser != null) {
+            if (nextLoserPos == 1) {
+              await executeDual("""
+                UPDATE tbl_double_elimination
+                SET alliance1_id = :loserId
+                WHERE match_id = :nextMatchId
+              """, {"loserId": loserId, "nextMatchId": nextMatchIdLoser});
+            } else {
+              await executeDual("""
+                UPDATE tbl_double_elimination
+                SET alliance2_id = :loserId
+                WHERE match_id = :nextMatchId
+              """, {"loserId": loserId, "nextMatchId": nextMatchIdLoser});
+            }
+          }
+        }
+
+        // Grand final special case: if this was GF1 and the losers bracket team won, configure GF2
+        if (roundName == 'GF1' && categoryId > 0) {
+          try {
+            final winnerFinalResult = await conn.execute("""
+              SELECT winner_alliance_id FROM tbl_double_elimination
+              WHERE category_id = :catId AND bracket_side = 'winners'
+              ORDER BY round_number DESC LIMIT 1
+            """, {"catId": categoryId});
+
+            final loserFinalResult = await conn.execute("""
+              SELECT winner_alliance_id FROM tbl_double_elimination
+              WHERE category_id = :catId AND bracket_side = 'losers'
+              ORDER BY round_number DESC LIMIT 1
+            """, {"catId": categoryId});
+
+            int? winnerFinalChampion;
+            int? loserFinalChampion;
+            if (winnerFinalResult.rows.isNotEmpty) {
+              final winnerStr = winnerFinalResult.rows.first.assoc()['winner_alliance_id']?.toString();
+              winnerFinalChampion = winnerStr != null ? int.tryParse(winnerStr) : null;
+            }
+            if (loserFinalResult.rows.isNotEmpty) {
+              final loserStr = loserFinalResult.rows.first.assoc()['winner_alliance_id']?.toString();
+              loserFinalChampion = loserStr != null ? int.tryParse(loserStr) : null;
+            }
+
+            final winnerIsFromLosers = (winnerId == loserFinalChampion);
+            if (winnerIsFromLosers) {
+              final gf2Res = await conn.execute("""
+                SELECT match_id FROM tbl_double_elimination
+                WHERE round_name = 'GF2' AND category_id = :catId
+              """, {"catId": categoryId});
+              if (gf2Res.rows.isNotEmpty) {
+                final gf2Id = int.tryParse(gf2Res.rows.first.assoc()['match_id']?.toString() ?? '0');
+                if (gf2Id != null && gf2Id > 0) {
+                  await executeDual("""
+                    UPDATE tbl_double_elimination
+                    SET alliance1_id = :loserId, alliance2_id = :winnerId, winner_alliance_id = NULL, status = 'pending'
+                    WHERE match_id = :gf2Id
+                  """, {"loserId": loserId, "winnerId": winnerId, "gf2Id": gf2Id});
+
+                  await executeDual("""
+                    UPDATE tbl_double_elimination
+                    SET next_match_id_winner = :gf2Id, next_match_position_winner = 1
+                    WHERE match_id = :matchId
+                  """, {"gf2Id": gf2Id, "matchId": matchId});
+                }
+              }
+            }
+          } catch (e) {
+            print('ℹ️ GF1 handling failed in updateBracketWinner: $e');
+          }
+        }
+
+        // Sync with championship schedule table by match round/position if that row exists
+        // Only mark the schedule row completed if either:
+        // - there is no Best-of-3 series recorded for this category/round/position, OR
+        // - the Best-of-3 series is finished (2 wins for a side or 3 completed matches).
+        try {
+          if (categoryId > 0) {
+            final roundNum = int.tryParse(data['round_number']?.toString() ?? '0') ?? 0;
+            final matchPos = int.tryParse(data['match_position']?.toString() ?? '0') ?? 0;
+            if (roundNum > 0 && matchPos > 0) {
+              final scheduleCheck = await conn.execute("""
+                SELECT match_id FROM tbl_championship_schedule WHERE category_id = :catId AND match_round = :roundNum AND match_position = :matchPos
+              """, {"catId": categoryId, "roundNum": roundNum, "matchPos": matchPos});
+
+              if (scheduleCheck.rows.isNotEmpty) {
+                // Check if Best-of-3 rows exist for this series
+                final bof3CountRes = await conn.execute("""
+                  SELECT COUNT(*) as cnt FROM tbl_championship_bestof3
+                  WHERE category_id = :catId AND match_round = :roundNum AND match_position = :matchPos
+                """, {"catId": categoryId, "roundNum": roundNum, "matchPos": matchPos});
+
+                final bof3Cnt = bof3CountRes.rows.isNotEmpty
+                    ? int.tryParse(bof3CountRes.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0
+                    : 0;
+
+                bool shouldSync = true;
+
+                if (bof3Cnt > 0) {
+                  // Determine whether the series is finished
+                  final seriesRes = await conn.execute("""
+                      SELECT
+                        COUNT(DISTINCT CASE WHEN winner_alliance_id = :w1 AND is_completed = 1 THEN match_number END) AS wins_w1,
+                        COUNT(DISTINCT CASE WHEN winner_alliance_id = :w2 AND is_completed = 1 THEN match_number END) AS wins_w2,
+                        COUNT(DISTINCT CASE WHEN is_completed = 1 THEN match_number END) AS completed
+                      FROM tbl_championship_bestof3
+                      WHERE category_id = :catId AND match_round = :roundNum AND match_position = :matchPos
+                    """, {"w1": alliance1Id, "w2": alliance2Id, "catId": categoryId, "roundNum": roundNum, "matchPos": matchPos});
+
+                  int wins1 = 0;
+                  int wins2 = 0;
+                  int completed = 0;
+                  if (seriesRes.rows.isNotEmpty) {
+                    final row = seriesRes.rows.first.assoc();
+                    wins1 = int.tryParse(row['wins_w1']?.toString() ?? '0') ?? 0;
+                    wins2 = int.tryParse(row['wins_w2']?.toString() ?? '0') ?? 0;
+                    completed = int.tryParse(row['completed']?.toString() ?? '0') ?? 0;
+                  }
+
+                  final seriesFinished = (wins1 >= 2 || wins2 >= 2 || completed >= 3);
+                  shouldSync = seriesFinished;
+                }
+
+                if (shouldSync) {
+                  await executeDual("""
+                    UPDATE tbl_championship_schedule
+                    SET status = 'completed', winner_alliance_id = :winnerId
+                    WHERE category_id = :catId AND match_round = :roundNum AND match_position = :matchPos
+                  """, {"winnerId": winnerId, "catId": categoryId, "roundNum": roundNum, "matchPos": matchPos});
+                } else {
+                  print('ℹ️ Schedule sync skipped: Best-of-3 series not finished for category $categoryId round $roundNum pos $matchPos');
+                }
+              }
+            }
+          }
+        } catch (e) {
+          print('ℹ️ Schedule sync failed in updateBracketWinner: $e');
+        }
+      }
+
+      await conn.execute("COMMIT");
+    } catch (e) {
+      try { await conn.execute("ROLLBACK"); } catch (_) {}
+      rethrow;
+    }
+  }
+
+  // Check whether a given round (and optionally specific match positions) for a
+  // category and bracket side has all winners set (i.e., is finished).
+  static Future<bool> isRoundCompleted(int categoryId, String bracketSide, int roundNumber, {List<int>? requiredPositions}) async {
+    final conn = await getConnection();
+    try {
+      // Determine if a category-specific double_elimination table exists and use it.
+      String tableName = 'tbl_double_elimination';
+      try {
+        final cres = await conn.execute('SELECT category_type FROM tbl_category WHERE category_id = :id LIMIT 1', {"id": categoryId});
+        if (cres.rows.isNotEmpty) {
+          var slug = cres.rows.first.assoc()['category_type']?.toString() ?? '';
+          slug = slug.replaceAll(RegExp(r"\(.*?\)"), '').toLowerCase();
+          slug = slug.replaceAll(RegExp(r"[^a-z0-9]+"), '_').replaceAll(RegExp(r"_+"), '_').replaceAll(RegExp(r"^_+|_+$"), '').trim();
+          if (slug.isNotEmpty) {
+            final candidate = 'tbl_${slug}_double_elimination';
+            try {
+              await conn.execute('SELECT 1 FROM $candidate LIMIT 1');
+              tableName = candidate;
+            } catch (_) {
+              // fallback to canonical
+            }
+          }
+        }
+      } catch (e) {
+        // ignore and use default
+      }
+
+      String sql = """
+        SELECT COUNT(*) AS pending FROM $tableName
+        WHERE category_id = :catId
+          AND bracket_side = :bracketSide
+          AND round_number = :roundNum
+          AND (winner_alliance_id IS NULL OR winner_alliance_id = 0)
+      """;
+      final params = {"catId": categoryId, "bracketSide": bracketSide, "roundNum": roundNumber};
+
+      if (requiredPositions != null && requiredPositions.isNotEmpty) {
+        final placeholders = requiredPositions.map((i) => ':p$i').join(',');
+        sql += " AND match_position IN ($placeholders)";
+        for (final p in requiredPositions) params['p$p'] = p;
+      }
+
+      final res = await conn.execute(sql, params);
+      if (res.rows.isNotEmpty) {
+        final pendingStr = res.rows.first.assoc()['pending']?.toString() ?? '0';
+        final pending = int.tryParse(pendingStr) ?? 0;
+        return pending == 0;
+      }
+    } catch (e) {
+      print('ℹ️ isRoundCompleted failed: $e');
+    }
+    return false;
+  }
+
   // Ensure parent rows exist in category-specific tables before inserting dependent rows.
   // This creates minimal team/match rows in tbl_<slug>_team and tbl_<slug>_match using data copied from the canonical tables.
   static Future<void> _ensureCategoryParents(MySQLConnection conn, String slug, Map<String, dynamic> params) async {
