@@ -267,6 +267,7 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
 
   bool _isLoading = true;
   bool _isInitializingScores = false;
+  static const bool _debugCumulative = true;
   DateTime? _lastUpdated;
   Timer? _autoRefreshTimer;
   String _lastDataSignature = '';
@@ -423,6 +424,29 @@ Future<void> _loadMatchPairings(int categoryId) async {
     return null;
   }
 
+  // Helper to get alliance loss count
+  int _getAllianceLossCount(int categoryId, int allianceId) {
+    final allResults = _bestOf3Results[categoryId] ?? {};
+    final allianceResults = allResults[allianceId] ?? [];
+    
+    final Set<String> completedSeries = {};
+    int losses = 0;
+    
+    for (final result in allianceResults) {
+      if (result.isCompleted) {
+        final seriesKey = '${result.matchPosition}_${result.opponentAllianceId}';
+        if (!completedSeries.contains(seriesKey)) {
+          completedSeries.add(seriesKey);
+          if (result.winnerAllianceId != allianceId) {
+            losses++;
+          }
+        }
+      }
+    }
+    
+    return losses;
+  }
+
   // Load Best-of-3 results from database
   Future<void> _loadBestOf3Results(int categoryId) async {
     try {
@@ -449,7 +473,7 @@ Future<void> _loadMatchPairings(int categoryId) async {
           FOREIGN KEY (category_id) REFERENCES tbl_category(category_id) ON DELETE CASCADE,
           FOREIGN KEY (alliance_id) REFERENCES tbl_alliance_selections(alliance_id) ON DELETE CASCADE,
           FOREIGN KEY (opponent_alliance_id) REFERENCES tbl_alliance_selections(alliance_id) ON DELETE CASCADE,
-          UNIQUE KEY unique_match (category_id, alliance_id, opponent_alliance_id, match_number)
+          UNIQUE KEY unique_match (category_id, alliance_id, opponent_alliance_id, match_number, match_round, match_position)
         )
       """
       );
@@ -462,20 +486,47 @@ Future<void> _loadMatchPairings(int categoryId) async {
       """, {"catId": categoryId});
       
       final Map<int, List<BestOf3MatchResult>> resultsByAlliance = {};
-      final Map<int, int> winsByAlliance = {};
       final Map<int, int> playedByAlliance = {};
-      
+
       for (final row in result.rows) {
         final data = row.assoc();
         final allianceId = int.parse(data['alliance_id'].toString());
         final resultObj = BestOf3MatchResult.fromMap(data);
-        
+
         resultsByAlliance.putIfAbsent(allianceId, () => []).add(resultObj);
-        
-        if (resultObj.isCompleted && resultObj.winnerAllianceId == allianceId) {
-          winsByAlliance[allianceId] = (winsByAlliance[allianceId] ?? 0) + 1;
-        }
         playedByAlliance[allianceId] = (playedByAlliance[allianceId] ?? 0) + 1;
+      }
+
+      // Compute wins by counting completed rows grouped by winner_alliance_id
+      final Map<int, int> winsByAlliance = {};
+      try {
+        final winRes = await conn.execute("""
+          SELECT winner_alliance_id, COUNT(DISTINCT CONCAT(match_round, ':', match_position, ':', match_number)) as cnt
+          FROM tbl_championship_bestof3
+          WHERE category_id = :catId AND is_completed = 1 AND winner_alliance_id IS NOT NULL AND winner_alliance_id != 0
+          GROUP BY winner_alliance_id
+        """, {"catId": categoryId});
+
+        for (final wrow in winRes.rows) {
+          final w = wrow.assoc();
+          final wid = int.tryParse(w['winner_alliance_id']?.toString() ?? '0') ?? 0;
+          final cnt = int.tryParse(w['cnt']?.toString() ?? '0') ?? 0;
+          if (wid > 0) winsByAlliance[wid] = cnt;
+        }
+      } catch (e) {
+        // Fallback: compute distinct wins from loaded rows if the grouped query fails
+        final Map<int, Set<String>> seenWins = {};
+        for (final entry in resultsByAlliance.entries) {
+          final list = entry.value;
+          for (final r in list) {
+            if (!r.isCompleted || r.winnerAllianceId == 0) continue;
+            final key = '${r.matchRound}:${r.matchPosition}:${r.matchNumber}';
+            seenWins.putIfAbsent(r.winnerAllianceId, () => <String>{}).add(key);
+          }
+        }
+        for (final e in seenWins.entries) {
+          winsByAlliance[e.key] = e.value.length;
+        }
       }
       
       if (mounted) {
@@ -494,172 +545,171 @@ Future<void> _loadMatchPairings(int categoryId) async {
   }
 
   // Save Best-of-3 match result
-  // Save Best-of-3 match result
-Future<void> _saveBestOf3MatchResult({
-  required int categoryId,
-  required int allianceId,
-  required int opponentAllianceId,
-  required int matchNumber,
-  required int allianceScore,
-  required int allianceViolation,
-  required int opponentScore,
-  required int opponentViolation,
-  required int roundNumber,
-  required int matchPosition,
-  required String bracketSide,
-}) async {
-  try {
-    final allianceFinal = allianceScore - allianceViolation;
-    final opponentFinal = opponentScore - opponentViolation;
-    final winnerId = allianceFinal > opponentFinal ? allianceId : opponentAllianceId;
-    
-    print("📝 Saving match $matchNumber: Alliance $allianceId ($allianceFinal) vs Opponent $opponentAllianceId ($opponentFinal) -> Winner: $winnerId");
-    
-    // Save the result for the first alliance
-    await DBHelper.executeDual("""
-      INSERT INTO tbl_championship_bestof3 
-        (category_id, alliance_id, opponent_alliance_id, match_number, 
-         alliance_score, alliance_violation, opponent_score, opponent_violation,
-         winner_alliance_id, is_completed, match_round, match_position, bracket_side)
-      VALUES
-        (:catId, :allianceId, :opponentId, :matchNum,
-         :allianceScore, :allianceViolation, :opponentScore, :opponentViolation,
-         :winnerId, 1, :roundNum, :matchPos, :bracketSide)
-      ON DUPLICATE KEY UPDATE
-        alliance_score = :allianceScore,
-        alliance_violation = :allianceViolation,
-        opponent_score = :opponentScore,
-        opponent_violation = :opponentViolation,
-        winner_alliance_id = :winnerId,
-        is_completed = 1,
-        match_round = :roundNum,
-        match_position = :matchPos,
-        bracket_side = :bracketSide
-    """, {
-      "catId": categoryId,
-      "allianceId": allianceId,
-      "opponentId": opponentAllianceId,
-      "matchNum": matchNumber,
-      "allianceScore": allianceScore,
-      "allianceViolation": allianceViolation,
-      "opponentScore": opponentScore,
-      "opponentViolation": opponentViolation,
-      "winnerId": winnerId,
-      "roundNum": roundNumber,
-      "matchPos": matchPosition,
-      "bracketSide": bracketSide,
-    });
-    
-    // Save mirrored result for the opponent
-    await DBHelper.executeDual("""
-      INSERT INTO tbl_championship_bestof3 
-        (category_id, alliance_id, opponent_alliance_id, match_number, 
-         alliance_score, alliance_violation, opponent_score, opponent_violation,
-         winner_alliance_id, is_completed, match_round, match_position, bracket_side)
-      VALUES
-        (:catId, :opponentId, :allianceId, :matchNum,
-         :opponentScore, :opponentViolation, :allianceScore, :allianceViolation,
-         :winnerId, 1, :roundNum, :matchPos, :bracketSide)
-      ON DUPLICATE KEY UPDATE
-        alliance_score = :opponentScore,
-        alliance_violation = :opponentViolation,
-        opponent_score = :allianceScore,
-        opponent_violation = :allianceViolation,
-        winner_alliance_id = :winnerId,
-        is_completed = 1,
-        match_round = :roundNum,
-        match_position = :matchPos,
-        bracket_side = :bracketSide
-    """, {
-      "catId": categoryId,
-      "opponentId": opponentAllianceId,
-      "allianceId": allianceId,
-      "matchNum": matchNumber,
-      "opponentScore": opponentScore,
-      "opponentViolation": opponentViolation,
-      "allianceScore": allianceScore,
-      "allianceViolation": allianceViolation,
-      "winnerId": winnerId,
-      "roundNum": roundNumber,
-      "matchPos": matchPosition,
-      "bracketSide": bracketSide,
-    });
-    
-    print("✅ Saved Best-of-3 match $matchNumber result for category $categoryId");
-    
-    // Reload data to get updated results
-    await _loadBestOf3Results(categoryId);
-    await _loadChampionshipStandings(categoryId);
-    
-    // Now check if the series is finished after this save
+  Future<void> _saveBestOf3MatchResult({
+    required int categoryId,
+    required int allianceId,
+    required int opponentAllianceId,
+    required int matchNumber,
+    required int allianceScore,
+    required int allianceViolation,
+    required int opponentScore,
+    required int opponentViolation,
+    required int roundNumber,
+    required int matchPosition,
+    required String bracketSide,
+  }) async {
     try {
-      final conn = await DBHelper.getConnection();
-
-      // Get all completed matches for this series
-      final seriesRes = await conn.execute("""
-        SELECT
-          COUNT(DISTINCT CASE WHEN winner_alliance_id = :aId AND is_completed = 1 THEN match_number END) AS wins_a,
-          COUNT(DISTINCT CASE WHEN winner_alliance_id = :oId AND is_completed = 1 THEN match_number END) AS wins_o,
-          COUNT(DISTINCT CASE WHEN is_completed = 1 THEN match_number END) AS completed
-        FROM tbl_championship_bestof3
-        WHERE category_id = :catId AND match_round = :roundNum AND match_position = :matchPos
+      final allianceFinal = allianceScore - allianceViolation;
+      final opponentFinal = opponentScore - opponentViolation;
+      final winnerId = allianceFinal > opponentFinal ? allianceId : opponentAllianceId;
+      
+      print("📝 Saving match $matchNumber: Alliance $allianceId ($allianceFinal) vs Opponent $opponentAllianceId ($opponentFinal) -> Winner: $winnerId");
+      
+      // Save the result for the first alliance
+      await DBHelper.executeDual("""
+        INSERT INTO tbl_championship_bestof3 
+          (category_id, alliance_id, opponent_alliance_id, match_number, 
+           alliance_score, alliance_violation, opponent_score, opponent_violation,
+           winner_alliance_id, is_completed, match_round, match_position, bracket_side)
+        VALUES
+          (:catId, :allianceId, :opponentId, :matchNum,
+           :allianceScore, :allianceViolation, :opponentScore, :opponentViolation,
+           :winnerId, 1, :roundNum, :matchPos, :bracketSide)
+        ON DUPLICATE KEY UPDATE
+          alliance_score = :allianceScore,
+          alliance_violation = :allianceViolation,
+          opponent_score = :opponentScore,
+          opponent_violation = :opponentViolation,
+          winner_alliance_id = :winnerId,
+          is_completed = 1,
+          match_round = :roundNum,
+          match_position = :matchPos,
+          bracket_side = :bracketSide
       """, {
-        "aId": allianceId,
-        "oId": opponentAllianceId,
         "catId": categoryId,
+        "allianceId": allianceId,
+        "opponentId": opponentAllianceId,
+        "matchNum": matchNumber,
+        "allianceScore": allianceScore,
+        "allianceViolation": allianceViolation,
+        "opponentScore": opponentScore,
+        "opponentViolation": opponentViolation,
+        "winnerId": winnerId,
         "roundNum": roundNumber,
         "matchPos": matchPosition,
+        "bracketSide": bracketSide,
       });
-
-      int winsA = 0;
-      int winsO = 0;
-      int completed = 0;
-      if (seriesRes.rows.isNotEmpty) {
-        final row = seriesRes.rows.first.assoc();
-        winsA = int.tryParse(row['wins_a']?.toString() ?? '0') ?? 0;
-        winsO = int.tryParse(row['wins_o']?.toString() ?? '0') ?? 0;
-        completed = int.tryParse(row['completed']?.toString() ?? '0') ?? 0;
-      }
-
-      final bool seriesFinished = (winsA >= 2) || (winsO >= 2) || (completed >= 3);
       
-      print("📊 Post-save series stats: winsA=$winsA, winsO=$winsO, completed=$completed, finished=$seriesFinished");
+      // Save mirrored result for the opponent
+      await DBHelper.executeDual("""
+        INSERT INTO tbl_championship_bestof3 
+          (category_id, alliance_id, opponent_alliance_id, match_number, 
+           alliance_score, alliance_violation, opponent_score, opponent_violation,
+           winner_alliance_id, is_completed, match_round, match_position, bracket_side)
+        VALUES
+          (:catId, :opponentId, :allianceId, :matchNum,
+           :opponentScore, :opponentViolation, :allianceScore, :allianceViolation,
+           :winnerId, 1, :roundNum, :matchPos, :bracketSide)
+        ON DUPLICATE KEY UPDATE
+          alliance_score = :opponentScore,
+          alliance_violation = :opponentViolation,
+          opponent_score = :allianceScore,
+          opponent_violation = :allianceViolation,
+          winner_alliance_id = :winnerId,
+          is_completed = 1,
+          match_round = :roundNum,
+          match_position = :matchPos,
+          bracket_side = :bracketSide
+      """, {
+        "catId": categoryId,
+        "opponentId": opponentAllianceId,
+        "allianceId": allianceId,
+        "matchNum": matchNumber,
+        "opponentScore": opponentScore,
+        "opponentViolation": opponentViolation,
+        "allianceScore": allianceScore,
+        "allianceViolation": allianceViolation,
+        "winnerId": winnerId,
+        "roundNum": roundNumber,
+        "matchPos": matchPosition,
+        "bracketSide": bracketSide,
+      });
+      
+      print("✅ Saved Best-of-3 match $matchNumber result for category $categoryId");
+      
+      // Reload data to get updated results
+      await _loadBestOf3Results(categoryId);
+      await _loadChampionshipStandings(categoryId);
+      
+      // Now check if the series is finished after this save
+      try {
+        final conn = await DBHelper.getConnection();
 
-      if (seriesFinished) {
-        int seriesWinner = 0;
-        if (winsA > winsO) seriesWinner = allianceId;
-        else if (winsO > winsA) seriesWinner = opponentAllianceId;
+        // Get all completed matches for this series
+        final seriesRes = await conn.execute("""
+          SELECT
+            COUNT(DISTINCT CASE WHEN winner_alliance_id = :aId AND is_completed = 1 THEN match_number END) AS wins_a,
+            COUNT(DISTINCT CASE WHEN winner_alliance_id = :oId AND is_completed = 1 THEN match_number END) AS wins_o,
+            COUNT(DISTINCT CASE WHEN is_completed = 1 THEN match_number END) AS completed
+          FROM tbl_championship_bestof3
+          WHERE category_id = :catId AND match_round = :roundNum AND match_position = :matchPos
+        """, {
+          "aId": allianceId,
+          "oId": opponentAllianceId,
+          "catId": categoryId,
+          "roundNum": roundNumber,
+          "matchPos": matchPosition,
+        });
 
-        if (seriesWinner > 0) {
-          print("🎯 Series finished! Winner: $seriesWinner");
-          
-          // Update the double elimination bracket
-          final sel = await conn.execute("""
-            SELECT match_id FROM tbl_double_elimination
-            WHERE category_id = :catId AND round_number = :roundNum AND match_position = :matchPos
-            LIMIT 1
-          """, {"catId": categoryId, "roundNum": roundNumber, "matchPos": matchPosition});
+        int winsA = 0;
+        int winsO = 0;
+        int completed = 0;
+        if (seriesRes.rows.isNotEmpty) {
+          final row = seriesRes.rows.first.assoc();
+          winsA = int.tryParse(row['wins_a']?.toString() ?? '0') ?? 0;
+          winsO = int.tryParse(row['wins_o']?.toString() ?? '0') ?? 0;
+          completed = int.tryParse(row['completed']?.toString() ?? '0') ?? 0;
+        }
 
-          if (sel.rows.isNotEmpty) {
-            final matchId = int.parse(sel.rows.first.assoc()['match_id']?.toString() ?? '0');
-            if (matchId > 0) {
-              await DBHelper.updateBracketWinner(matchId, seriesWinner);
-              print("✅ Propagated winner $seriesWinner to match $matchId");
+        final bool seriesFinished = (winsA >= 2) || (winsO >= 2) || (completed >= 3);
+        
+        print("📊 Post-save series stats: winsA=$winsA, winsO=$winsO, completed=$completed, finished=$seriesFinished");
+
+        if (seriesFinished) {
+          int seriesWinner = 0;
+          if (winsA > winsO) seriesWinner = allianceId;
+          else if (winsO > winsA) seriesWinner = opponentAllianceId;
+
+          if (seriesWinner > 0) {
+            print("🎯 Series finished! Winner: $seriesWinner");
+            
+            // Update the double elimination bracket
+            final sel = await conn.execute("""
+              SELECT match_id FROM tbl_double_elimination
+              WHERE category_id = :catId AND round_number = :roundNum AND match_position = :matchPos
+              LIMIT 1
+            """, {"catId": categoryId, "roundNum": roundNumber, "matchPos": matchPosition});
+
+            if (sel.rows.isNotEmpty) {
+              final matchId = int.parse(sel.rows.first.assoc()['match_id']?.toString() ?? '0');
+              if (matchId > 0) {
+                await DBHelper.updateBracketWinner(matchId, seriesWinner);
+                print("✅ Propagated winner $seriesWinner to match $matchId");
+              }
             }
           }
+        } else {
+          print("📊 Series not finished yet ($winsA-$winsO), waiting for more matches");
         }
-      } else {
-        print("📊 Series not finished yet (${winsA}-${winsO}), waiting for more matches");
+      } catch (e) {
+        print('ℹ️ Could not propagate winner to bracket: $e');
       }
+      
     } catch (e) {
-      print('ℹ️ Could not propagate winner to bracket: $e');
+      print("❌ Error saving Best-of-3 result: $e");
+      rethrow;
     }
-    
-  } catch (e) {
-    print("❌ Error saving Best-of-3 result: $e");
-    rethrow;
   }
-}
 
   // Show Best-of-3 match dialog
   void _showBestOf3MatchDialog({
@@ -704,22 +754,24 @@ Future<void> _saveBestOf3MatchResult({
     final allResults = _bestOf3Results[categoryId] ?? {};
     
     final allianceEntries = (allResults[allianceId] ?? [])
-        .where((r) => r.matchRound == roundNumber && r.matchPosition == matchPosition)
-        .toList();
+      .where((r) => r.matchRound == roundNumber && r.matchPosition == matchPosition)
+      .toList();
     final opponentEntries = (allResults[opponentAllianceId] ?? [])
-        .where((r) => r.matchRound == roundNumber && r.matchPosition == matchPosition)
-        .toList();
-    
-    final Map<int, BestOf3MatchResult> uniqueResults = {};
-    
+      .where((r) => r.matchRound == roundNumber && r.matchPosition == matchPosition)
+      .toList();
+
+    final Map<String, BestOf3MatchResult> uniqueResults = {};
+
     for (final result in allianceEntries) {
       if (result.isCompleted) {
-        uniqueResults[result.matchNumber] = result;
+        final key = '${result.matchRound}:${result.matchPosition}:${result.matchNumber}';
+        uniqueResults[key] = result;
       }
     }
     for (final result in opponentEntries) {
-      if (result.isCompleted && !uniqueResults.containsKey(result.matchNumber)) {
-        uniqueResults[result.matchNumber] = result;
+      if (result.isCompleted) {
+        final key = '${result.matchRound}:${result.matchPosition}:${result.matchNumber}';
+        if (!uniqueResults.containsKey(key)) uniqueResults[key] = result;
       }
     }
     
@@ -833,13 +885,14 @@ Future<void> _saveBestOf3MatchResult({
     }
     
     String getMatchDisplay(int matchNum) {
-      final result = matchResults[matchNum];
-      if (result != null && result.isCompleted) {
-        if (result.winnerAllianceId == allianceId) return '1-0';
-        if (result.winnerAllianceId == opponentAllianceId) return '0-1';
-        return 'Draw';
-      }
-      if (matchNum == 3 && (winsA == 2 || winsO == 2)) return 'N/A';
+      // Use aggregated counts for display across rounds for this match number
+      final agg = _countWinsForMatchNumberAcrossRounds(categoryId, allianceId, opponentAllianceId, matchPosition, matchNum);
+      final a = agg['winsA'] ?? 0;
+      final o = agg['winsB'] ?? 0;
+      final completed = agg['completed'] ?? 0;
+
+      if (a > 0 || o > 0) return '$a-$o';
+      if (matchNum == 3 && (winsA >= 2 || winsO >= 2)) return 'N/A';
       if (matchNum == 3 && seriesTied && !seriesCompleted) return 'Ready';
       return 'Pending';
     }
@@ -857,17 +910,23 @@ Future<void> _saveBestOf3MatchResult({
 
     final titleText = '${getRoundDisplayName(roundNumber)}';
     
+    // Use aggregated series wins across rounds for status
+    final aggSeries = _countSeriesWins(categoryId, allianceId, opponentAllianceId, matchPosition);
+    final aggWinsA = aggSeries['winsA'] ?? 0;
+    final aggWinsO = aggSeries['winsB'] ?? 0;
+    final aggCompleted = aggSeries['completed'] ?? 0;
+
     String seriesStatus;
-    if (winsA >= 2) {
-      seriesStatus = 'Series Complete: $winsA - $winsO (${allianceName} wins)';
-    } else if (winsO >= 2) {
-      seriesStatus = 'Series Complete: $winsA - $winsO (${opponentName} wins)';
-    } else if (completedCount >= 3) {
-      seriesStatus = 'Series Complete: $winsA - $winsO';
-    } else if (seriesTied) {
-      seriesStatus = 'Series Tied: $winsA - $winsO (Match 3 Available)';
+    if (aggWinsA >= 2) {
+      seriesStatus = 'Series Complete: $aggWinsA - $aggWinsO ($allianceName wins)';
+    } else if (aggWinsO >= 2) {
+      seriesStatus = 'Series Complete: $aggWinsA - $aggWinsO ($opponentName wins)';
+    } else if (aggCompleted >= 3) {
+      seriesStatus = 'Series Complete: $aggWinsA - $aggWinsO';
+    } else if (aggWinsA == 1 && aggWinsO == 1 && aggCompleted == 2) {
+      seriesStatus = 'Series Tied: $aggWinsA - $aggWinsO (Match 3 Available)';
     } else {
-      seriesStatus = 'Series Status: $winsA - $winsO (Best of 3)';
+      seriesStatus = 'Series Status: $aggWinsA - $aggWinsO (Best of 3)';
     }
 
     showDialog(
@@ -882,9 +941,16 @@ Future<void> _saveBestOf3MatchResult({
               : (opponentFinal > allianceFinal ? opponentName : 'Draw');
           final isWinnerAlliance = allianceFinal > opponentFinal;
 
-          final bool canEditMatch3 = (matchNumber == 3) && seriesTied && !seriesCompleted && !matchResults.containsKey(3);
-          final bool canEdit = !readOnly && !seriesCompleted && 
-              !(matchNumber == 3 && (winsA >= 2 || winsO >= 2));
+          // Determine editability using aggregated series completion
+          final aggSeriesForEdit = _countSeriesWins(categoryId, allianceId, opponentAllianceId, matchPosition);
+          final aggWinsAForEdit = aggSeriesForEdit['winsA'] ?? 0;
+          final aggWinsOForEdit = aggSeriesForEdit['winsB'] ?? 0;
+          final aggCompletedForEdit = aggSeriesForEdit['completed'] ?? 0;
+
+          final bool aggSeriesCompleted = (aggWinsAForEdit >= 2) || (aggWinsOForEdit >= 2) || (aggCompletedForEdit >= 3);
+
+          final bool canEditMatch3 = (matchNumber == 3) && (aggWinsAForEdit == 1 && aggWinsOForEdit == 1) && !aggSeriesCompleted && !matchResults.containsKey(3);
+          final bool canEdit = !readOnly && !aggSeriesCompleted && !(matchNumber == 3 && (aggWinsAForEdit >= 2 || aggWinsOForEdit >= 2));
 
           return Dialog(
             backgroundColor: Colors.transparent,
@@ -1452,6 +1518,74 @@ Future<void> _saveBestOf3MatchResult({
     return (winsA >= 2) || (winsO >= 2) || (completedMatches.length >= 3);
   }
 
+  // Count aggregated series wins across all rounds for a pairing (by matchPosition)
+  Map<String, int> _countSeriesWins(int categoryId, int allianceAId, int allianceBId, int matchPosition) {
+    final allResults = _bestOf3Results[categoryId] ?? {};
+    final allianceAResults = allResults[allianceAId] ?? [];
+    final allianceBResults = allResults[allianceBId] ?? [];
+
+    final Set<String> completedKeys = {};
+    int winsA = 0;
+    int winsB = 0;
+
+    for (final r in allianceAResults) {
+        if (r.matchPosition == matchPosition && r.isCompleted && r.opponentAllianceId == allianceBId) {
+          final key = '${r.matchRound}:${r.matchPosition}:${r.matchNumber}';
+          if (!completedKeys.contains(key)) {
+            completedKeys.add(key);
+            if (r.winnerAllianceId == allianceAId) winsA++;
+            else if (r.winnerAllianceId == allianceBId) winsB++;
+          }
+        }
+    }
+    for (final r in allianceBResults) {
+        if (r.matchPosition == matchPosition && r.isCompleted && r.opponentAllianceId == allianceAId) {
+          final key = '${r.matchRound}:${r.matchPosition}:${r.matchNumber}';
+          if (!completedKeys.contains(key)) {
+            completedKeys.add(key);
+            if (r.winnerAllianceId == allianceAId) winsA++;
+            else if (r.winnerAllianceId == allianceBId) winsB++;
+          }
+        }
+    }
+
+    return {'winsA': winsA, 'winsB': winsB, 'completed': completedKeys.length};
+  }
+
+// Count total wins and losses for a specific alliance in a specific match position across all rounds
+Map<String, int> _countWinsForMatchNumberAcrossRounds(
+  int categoryId, 
+  int allianceAId, 
+  int allianceBId, 
+  int matchPosition, 
+  int matchNumber,
+) {
+  final allResults = _bestOf3Results[categoryId] ?? {};
+  
+  final Set<String> completedKeys = {};
+  int winsA = 0;
+  int lossesA = 0;
+  
+  // Count ALL matches for this alliance with this match number, regardless of position
+  final allianceAResults = allResults[allianceAId] ?? [];
+  
+  for (final r in allianceAResults) {
+    if (r.matchNumber == matchNumber && r.isCompleted) {
+      final key = '${r.matchRound}:${r.matchPosition}:${r.matchNumber}';
+      if (!completedKeys.contains(key)) {
+        completedKeys.add(key);
+        if (r.winnerAllianceId == allianceAId) {
+          winsA++;
+        } else {
+          lossesA++;
+        }
+      }
+    }
+  }
+  
+  return {'winsA': winsA, 'winsB': lossesA, 'completed': completedKeys.length};
+}
+
   // Helper to get Grand Final 1 winner
   int? _getGrandFinal1Winner(int categoryId) {
     final allResults = _bestOf3Results[categoryId] ?? {};
@@ -1641,16 +1775,18 @@ Future<void> _saveBestOf3MatchResult({
         .where((r) => r.matchRound == roundNumber && r.matchPosition == matchPosition)
         .toList();
     
-    final Map<int, BestOf3MatchResult> uniqueResults = {};
-    
+    final Map<String, BestOf3MatchResult> uniqueResults = {};
+
     for (final r in seriesAllianceEntries) {
       if (r.isCompleted) {
-        uniqueResults[r.matchNumber] = r;
+        final key = '${r.matchRound}:${r.matchPosition}:${r.matchNumber}';
+        uniqueResults[key] = r;
       }
     }
     for (final r in seriesOpponentEntries) {
-      if (r.isCompleted && !uniqueResults.containsKey(r.matchNumber)) {
-        uniqueResults[r.matchNumber] = r;
+      if (r.isCompleted) {
+        final key = '${r.matchRound}:${r.matchPosition}:${r.matchNumber}';
+        if (!uniqueResults.containsKey(key)) uniqueResults[key] = r;
       }
     }
     
@@ -1721,102 +1857,102 @@ Future<void> _saveBestOf3MatchResult({
   }
 
   Widget _buildMatchCellContent({
-    required int categoryId,
-    required int allianceId,
-    required int opponentId,
-    required int matchNumber,
-    required int roundNumber,
-    required int matchPosition,
-    required String allianceName,
-    required String opponentName,
-    required String bracketSide,
-    required BestOf3MatchResult? result,
-    required VoidCallback onRefresh,
-    required bool matchPlayed,
-    required bool matchWon,
-    required bool seriesCompleted,
-    required bool match3Available,
-    required bool match3NotNeeded,
-    required int winsA,
-    required int winsO,
-    required bool seriesTied,
-    bool readOnly = false,
-  }) {
-    final bool isDifferentSeries = (matchNumber == 3) && (winsA == 0 && winsO == 0);
-    
-    return Expanded(
-      flex: 2,
-      child: GestureDetector(
-        onTap: () async {
-          if (opponentId == 0) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Opponent not yet determined'),
-                backgroundColor: Colors.orange,
-                duration: Duration(seconds: 1),
-              ),
-            );
-            return;
-          }
-          
-          // If match is already played or read-only, show read-only dialog
-          if (readOnly || matchPlayed) {
-            _showBestOf3MatchDialog(
-              categoryId: categoryId,
-              allianceId: allianceId,
-              opponentAllianceId: opponentId,
-              matchNumber: matchNumber,
-              roundNumber: roundNumber,
-              matchPosition: matchPosition,
-              bracketSide: bracketSide,
-              allianceName: allianceName,
-              opponentName: opponentName,
-              existingResult: result,
-              onRefresh: onRefresh,
-              readOnly: true,
-            );
-            return;
-          }
-          
-          // If series is tied 1-1 and this is Match 3, allow editing
-          if (matchNumber == 3 && seriesTied && !seriesCompleted && !matchPlayed) {
-            _showBestOf3MatchDialog(
-              categoryId: categoryId,
-              allianceId: allianceId,
-              opponentAllianceId: opponentId,
-              matchNumber: matchNumber,
-              roundNumber: roundNumber,
-              matchPosition: matchPosition,
-              bracketSide: bracketSide,
-              allianceName: allianceName,
-              opponentName: opponentName,
-              existingResult: result,
-              onRefresh: onRefresh,
-              readOnly: false,
-            );
-            return;
-          }
-          
-          // If series is completed, show read-only
-          if (seriesCompleted) {
-            _showBestOf3MatchDialog(
-              categoryId: categoryId,
-              allianceId: allianceId,
-              opponentAllianceId: opponentId,
-              matchNumber: matchNumber,
-              roundNumber: roundNumber,
-              matchPosition: matchPosition,
-              bracketSide: bracketSide,
-              allianceName: allianceName,
-              opponentName: opponentName,
-              existingResult: result,
-              onRefresh: onRefresh,
-              readOnly: true,
-            );
-            return;
-          }
-          
-          // Normal match - allow editing (Match 1 or 2)
+  required int categoryId,
+  required int allianceId,
+  required int opponentId,
+  required int matchNumber,
+  required int roundNumber,
+  required int matchPosition,
+  required String allianceName,
+  required String opponentName,
+  required String bracketSide,
+  required BestOf3MatchResult? result,
+  required VoidCallback onRefresh,
+  required bool matchPlayed,
+  required bool matchWon,
+  required bool seriesCompleted,
+  required bool match3Available,
+  required bool match3NotNeeded,
+  required int winsA,
+  required int winsO,
+  required bool seriesTied,
+  bool readOnly = false,
+}) {
+  final bool isDifferentSeries = (matchNumber == 3) && (winsA == 0 && winsO == 0);
+  
+  // Get cumulative wins for the alliance in this match position (across all rounds)
+  final cumulativeWins = _countWinsForMatchNumberAcrossRounds(
+    categoryId, 
+    allianceId, 
+    opponentId, 
+    matchPosition, 
+    matchNumber
+  );
+  final int cumWins = cumulativeWins['winsA'] ?? 0;
+  final int cumLosses = cumulativeWins['winsB'] ?? 0;
+  final int cumCompleted = cumulativeWins['completed'] ?? 0;
+  
+  // For series status, use the current round's series stats
+  final seriesWins = _countSeriesWins(categoryId, allianceId, opponentId, matchPosition);
+  final int seriesWinsA = seriesWins['winsA'] ?? 0;
+  final int seriesWinsB = seriesWins['winsB'] ?? 0;
+  final bool seriesFinishedInThisRound = (seriesWinsA >= 2) || (seriesWinsB >= 2);
+  
+  return Expanded(
+    flex: 2,
+    child: GestureDetector(
+      onTap: () async {
+        if (opponentId == 0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Opponent not yet determined'),
+              backgroundColor: Colors.orange,
+              duration: Duration(seconds: 1),
+            ),
+          );
+          return;
+        }
+        
+        // If series in this round is already finished, show read-only
+        if (seriesFinishedInThisRound) {
+          _showBestOf3MatchDialog(
+            categoryId: categoryId,
+            allianceId: allianceId,
+            opponentAllianceId: opponentId,
+            matchNumber: matchNumber,
+            roundNumber: roundNumber,
+            matchPosition: matchPosition,
+            bracketSide: bracketSide,
+            allianceName: allianceName,
+            opponentName: opponentName,
+            existingResult: result,
+            onRefresh: onRefresh,
+            readOnly: true,
+          );
+          return;
+        }
+        
+        // If match is already played, show read-only
+        if (readOnly || matchPlayed) {
+          _showBestOf3MatchDialog(
+            categoryId: categoryId,
+            allianceId: allianceId,
+            opponentAllianceId: opponentId,
+            matchNumber: matchNumber,
+            roundNumber: roundNumber,
+            matchPosition: matchPosition,
+            bracketSide: bracketSide,
+            allianceName: allianceName,
+            opponentName: opponentName,
+            existingResult: result,
+            onRefresh: onRefresh,
+            readOnly: true,
+          );
+          return;
+        }
+        
+        // If series is tied 1-1 and this is Match 3, allow editing
+        if (matchNumber == 3 && seriesTied && !seriesFinishedInThisRound && !matchPlayed) {
           _showBestOf3MatchDialog(
             categoryId: categoryId,
             allianceId: allianceId,
@@ -1831,146 +1967,167 @@ Future<void> _saveBestOf3MatchResult({
             onRefresh: onRefresh,
             readOnly: false,
           );
-        },
-        child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 4),
-          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.03),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: Colors.white.withOpacity(0.15), width: 1),
-          ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (matchPlayed) ...[
-                Text(
-                  matchWon ? '1-0' : '0-1',
-                  style: TextStyle(
-                    color: matchWon ? Colors.green : Colors.red,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
+          return;
+        }
+        
+        // Normal match - allow editing (Match 1 or 2)
+        _showBestOf3MatchDialog(
+          categoryId: categoryId,
+          allianceId: allianceId,
+          opponentAllianceId: opponentId,
+          matchNumber: matchNumber,
+          roundNumber: roundNumber,
+          matchPosition: matchPosition,
+          bracketSide: bracketSide,
+          allianceName: allianceName,
+          opponentName: opponentName,
+          existingResult: result,
+          onRefresh: onRefresh,
+          readOnly: false,
+        );
+      },
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.03),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.white.withOpacity(0.15), width: 1),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            // Show cumulative wins across all rounds for this alliance
+            if (cumWins > 0 || cumLosses > 0) ...[
+              Text(
+                '$cumWins-$cumLosses',
+                style: TextStyle(
+                  color: cumWins > cumLosses ? Colors.green : (cumLosses > cumWins ? Colors.red : Colors.white),
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
                 ),
-              ] else if (match3Available) ...[
-                Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFFD700).withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: const Icon(
-                    Icons.sports_esports_rounded,
-                    color: Color(0xFFFFD700),
-                    size: 16,
-                  ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                'Total in M$matchNumber',
+                style: TextStyle(
+                  color: Colors.white38,
+                  fontSize: 8,
                 ),
-                const SizedBox(height: 4),
-                const Text(
-                  'READY',
-                  style: TextStyle(
-                    color: Color(0xFFFFD700),
-                    fontSize: 9,
-                    fontWeight: FontWeight.bold,
-                  ),
+              ),
+            ] else if (matchPlayed) ...[
+              Text(
+                matchWon ? '1-0' : '0-1',
+                style: TextStyle(
+                  color: matchWon ? Colors.green : Colors.red,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
                 ),
-                const Text(
-                  'Match 3',
-                  style: TextStyle(color: Colors.white38, fontSize: 8),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                'This Match',
+                style: TextStyle(
+                  color: Colors.white38,
+                  fontSize: 8,
                 ),
-              ] else if (match3NotNeeded) ...[
-                const Text(
-                  'N/A',
-                  style: TextStyle(
-                    color: Colors.orange,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
+              ),
+            ] else if (match3Available && !seriesFinishedInThisRound) ...[
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFD700).withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(6),
                 ),
-                const SizedBox(height: 4),
-                const Text(
-                  'Series ended',
-                  style: TextStyle(color: Colors.white38, fontSize: 9),
+                child: const Icon(
+                  Icons.sports_esports_rounded,
+                  color: Color(0xFFFFD700),
+                  size: 16,
                 ),
-              ] else if (isDifferentSeries) ...[
-                Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFFD700).withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: const Icon(
-                    Icons.sports_esports_rounded,
-                    color: Color(0xFFFFD700),
-                    size: 16,
-                  ),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'READY',
+                style: TextStyle(
+                  color: Color(0xFFFFD700),
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
                 ),
-                const SizedBox(height: 4),
-                const Text(
-                  'PENDING',
-                  style: TextStyle(
-                    color: Colors.white38,
-                    fontSize: 9,
-                    fontWeight: FontWeight.bold,
-                  ),
+              ),
+              const Text(
+                'Match 3',
+                style: TextStyle(color: Colors.white38, fontSize: 8),
+              ),
+            ] else if (match3NotNeeded || (matchNumber == 3 && seriesFinishedInThisRound)) ...[
+              const Text(
+                'N/A',
+                style: TextStyle(
+                  color: Colors.orange,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
                 ),
-              ] else if (matchNumber == 3 && !seriesTied && !matchPlayed) ...[
-                Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFFD700).withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: const Icon(
-                    Icons.sports_esports_rounded,
-                    color: Color(0xFFFFD700),
-                    size: 16,
-                  ),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'Series ended',
+                style: TextStyle(color: Colors.white38, fontSize: 9),
+              ),
+            ] else if (matchNumber == 3 && !seriesTied && !matchPlayed && !seriesFinishedInThisRound) ...[
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFD700).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(6),
                 ),
-                const SizedBox(height: 4),
-                const Text(
-                  'PENDING',
-                  style: TextStyle(
-                    color: Colors.white38,
-                    fontSize: 9,
-                    fontWeight: FontWeight.bold,
-                  ),
+                child: const Icon(
+                  Icons.sports_esports_rounded,
+                  color: Color(0xFFFFD700),
+                  size: 16,
                 ),
-                const Text(
-                  'Need 1-1',
-                  style: TextStyle(color: Colors.white24, fontSize: 7),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'PENDING',
+                style: TextStyle(
+                  color: Colors.white38,
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
                 ),
-              ] else ...[
-                Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFFD700).withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: const Icon(
-                    Icons.sports_esports_rounded,
-                    color: Color(0xFFFFD700),
-                    size: 16,
-                  ),
+              ),
+              const Text(
+                'Need 1-1',
+                style: TextStyle(color: Colors.white24, fontSize: 7),
+              ),
+            ] else ...[
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFD700).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(6),
                 ),
-                const SizedBox(height: 4),
-                const Text(
-                  'PENDING',
-                  style: TextStyle(
-                    color: Colors.white38,
-                    fontSize: 9,
-                    fontWeight: FontWeight.bold,
-                  ),
+                child: const Icon(
+                  Icons.sports_esports_rounded,
+                  color: Color(0xFFFFD700),
+                  size: 16,
                 ),
-              ],
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'PENDING',
+                style: TextStyle(
+                  color: Colors.white38,
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ],
-          ),
+          ],
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 
-// Build championship table with Best-of-3 for Explorer categories
 // Build championship table with Best-of-3 for Explorer categories
 Widget _buildChampionshipTable(int categoryId) {
   bool isLoading = _isLoadingAllianceByCategory[categoryId] ?? false;
@@ -2009,6 +2166,19 @@ Widget _buildChampionshipTable(int categoryId) {
         ),
       ),
     );
+  }
+
+  // Debug: print per-alliance cumulative match counts
+  if (_debugCumulative) {
+    for (final standing in standings) {
+      final aId = standing.allianceId;
+      final opp = _findPairingForAlliance(categoryId, aId);
+      final pos = opp?.matchPosition ?? 1;
+      final m1 = _countWinsForMatchNumberAcrossRounds(categoryId, aId, opp?.alliance1Id == aId ? (opp?.alliance2Id ?? 0) : (opp?.alliance1Id ?? 0), pos, 1);
+      final m2 = _countWinsForMatchNumberAcrossRounds(categoryId, aId, opp?.alliance1Id == aId ? (opp?.alliance2Id ?? 0) : (opp?.alliance1Id ?? 0), pos, 2);
+      final m3 = _countWinsForMatchNumberAcrossRounds(categoryId, aId, opp?.alliance1Id == aId ? (opp?.alliance2Id ?? 0) : (opp?.alliance1Id ?? 0), pos, 3);
+      print('DEBUG cumulative for alliance $aId -> M1:${m1['winsA']}-${m1['winsB']}, M2:${m2['winsA']}-${m2['winsB']}, M3:${m3['winsA']}-${m3['winsB']}');
+    }
   }
   
   if (standings.isEmpty) {
@@ -2355,210 +2525,262 @@ Widget _buildChampionshipTable(int categoryId) {
 }
 
   Widget _buildChampionshipRow({
-    required ChampionshipAllianceStanding standing,
-    required int categoryId,
-    required Map<int, List<BestOf3MatchResult>> results,
-    required Map<int, int> wins,
-    required Map<int, AllianceMatchPair> pairings,
-    required int index,
-  }) {
-    final isEven = index % 2 == 0;
-    final allianceResults = results[standing.allianceId] ?? [];
-    final allianceWins = wins[standing.allianceId] ?? 0;
-    final opponentPair = _findPairingForAlliance(categoryId, standing.allianceId);
-
-    final opponentId = opponentPair != null
-        ? (opponentPair.alliance1Id == standing.allianceId
-            ? opponentPair.alliance2Id
-            : opponentPair.alliance1Id)
-        : 0;
-
-    final opponentName = opponentPair != null
-        ? (opponentPair.alliance1Id == standing.allianceId
-            ? opponentPair.alliance2Name
-            : opponentPair.alliance1Name)
-        : 'TBD';
-
-    final match1Result = allianceResults.firstWhere(
-      (r) => r.matchNumber == 1,
-      orElse: () => BestOf3MatchResult(
-        matchNumber: 1,
-        alliance1Score: 0,
-        alliance1Violation: 0,
-        alliance2Score: 0,
-        alliance2Violation: 0,
-        winnerAllianceId: 0,
-        isCompleted: false,
-      ),
-    );
-    
-    final match2Result = allianceResults.firstWhere(
-      (r) => r.matchNumber == 2,
-      orElse: () => BestOf3MatchResult(
-        matchNumber: 2,
-        alliance1Score: 0,
-        alliance1Violation: 0,
-        alliance2Score: 0,
-        alliance2Violation: 0,
-        winnerAllianceId: 0,
-        isCompleted: false,
-      ),
-    );
-    
-    final match3Result = allianceResults.firstWhere(
-      (r) => r.matchNumber == 3,
-      orElse: () => BestOf3MatchResult(
-        matchNumber: 3,
-        alliance1Score: 0,
-        alliance1Violation: 0,
-        alliance2Score: 0,
-        alliance2Violation: 0,
-        winnerAllianceId: 0,
-        isCompleted: false,
-      ),
-    );
-
-    return Container(
-      color: isEven ? const Color(0xFF1E0E5A) : const Color(0xFF160A42),
-      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-      child: Row(
-        children: [
-          Expanded(
-            flex: 1,
-            child: Text(
-              '#${standing.allianceRank}',
-              style: const TextStyle(
-                color: Color(0xFFFFD700),
-                fontWeight: FontWeight.bold,
-                fontSize: 16,
-              ),
-            ),
-          ),
-          Expanded(
-            flex: 1,
-            child: Text(
-              'Alliance #${standing.allianceId}',
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 14,
-              ),
-            ),
-          ),
-          Expanded(
-            flex: 4,
-            child: Padding(
-              padding: const EdgeInsets.only(right: 12),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      const Color(0xFFFFD700).withOpacity(0.15),
-                      const Color(0xFF00CFFF).withOpacity(0.1),
-                    ],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(
-                    color: const Color(0xFFFFD700).withOpacity(0.3),
-                    width: 1.5,
-                  ),
-                ),
-                child: Center(
-                  child: Text(
-                    '${standing.captainName.toUpperCase()} / ${standing.partnerName.toUpperCase()}',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    textAlign: TextAlign.center,
-                    overflow: TextOverflow.ellipsis,
-                    maxLines: 2,
-                  ),
-                ),
-              ),
-            ),
-          ),
-          _buildBestOf3MatchCell(
-            categoryId: categoryId,
-            allianceId: standing.allianceId,
-            opponentId: opponentId,
-            matchNumber: 1,
-            roundNumber: opponentPair?.roundNumber ?? 1,
-            matchPosition: opponentPair?.matchPosition ?? 1,
-            allianceName: '${standing.captainName} / ${standing.partnerName}',
-            opponentName: opponentName,
-            bracketSide: opponentPair?.bracketSide ?? 'winners',
-            result: match1Result,
-            onRefresh: () {
-              _loadBestOf3Results(categoryId);
-              _loadChampionshipStandings(categoryId);
-            },
-          ),
-          _buildBestOf3MatchCell(
-            categoryId: categoryId,
-            allianceId: standing.allianceId,
-            opponentId: opponentId,
-            matchNumber: 2,
-            roundNumber: opponentPair?.roundNumber ?? 1,
-            matchPosition: opponentPair?.matchPosition ?? 1,
-            allianceName: '${standing.captainName} / ${standing.partnerName}',
-            opponentName: opponentName,
-            bracketSide: opponentPair?.bracketSide ?? 'winners',
-            result: match2Result,
-            onRefresh: () {
-              _loadBestOf3Results(categoryId);
-              _loadChampionshipStandings(categoryId);
-            },
-          ),
-          _buildBestOf3MatchCell(
-            categoryId: categoryId,
-            allianceId: standing.allianceId,
-            opponentId: opponentId,
-            matchNumber: 3,
-            roundNumber: opponentPair?.roundNumber ?? 1,
-            matchPosition: opponentPair?.matchPosition ?? 1,
-            allianceName: '${standing.captainName} / ${standing.partnerName}',
-            opponentName: opponentName,
-            bracketSide: opponentPair?.bracketSide ?? 'winners',
-            result: match3Result,
-            onRefresh: () {
-              _loadBestOf3Results(categoryId);
-              _loadChampionshipStandings(categoryId);
-            },
-          ),
-          Expanded(
-            flex: 2,
-            child: Center(
-              child: Column(
-                children: [
-                  Text(
-                    '${allianceWins * 10}',
-                    style: const TextStyle(
-                      color: Color(0xFFFFD700),
-                      fontWeight: FontWeight.bold,
-                      fontSize: 18,
-                    ),
-                  ),
-                  const Text(
-                    'pts',
-                    style: TextStyle(
-                      color: Colors.white38,
-                      fontSize: 9,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
+  required ChampionshipAllianceStanding standing,
+  required int categoryId,
+  required Map<int, List<BestOf3MatchResult>> results,
+  required Map<int, int> wins,
+  required Map<int, AllianceMatchPair> pairings,
+  required int index,
+}) {
+  final isEven = index % 2 == 0;
+  final allianceResults = results[standing.allianceId] ?? [];
+  final allianceWins = wins[standing.allianceId] ?? 0;
+  
+  // Get the alliance's loss count to determine if they're in Winners or Losers bracket
+  final losses = _getAllianceLossCount(categoryId, standing.allianceId);
+  
+  // Find ALL pairings for this alliance
+  final List<AllianceMatchPair> alliancePairings = [];
+  for (final pair in pairings.values) {
+    if (pair.alliance1Id == standing.allianceId || pair.alliance2Id == standing.allianceId) {
+      alliancePairings.add(pair);
+    }
   }
+  
+  // Sort by round number descending to get the most recent round
+  alliancePairings.sort((a, b) => b.roundNumber.compareTo(a.roundNumber));
+  
+  // For Loser's Bracket alliances, find the most recent Loser's Bracket match
+  // For Winner's Bracket alliances, find the most recent Winner's Bracket match
+  AllianceMatchPair? currentPair;
+  
+  if (losses >= 1) {
+    // This alliance is in Loser's Bracket - find their current Loser's Bracket match
+    for (final pair in alliancePairings) {
+      if (pair.bracketSide == 'losers') {
+        currentPair = pair;
+        break;
+      }
+    }
+    // If no Loser's Bracket match found, use the most recent
+    if (currentPair == null && alliancePairings.isNotEmpty) {
+      currentPair = alliancePairings.first;
+    }
+  } else {
+    // Winner's Bracket - find their current Winner's Bracket match
+    for (final pair in alliancePairings) {
+      if (pair.bracketSide == 'winners') {
+        currentPair = pair;
+        break;
+      }
+    }
+    if (currentPair == null && alliancePairings.isNotEmpty) {
+      currentPair = alliancePairings.first;
+    }
+  }
+  
+  // If still no pair, use the most recent
+  if (currentPair == null && alliancePairings.isNotEmpty) {
+    currentPair = alliancePairings.first;
+  }
+  
+  final opponentId = currentPair != null
+      ? (currentPair.alliance1Id == standing.allianceId
+          ? currentPair.alliance2Id
+          : currentPair.alliance1Id)
+      : 0;
+
+  final opponentName = currentPair != null
+      ? (currentPair.alliance1Id == standing.allianceId
+          ? currentPair.alliance2Name
+          : currentPair.alliance1Name)
+      : 'TBD';
+  
+  final roundNumber = currentPair?.roundNumber ?? 1;
+  final matchPosition = currentPair?.matchPosition ?? 1;
+  final bracketSide = currentPair?.bracketSide ?? (losses >= 1 ? 'losers' : 'winners');
+
+  // Get match results for the current round
+  final match1Result = allianceResults.firstWhere(
+    (r) => r.matchNumber == 1 && r.matchRound == roundNumber && r.matchPosition == matchPosition,
+    orElse: () => BestOf3MatchResult(
+      matchNumber: 1,
+      alliance1Score: 0,
+      alliance1Violation: 0,
+      alliance2Score: 0,
+      alliance2Violation: 0,
+      winnerAllianceId: 0,
+      isCompleted: false,
+    ),
+  );
+  
+  final match2Result = allianceResults.firstWhere(
+    (r) => r.matchNumber == 2 && r.matchRound == roundNumber && r.matchPosition == matchPosition,
+    orElse: () => BestOf3MatchResult(
+      matchNumber: 2,
+      alliance1Score: 0,
+      alliance1Violation: 0,
+      alliance2Score: 0,
+      alliance2Violation: 0,
+      winnerAllianceId: 0,
+      isCompleted: false,
+    ),
+  );
+  
+  final match3Result = allianceResults.firstWhere(
+    (r) => r.matchNumber == 3 && r.matchRound == roundNumber && r.matchPosition == matchPosition,
+    orElse: () => BestOf3MatchResult(
+      matchNumber: 3,
+      alliance1Score: 0,
+      alliance1Violation: 0,
+      alliance2Score: 0,
+      alliance2Violation: 0,
+      winnerAllianceId: 0,
+      isCompleted: false,
+    ),
+  );
+
+  return Container(
+    color: isEven ? const Color(0xFF1E0E5A) : const Color(0xFF160A42),
+    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+    child: Row(
+      children: [
+        Expanded(
+          flex: 1,
+          child: Text(
+            '#${standing.allianceRank}',
+            style: const TextStyle(
+              color: Color(0xFFFFD700),
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+            ),
+          ),
+        ),
+        Expanded(
+          flex: 1,
+          child: Text(
+            'Alliance #${standing.allianceId}',
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: 14,
+            ),
+          ),
+        ),
+        Expanded(
+          flex: 4,
+          child: Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    const Color(0xFFFFD700).withOpacity(0.15),
+                    const Color(0xFF00CFFF).withOpacity(0.1),
+                  ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: const Color(0xFFFFD700).withOpacity(0.3),
+                  width: 1.5,
+                ),
+              ),
+              child: Center(
+                child: Text(
+                  '${standing.captainName.toUpperCase()} / ${standing.partnerName.toUpperCase()}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  textAlign: TextAlign.center,
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 2,
+                ),
+              ),
+            ),
+          ),
+        ),
+        _buildBestOf3MatchCell(
+          categoryId: categoryId,
+          allianceId: standing.allianceId,
+          opponentId: opponentId,
+          matchNumber: 1,
+          roundNumber: roundNumber,
+          matchPosition: matchPosition,
+          allianceName: '${standing.captainName} / ${standing.partnerName}',
+          opponentName: opponentName,
+          bracketSide: bracketSide,
+          result: match1Result,
+          onRefresh: () {
+            _loadBestOf3Results(categoryId);
+            _loadChampionshipStandings(categoryId);
+          },
+        ),
+        _buildBestOf3MatchCell(
+          categoryId: categoryId,
+          allianceId: standing.allianceId,
+          opponentId: opponentId,
+          matchNumber: 2,
+          roundNumber: roundNumber,
+          matchPosition: matchPosition,
+          allianceName: '${standing.captainName} / ${standing.partnerName}',
+          opponentName: opponentName,
+          bracketSide: bracketSide,
+          result: match2Result,
+          onRefresh: () {
+            _loadBestOf3Results(categoryId);
+            _loadChampionshipStandings(categoryId);
+          },
+        ),
+        _buildBestOf3MatchCell(
+          categoryId: categoryId,
+          allianceId: standing.allianceId,
+          opponentId: opponentId,
+          matchNumber: 3,
+          roundNumber: roundNumber,
+          matchPosition: matchPosition,
+          allianceName: '${standing.captainName} / ${standing.partnerName}',
+          opponentName: opponentName,
+          bracketSide: bracketSide,
+          result: match3Result,
+          onRefresh: () {
+            _loadBestOf3Results(categoryId);
+            _loadChampionshipStandings(categoryId);
+          },
+        ),
+        Expanded(
+          flex: 2,
+          child: Center(
+            child: Column(
+              children: [
+                Text(
+                  '${allianceWins * 10}',
+                  style: const TextStyle(
+                    color: Color(0xFFFFD700),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 18,
+                  ),
+                ),
+                const Text(
+                  'pts',
+                  style: TextStyle(
+                    color: Colors.white38,
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
 
   // Original championship table for non-Explorer categories
   Widget _buildOriginalChampionshipTable(int categoryId) {
