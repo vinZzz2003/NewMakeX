@@ -1,4 +1,5 @@
 // championship_schedule.dart
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'db_helper.dart';
 import 'championship_settings.dart';
@@ -32,12 +33,29 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
   ChampionshipView _currentView = ChampionshipView.schedule;
   bool _isExplorer = false;
   int _refreshKey = 0;
+  // Subscription to DBHelper bracket update events
+  StreamSubscription<int>? _bracketSub;
 
   @override
   void initState() {
     super.initState();
     _checkCategoryType();
     _loadSettingsAndMatches();
+    // Subscribe to bracket updates so UI reloads when winners are propagated
+    try {
+      _bracketSub = DBHelper.bracketUpdateController.stream.listen((catId) {
+        if (catId == widget.categoryId) {
+          print('ℹ️ ChampionshipSchedule: received bracket update for category $catId - reloading matches');
+          _loadMatches();
+        }
+      });
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    _bracketSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _checkCategoryType() async {
@@ -101,16 +119,47 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
       
       final conn = await DBHelper.getConnection();
       bool hasBracketData = false;
-      
+
       try {
-        final bracketCheck = await conn.execute("""
-          SELECT COUNT(*) as cnt 
-          FROM tbl_double_elimination 
-          WHERE category_id = :catId
-        """, {"catId": widget.categoryId});
-        
-        if (bracketCheck.rows.isNotEmpty) {
-          hasBracketData = int.parse(bracketCheck.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
+        // Check multiple possible bracket table names: canonical, explorer mirror,
+        // and category-specific slug-based table (e.g. tbl_<slug>_double_elimination).
+        final List<String> tablesToCheck = [
+          'tbl_double_elimination',
+          'tbl_explorer_double_elimination',
+        ];
+
+        // Try to resolve a category slug to check category-specific mirrored tables
+        try {
+          final cres = await conn.execute(
+            "SELECT category_type FROM tbl_category WHERE category_id = :id LIMIT 1",
+            {"id": widget.categoryId},
+          );
+          if (cres.rows.isNotEmpty) {
+            String? slug = cres.rows.first.assoc()['category_type']?.toString();
+            if (slug != null && slug.trim().isNotEmpty) {
+              slug = slug.replaceAll(RegExp(r"\(.*?\)"), '').toLowerCase();
+              slug = slug.replaceAll(RegExp(r"[^a-z0-9]+"), '_').replaceAll(RegExp(r"_+"), '_');
+              slug = slug.replaceAll(RegExp(r"^_+|_+"), '').trim();
+              if (slug.isNotEmpty) tablesToCheck.add('tbl_' + slug + '_double_elimination');
+            }
+          }
+        } catch (_) {}
+
+        for (final tbl in tablesToCheck) {
+          try {
+            final bracketCheck = await conn.execute(
+              "SELECT COUNT(*) as cnt FROM $tbl WHERE category_id = :catId",
+              {"catId": widget.categoryId},
+            );
+            if (bracketCheck.rows.isNotEmpty) {
+              if (int.parse(bracketCheck.rows.first.assoc()['cnt']?.toString() ?? '0') > 0) {
+                hasBracketData = true;
+                break;
+              }
+            }
+          } catch (_) {
+            // ignore missing table or errors for this candidate table
+          }
         }
       } catch (e) {
         print("⚠️ No bracket table yet: $e");
@@ -143,7 +192,42 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
 
   Future<List<Map<String, dynamic>>> _getMatchesFromBracket() async {
     final conn = await DBHelper.getConnection();
-    
+    // Determine which bracket table actually contains data: canonical, explorer, or category-specific
+    String bracketTable = 'tbl_double_elimination';
+    try {
+      final candidates = ['tbl_double_elimination', 'tbl_explorer_double_elimination'];
+      // try resolve category slug
+      try {
+        final cres = await conn.execute(
+          "SELECT category_type FROM tbl_category WHERE category_id = :id LIMIT 1",
+          {"id": widget.categoryId},
+        );
+        if (cres.rows.isNotEmpty) {
+          String? slug = cres.rows.first.assoc()['category_type']?.toString();
+          if (slug != null && slug.trim().isNotEmpty) {
+            slug = slug.replaceAll(RegExp(r"\(.*?\)"), '').toLowerCase();
+            slug = slug.replaceAll(RegExp(r"[^a-z0-9]+"), '_').replaceAll(RegExp(r"_+"), '_');
+            slug = slug.replaceAll(RegExp(r"^_+|_+"), '').trim();
+            if (slug.isNotEmpty) candidates.add('tbl_' + slug + '_double_elimination');
+          }
+        }
+      } catch (_) {}
+
+      for (final tbl in candidates) {
+        try {
+          final cnt = await conn.execute("SELECT COUNT(*) as cnt FROM $tbl WHERE category_id = :catId", {"catId": widget.categoryId});
+          if (cnt.rows.isNotEmpty && int.parse(cnt.rows.first.assoc()['cnt']?.toString() ?? '0') > 0) {
+            bracketTable = tbl;
+            break;
+          }
+        } catch (_) {}
+      }
+    } catch (e) {
+      print('⚠️ bracket table detection failed: $e');
+    }
+
+    print('🏁 Using bracket table: $bracketTable');
+
     final result = await conn.execute("""
       SELECT 
         match_id,
@@ -158,7 +242,7 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
         schedule_time,
         next_match_id_winner,
         next_match_id_loser
-      FROM tbl_double_elimination 
+      FROM $bracketTable 
       WHERE category_id = :catId
       ORDER BY 
         CASE bracket_side
