@@ -488,28 +488,28 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
 
       // Create table if it doesn't exist with bracket_side column
       await DBHelper.executeDual("""
-        CREATE TABLE IF NOT EXISTS tbl_championship_bestof3 (
-          result_id INT AUTO_INCREMENT PRIMARY KEY,
-          category_id INT NOT NULL,
-          alliance_id INT NOT NULL,
-          opponent_alliance_id INT NOT NULL,
-          match_number INT NOT NULL,
-          alliance_score INT NOT NULL DEFAULT 0,
-          alliance_violation INT NOT NULL DEFAULT 0,
-          opponent_score INT NOT NULL DEFAULT 0,
-          opponent_violation INT NOT NULL DEFAULT 0,
-          winner_alliance_id INT NOT NULL,
-          is_completed BOOLEAN DEFAULT FALSE,
-          match_round INT NOT NULL,
-          match_position INT NOT NULL,
-          bracket_side VARCHAR(20) NOT NULL DEFAULT 'winners',
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY (category_id) REFERENCES tbl_category(category_id) ON DELETE CASCADE,
-          FOREIGN KEY (alliance_id) REFERENCES tbl_alliance_selections(alliance_id) ON DELETE CASCADE,
-          FOREIGN KEY (opponent_alliance_id) REFERENCES tbl_alliance_selections(alliance_id) ON DELETE CASCADE,
-          UNIQUE KEY unique_match (category_id, alliance_id, opponent_alliance_id, match_number, match_round, match_position)
-        )
-      """);
+  CREATE TABLE IF NOT EXISTS tbl_championship_bestof3 (
+    result_id INT AUTO_INCREMENT PRIMARY KEY,
+    category_id INT NOT NULL,
+    alliance_id INT NOT NULL,
+    opponent_alliance_id INT NOT NULL,
+    match_number INT NOT NULL,
+    alliance_score INT NOT NULL DEFAULT 0,
+    alliance_violation INT NOT NULL DEFAULT 0,
+    opponent_score INT NOT NULL DEFAULT 0,
+    opponent_violation INT NOT NULL DEFAULT 0,
+    winner_alliance_id INT NOT NULL,
+    is_completed BOOLEAN DEFAULT FALSE,
+    match_round INT NOT NULL,
+    match_position INT NOT NULL,
+    bracket_side VARCHAR(20) NOT NULL DEFAULT 'winners',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (category_id) REFERENCES tbl_category(category_id) ON DELETE CASCADE,
+    FOREIGN KEY (alliance_id) REFERENCES tbl_alliance_selections(alliance_id) ON DELETE CASCADE,
+    FOREIGN KEY (opponent_alliance_id) REFERENCES tbl_alliance_selections(alliance_id) ON DELETE CASCADE,
+    UNIQUE KEY unique_match (category_id, alliance_id, opponent_alliance_id, match_number, match_round, match_position, bracket_side)
+  )
+""");
 
       // Load existing results
       final result = await conn.execute(
@@ -537,14 +537,14 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
       final Map<int, int> winsByAlliance = {};
       try {
         final winRes = await conn.execute(
-          """
-          SELECT winner_alliance_id, COUNT(DISTINCT CONCAT(match_round, ':', match_position, ':', match_number)) as cnt
-          FROM tbl_championship_bestof3
-          WHERE category_id = :catId AND is_completed = 1 AND winner_alliance_id IS NOT NULL AND winner_alliance_id != 0
-          GROUP BY winner_alliance_id
-        """,
-          {"catId": categoryId},
-        );
+  """
+  SELECT winner_alliance_id, COUNT(DISTINCT CONCAT(match_round, ':', match_position, ':', match_number, ':', bracket_side)) as cnt
+  FROM tbl_championship_bestof3
+  WHERE category_id = :catId AND is_completed = 1 AND winner_alliance_id IS NOT NULL AND winner_alliance_id != 0
+  GROUP BY winner_alliance_id
+""",
+  {"catId": categoryId},
+);
 
         for (final wrow in winRes.rows) {
           final w = wrow.assoc();
@@ -2110,36 +2110,38 @@ allRoundsData.sort((a, b) {
   // Count total wins and losses for a specific alliance in a specific match position across all rounds
   // Count total wins and losses for a specific alliance for a specific match number ACROSS ALL BRACKETS
   Map<String, int> _countWinsForMatchNumberAcrossRounds(
-    int categoryId,
-    int allianceAId,
-    int allianceBId,
-    int matchPosition,
-    int matchNumber,
-  ) {
-    final allResults = _bestOf3Results[categoryId] ?? {};
+  int categoryId,
+  int allianceAId,
+  int allianceBId,
+  int matchPosition,
+  int matchNumber,
+) {
+  final allResults = _bestOf3Results[categoryId] ?? {};
 
-    int winsA = 0;
-    int lossesA = 0;
-    int completedCount = 0;
+  int winsA = 0;
+  int lossesA = 0;
+  int completedCount = 0;
 
-    // Get ALL matches for this alliance
-    final allianceAResults = allResults[allianceAId] ?? [];
+  final allianceAResults = allResults[allianceAId] ?? [];
 
-    // Count EVERY completed match with this matchNumber (across all rounds and brackets)
-    // DO NOT use a Set to deduplicate - we want to count each match individually
-    for (final r in allianceAResults) {
-      if (r.matchNumber == matchNumber && r.isCompleted) {
-        completedCount++;
-        if (r.winnerAllianceId == allianceAId) {
-          winsA++;
-        } else {
-          lossesA++;
-        }
+  print("\n🔍🔍🔍 COUNTING FOR ALLIANCE $allianceAId, MATCH $matchNumber 🔍🔍🔍");
+  for (final r in allianceAResults) {
+    print("   Match ${r.matchNumber}: Round ${r.matchRound}, Pos ${r.matchPosition}, Side ${r.bracketSide}, Winner: ${r.winnerAllianceId}, Completed: ${r.isCompleted}");
+    if (r.matchNumber == matchNumber && r.isCompleted) {
+      completedCount++;
+      if (r.winnerAllianceId == allianceAId) {
+        winsA++;
+        print("      ✅ WIN for $allianceAId");
+      } else {
+        lossesA++;
+        print("      ❌ LOSS for $allianceAId (winner: ${r.winnerAllianceId})");
       }
     }
-
-    return {'winsA': winsA, 'winsB': lossesA, 'completed': completedCount};
   }
+  print("🔍 RESULT: $winsA wins, $lossesA losses\n");
+
+  return {'winsA': winsA, 'winsB': lossesA, 'completed': completedCount};
+}
 
   // Helper to get Grand Final 1 winner
   int? _getGrandFinal1Winner(int categoryId) {
@@ -2271,22 +2273,27 @@ allRoundsData.sort((a, b) {
 
       final List<ChampionshipAllianceStanding> standings = [];
 
-      for (final alliance in alliances) {
-        final allianceId = int.parse(alliance['alliance_id'].toString());
-        final allianceRank = int.parse(alliance['alliance_rank'].toString());
-        final wins = _allianceWins[categoryId]?[allianceId] ?? 0;
+for (final alliance in alliances) {
+  final allianceId = int.parse(alliance['alliance_id'].toString());
+  final allianceRank = int.parse(alliance['alliance_rank'].toString());
+  
+  // Calculate total match wins across all match numbers (M1, M2, M3)
+  final match1Wins = _countWinsForMatchNumberAcrossRounds(categoryId, allianceId, 0, 0, 1)['winsA'] ?? 0;
+  final match2Wins = _countWinsForMatchNumberAcrossRounds(categoryId, allianceId, 0, 0, 2)['winsA'] ?? 0;
+  final match3Wins = _countWinsForMatchNumberAcrossRounds(categoryId, allianceId, 0, 0, 3)['winsA'] ?? 0;
+  final totalMatchWins = match1Wins + match2Wins + match3Wins;
 
-        standings.add(
-          ChampionshipAllianceStanding(
-            allianceId: allianceId,
-            allianceRank: allianceRank,
-            captainName: alliance['captain_name'].toString(),
-            partnerName: alliance['partner_name'].toString(),
-            matchScores: {},
-            totalScore: wins * 10,
-          ),
-        );
-      }
+  standings.add(
+    ChampionshipAllianceStanding(
+      allianceId: allianceId,
+      allianceRank: allianceRank,
+      captainName: alliance['captain_name'].toString(),
+      partnerName: alliance['partner_name'].toString(),
+      matchScores: {},
+      totalScore: totalMatchWins * 10,  // Each match win = 10 points
+    ),
+  );
+}
 
       standings.sort((a, b) {
         if (a.totalScore != b.totalScore) {
@@ -2594,28 +2601,27 @@ allRoundsData.sort((a, b) {
     int cumWins = 0;
     int cumLosses = 0;
     if (bracketSide == 'grand') {
-      // For Grand Finals, show series wins for this specific round only
-      final grandSeries = _countSeriesWinsForRound(
-        categoryId,
-        allianceId,
-        opponentId,
-        roundNumber,
-        matchPosition,
-        bracketSide,
-      );
-      cumWins = grandSeries['winsA'] ?? 0;
-      cumLosses = grandSeries['winsB'] ?? 0;
-    } else {
-      final cumulativeWins = _countWinsForMatchNumberAcrossRounds(
-        categoryId,
-        allianceId,
-        opponentId,
-        matchPosition,
-        matchNumber,
-      );
-      cumWins = cumulativeWins['winsA'] ?? 0;
-      cumLosses = cumulativeWins['winsB'] ?? 0;
-    }
+  // For Grand Finals, show cumulative wins across ALL brackets
+  final cumulativeWins = _countWinsForMatchNumberAcrossRounds(
+    categoryId,
+    allianceId,
+    opponentId,
+    matchPosition,
+    matchNumber,
+  );
+  cumWins = cumulativeWins['winsA'] ?? 0;
+  cumLosses = cumulativeWins['winsB'] ?? 0;
+} else {
+  final cumulativeWins = _countWinsForMatchNumberAcrossRounds(
+    categoryId,
+    allianceId,
+    opponentId,
+    matchPosition,
+    matchNumber,
+  );
+  cumWins = cumulativeWins['winsA'] ?? 0;
+  cumLosses = cumulativeWins['winsB'] ?? 0;
+}
 
     // For series status, use the current round's series stats - but only for THIS SPECIFIC round
 final seriesWins = _countSeriesWinsForRound(
@@ -3085,24 +3091,17 @@ final int seriesWinsB = seriesWins['winsB'] ?? 0;
       return a.allianceRank.compareTo(b.allianceRank);
     });
 
-    // Determine Grand Final contenders (Winner's champion vs Loser's champion)
-    // Determine Grand Final contenders - ONLY when Loser's Bracket is complete
+    
+// Replace the Grand Finals section (around line 2940-2965) with:
+
 final List<ChampionshipAllianceStanding> grandFinalStandings = [];
 
-// Count how many alliances have exactly 1 loss
-final int oneLossCount = allianceLosses.values.where((loss) => loss == 1).length;
-
-// Only show Grand Finals when there's exactly ONE alliance with 1 loss (the Loser's Bracket champion)
-if (winnersStandings.isNotEmpty && oneLossCount == 1) {
+// Only show Grand Finals when Winner's Bracket has 1 alliance AND Loser's Bracket has 1 alliance
+// This means the bracket has progressed to the final two alliances
+if (winnersStandings.length == 1 && losersStandings.length == 1) {
   try {
-    final winnerChampion = winnersStandings.firstWhere(
-      (s) => (allianceLosses[s.allianceId] ?? 0) == 0,
-      orElse: () => winnersStandings[0],
-    );
-    final loserChampion = losersStandings.firstWhere(
-      (s) => (allianceLosses[s.allianceId] ?? 0) == 1,
-      orElse: () => losersStandings[0],
-    );
+    final winnerChampion = winnersStandings[0];
+    final loserChampion = losersStandings[0];
 
     if (!grandFinalStandings.any((g) => g.allianceId == winnerChampion.allianceId)) {
       grandFinalStandings.add(winnerChampion);

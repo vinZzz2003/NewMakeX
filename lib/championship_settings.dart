@@ -21,17 +21,18 @@ class ChampionshipSettings {
   });
   
   // Factory constructor for default settings
-  factory ChampionshipSettings.defaults(int categoryId) {
-    return ChampionshipSettings(
-      categoryId: categoryId,
-      matchesPerAlliance: 1,
-      startTime: const TimeOfDay(hour: 13, minute: 0),
-      endTime: const TimeOfDay(hour: 17, minute: 0),
-      durationMinutes: 10,
-      intervalMinutes: 5,
-      lunchBreakEnabled: true,
-    );
-  }
+  // Change the default matchesPerAlliance from 1 to 3
+factory ChampionshipSettings.defaults(int categoryId) {
+  return ChampionshipSettings(
+    categoryId: categoryId,
+    matchesPerAlliance: 3,  // Change from 1 to 3
+    startTime: const TimeOfDay(hour: 13, minute: 0),
+    endTime: const TimeOfDay(hour: 17, minute: 0),
+    durationMinutes: 10,
+    intervalMinutes: 5,
+    lunchBreakEnabled: true,
+  );
+}
   
   // Convert to Map for database storage
   Map<String, dynamic> toMap() {
