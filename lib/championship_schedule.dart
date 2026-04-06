@@ -190,122 +190,277 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
     }
   }
 
-  Future<List<Map<String, dynamic>>> _getMatchesFromBracket() async {
-    final conn = await DBHelper.getConnection();
-    // Determine which bracket table actually contains data: canonical, explorer, or category-specific
-    String bracketTable = 'tbl_double_elimination';
+Future<List<Map<String, dynamic>>> _getMatchesFromBracket() async {
+  final conn = await DBHelper.getConnection();
+  
+  // Determine which bracket table to use
+  String bracketTable = 'tbl_double_elimination';
+  try {
+    final candidates = ['tbl_double_elimination', 'tbl_explorer_double_elimination'];
     try {
-      final candidates = ['tbl_double_elimination', 'tbl_explorer_double_elimination'];
-      // try resolve category slug
+      final cres = await conn.execute(
+        "SELECT category_type FROM tbl_category WHERE category_id = :id LIMIT 1",
+        {"id": widget.categoryId},
+      );
+      if (cres.rows.isNotEmpty) {
+        String? slug = cres.rows.first.assoc()['category_type']?.toString();
+        if (slug != null && slug.trim().isNotEmpty) {
+          slug = slug.replaceAll(RegExp(r"\(.*?\)"), '').toLowerCase();
+          slug = slug.replaceAll(RegExp(r"[^a-z0-9]+"), '_').replaceAll(RegExp(r"_+"), '_');
+          slug = slug.replaceAll(RegExp(r"^_+|_+"), '').trim();
+          if (slug.isNotEmpty) candidates.add('tbl_' + slug + '_double_elimination');
+        }
+      }
+    } catch (_) {}
+
+    for (final tbl in candidates) {
       try {
-        final cres = await conn.execute(
-          "SELECT category_type FROM tbl_category WHERE category_id = :id LIMIT 1",
-          {"id": widget.categoryId},
+        final cnt = await conn.execute(
+          "SELECT COUNT(*) as cnt FROM $tbl WHERE category_id = :catId",
+          {"catId": widget.categoryId}
         );
-        if (cres.rows.isNotEmpty) {
-          String? slug = cres.rows.first.assoc()['category_type']?.toString();
-          if (slug != null && slug.trim().isNotEmpty) {
-            slug = slug.replaceAll(RegExp(r"\(.*?\)"), '').toLowerCase();
-            slug = slug.replaceAll(RegExp(r"[^a-z0-9]+"), '_').replaceAll(RegExp(r"_+"), '_');
-            slug = slug.replaceAll(RegExp(r"^_+|_+"), '').trim();
-            if (slug.isNotEmpty) candidates.add('tbl_' + slug + '_double_elimination');
-          }
+        if (cnt.rows.isNotEmpty && int.parse(cnt.rows.first.assoc()['cnt']?.toString() ?? '0') > 0) {
+          bracketTable = tbl;
+          break;
         }
       } catch (_) {}
-
-      for (final tbl in candidates) {
-        try {
-          final cnt = await conn.execute("SELECT COUNT(*) as cnt FROM $tbl WHERE category_id = :catId", {"catId": widget.categoryId});
-          if (cnt.rows.isNotEmpty && int.parse(cnt.rows.first.assoc()['cnt']?.toString() ?? '0') > 0) {
-            bracketTable = tbl;
-            break;
-          }
-        } catch (_) {}
-      }
-    } catch (e) {
-      print('⚠️ bracket table detection failed: $e');
     }
+  } catch (e) {
+    print('⚠️ bracket table detection failed: $e');
+  }
 
-    print('🏁 Using bracket table: $bracketTable');
+  print('🏁 Using bracket table: $bracketTable');
 
-    final result = await conn.execute("""
-      SELECT 
-        match_id,
-        round_name,
-        match_position,
-        bracket_side,
-        round_number,
-        alliance1_id,
-        alliance2_id,
-        winner_alliance_id,
-        status,
-        schedule_time,
-        next_match_id_winner,
-        next_match_id_loser
-      FROM $bracketTable 
-      WHERE category_id = :catId
-      ORDER BY 
-        CASE bracket_side
-          WHEN 'winners' THEN 1
-          WHEN 'losers' THEN 2
-          WHEN 'grand' THEN 3
-        END,
-        round_number,
-        match_position
-    """, {"catId": widget.categoryId});
+  // Get all series from the bracket table
+  final result = await conn.execute("""
+    SELECT 
+      match_id,
+      round_name,
+      match_position,
+      bracket_side,
+      round_number,
+      alliance1_id,
+      alliance2_id,
+      winner_alliance_id,
+      status,
+      schedule_time,
+      next_match_id_winner,
+      next_match_id_loser
+    FROM $bracketTable 
+    WHERE category_id = :catId
+    ORDER BY 
+      CASE bracket_side
+        WHEN 'winners' THEN 1
+        WHEN 'losers' THEN 2
+        WHEN 'grand' THEN 3
+      END,
+      round_number,
+      match_position
+  """, {"catId": widget.categoryId});
+  
+  final List<Map<String, dynamic>> rows = [];
+  
+  // Get settings values
+  final int matchesPerSeries = _settings?.matchesPerAlliance ?? 3;
+  final int durationMinutes = _settings?.durationMinutes ?? 6;
+  final int intervalMinutes = _settings?.intervalMinutes ?? 0;
+  final int timePerMatch = durationMinutes + intervalMinutes; // Total time per match slot
+  
+  // Start time from settings
+  int currentHour = _settings?.startTime.hour ?? 13;
+  int currentMinute = _settings?.startTime.minute ?? 0;
+  
+  // Helper to format time
+  String formatTime(int hour, int minute) {
+    return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
+  }
+  
+  // Helper to advance time
+  void advanceTime() {
+    currentMinute += timePerMatch;
+    while (currentMinute >= 60) {
+      currentMinute -= 60;
+      currentHour++;
+    }
+  }
+  
+  for (final row in result.rows) {
+    final data = row.assoc();
     
-    final rows = <Map<String, dynamic>>[];
+    final alliance1Id = int.tryParse(data['alliance1_id']?.toString() ?? '0') ?? 0;
+    final alliance2Id = int.tryParse(data['alliance2_id']?.toString() ?? '0') ?? 0;
+    final roundNumber = int.tryParse(data['round_number']?.toString() ?? '1') ?? 1;
+    final matchPosition = int.tryParse(data['match_position']?.toString() ?? '1') ?? 1;
+    final bracketSide = data['bracket_side']?.toString() ?? 'winners';
     
-    for (final row in result.rows) {
-      final data = row.assoc();
+    // Skip if no teams (TBD)
+    if (alliance1Id == 0 && alliance2Id == 0) continue;
+    
+    // Get alliance details
+    Map<String, dynamic>? alliance1;
+    Map<String, dynamic>? alliance2;
+    
+    if (alliance1Id > 0) {
+      alliance1 = await _getAllianceById(alliance1Id);
+    }
+    if (alliance2Id > 0) {
+      alliance2 = await _getAllianceById(alliance2Id);
+    }
+    
+    // Generate matches for this series (Match 1, 2, 3)
+    for (int matchNum = 1; matchNum <= matchesPerSeries; matchNum++) {
+      final timeStr = formatTime(currentHour, currentMinute);
       
-      if (data['alliance1_id'] != null && int.parse(data['alliance1_id'].toString()) > 0) {
-        final alliance = await _getAllianceById(int.parse(data['alliance1_id'].toString()));
-        data['alliance1_name'] = alliance != null 
-            ? '${alliance['captain_name']} / ${alliance['partner_name']}'
-            : 'Unknown';
-        data['alliance1_rank'] = alliance != null ? '#${alliance['alliance_rank']}' : '#?';
-      } else {
-        data['alliance1_name'] = 'TBD';
-        data['alliance1_rank'] = '?';
+      // Check if this specific match has a result in bestof3 table
+      bool isCompleted = false;
+      int? winnerId;
+      
+      try {
+        final bestOf3Result = await conn.execute("""
+          SELECT winner_alliance_id, is_completed
+          FROM tbl_championship_bestof3
+          WHERE category_id = :catId 
+            AND match_round = :roundNum 
+            AND match_position = :matchPos
+            AND match_number = :matchNum
+            AND bracket_side = :side
+          LIMIT 1
+        """, {
+          "catId": widget.categoryId,
+          "roundNum": roundNumber,
+          "matchPos": matchPosition,
+          "matchNum": matchNum,
+          "side": bracketSide,
+        });
+        
+        if (bestOf3Result.rows.isNotEmpty) {
+          final bo3 = bestOf3Result.rows.first.assoc();
+          isCompleted = (bo3['is_completed']?.toString() ?? '0') == '1';
+          winnerId = int.tryParse(bo3['winner_alliance_id']?.toString() ?? '0');
+        }
+      } catch (e) {
+        // bestof3 table might not have entries yet
       }
       
-      if (data['alliance2_id'] != null && int.parse(data['alliance2_id'].toString()) > 0) {
-        final alliance = await _getAllianceById(int.parse(data['alliance2_id'].toString()));
-        data['alliance2_name'] = alliance != null 
-            ? '${alliance['captain_name']} / ${alliance['partner_name']}'
-            : 'Unknown';
-        data['alliance2_rank'] = alliance != null ? '#${alliance['alliance_rank']}' : '#?';
-      } else {
-        data['alliance2_name'] = 'TBD';
-        data['alliance2_rank'] = '?';
+      // Determine if Match 3 is a break (if series already decided 2-0)
+      bool isBreak = false;
+      if (matchNum == 3 && !isCompleted) {
+        try {
+          final seriesCheck = await conn.execute("""
+            SELECT 
+              COUNT(CASE WHEN winner_alliance_id = :a1 AND is_completed = 1 THEN 1 END) as wins_a1,
+              COUNT(CASE WHEN winner_alliance_id = :a2 AND is_completed = 1 THEN 1 END) as wins_a2
+            FROM tbl_championship_bestof3
+            WHERE category_id = :catId 
+              AND match_round = :roundNum 
+              AND match_position = :matchPos
+              AND bracket_side = :side
+              AND match_number IN (1, 2)
+          """, {
+            "catId": widget.categoryId,
+            "roundNum": roundNumber,
+            "matchPos": matchPosition,
+            "side": bracketSide,
+            "a1": alliance1Id,
+            "a2": alliance2Id,
+          });
+          
+          if (seriesCheck.rows.isNotEmpty) {
+            final check = seriesCheck.rows.first.assoc();
+            int winsA1 = int.tryParse(check['wins_a1']?.toString() ?? '0') ?? 0;
+            int winsA2 = int.tryParse(check['wins_a2']?.toString() ?? '0') ?? 0;
+            isBreak = (winsA1 >= 2) || (winsA2 >= 2);
+            if (isBreak) {
+              print('📊 Match 3 for series R${roundNumber}P${matchPosition} is BREAK (series already decided $winsA1-$winsA2)');
+            }
+          }
+        } catch (e) {
+          print('⚠️ Could not check series status: $e');
+        }
       }
       
+      // Create match data
+      final matchData = <String, dynamic>{};
+      matchData['match_id'] = data['match_id'];
+      matchData['round_name'] = '${data['round_name']}_M$matchNum';
+      matchData['match_position'] = matchPosition;
+      matchData['bracket_side'] = bracketSide;
+      matchData['round_number'] = roundNumber;
+      matchData['alliance1_id'] = alliance1Id;
+      matchData['alliance2_id'] = alliance2Id;
+      matchData['match_number'] = matchNum;
+      matchData['schedule_time'] = timeStr;
+      
+      // Set status
+      if (isBreak) {
+        matchData['status'] = 'break';
+        matchData['winner_alliance_id'] = null;
+      } else if (isCompleted) {
+        matchData['status'] = 'completed';
+        matchData['winner_alliance_id'] = winnerId;
+      } else {
+        matchData['status'] = 'pending';
+        matchData['winner_alliance_id'] = null;
+      }
+      
+      // Add alliance names and ranks
+      if (alliance1 != null) {
+        matchData['alliance1_name'] = '${alliance1['captain_name']} / ${alliance1['partner_name']}';
+        matchData['alliance1_rank'] = '#${alliance1['alliance_rank']}';
+      } else {
+        matchData['alliance1_name'] = 'TBD';
+        matchData['alliance1_rank'] = '?';
+      }
+      
+      if (alliance2 != null) {
+        matchData['alliance2_name'] = '${alliance2['captain_name']} / ${alliance2['partner_name']}';
+        matchData['alliance2_rank'] = '#${alliance2['alliance_rank']}';
+      } else {
+        matchData['alliance2_name'] = 'TBD';
+        matchData['alliance2_rank'] = '?';
+      }
+      
+      // Determine display round name
       String displayRound = '';
-      final side = data['bracket_side'] as String;
-      final roundNum = int.parse(data['round_number'].toString());
+      final side = bracketSide;
       
       if (side == 'winners') {
-        if (roundNum == 1) displayRound = 'QUARTER-FINAL';
-        else if (roundNum == 2) displayRound = 'SEMI-FINAL';
-        else if (roundNum == 3) displayRound = 'WINNER\'S FINAL';
-        else displayRound = 'ROUND $roundNum';
+        if (roundNumber == 1) displayRound = 'QUARTER-FINAL';
+        else if (roundNumber == 2) displayRound = 'SEMI-FINAL';
+        else if (roundNumber == 3) displayRound = 'WINNER\'S FINAL';
+        else displayRound = 'ROUND $roundNumber';
       } else if (side == 'losers') {
-        if (roundNum == 1) displayRound = 'LOSER\'S ROUND 1';
-        else if (roundNum == 2) displayRound = 'LOSER\'S ROUND 2';
-        else if (roundNum >= _getMaxLoserRound() - 1) displayRound = 'LOSER\'S FINAL';
-        else displayRound = 'LOSER\'S ROUND $roundNum';
+        if (roundNumber == 1) displayRound = 'LOSER\'S ROUND 1';
+        else if (roundNumber == 2) displayRound = 'LOSER\'S ROUND 2';
+        else if (roundNumber >= _getMaxLoserRound() - 1) displayRound = 'LOSER\'S FINAL';
+        else displayRound = 'LOSER\'S ROUND $roundNumber';
       } else if (side == 'grand') {
         displayRound = data['round_name'] == 'GF1' ? 'GRAND FINAL' : 'GRAND FINAL (RESET)';
       }
       
-      data['display_round'] = displayRound;
+      matchData['display_round'] = displayRound;
       
-      rows.add(data);
+      rows.add(matchData);
+      
+      // Advance time for the next match (continuous timing)
+      advanceTime();
     }
-    
-    return rows;
   }
+  
+  // Sort by round, position, and match number
+  rows.sort((a, b) {
+    final roundCompare = (a['round_number'] as int).compareTo(b['round_number'] as int);
+    if (roundCompare != 0) return roundCompare;
+    final posCompare = (a['match_position'] as int).compareTo(b['match_position'] as int);
+    if (posCompare != 0) return posCompare;
+    return (a['match_number'] as int).compareTo(b['match_number'] as int);
+  });
+  
+  print("📊 Generated ${rows.length} matches (${rows.length ~/ matchesPerSeries} series x $matchesPerSeries matches)");
+  print("📊 Time per match: $durationMinutes min duration + $intervalMinutes min interval = $timePerMatch min per match");
+  
+  return rows;
+}
 
   Future<List<Map<String, dynamic>>> _getMatchesFromSchedule() async {
     final conn = await DBHelper.getConnection();
@@ -317,34 +472,38 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
       return [];
     }
     
-    final result = await conn.execute("""
-      SELECT 
-        cs.match_id,
-        cs.category_id,
-        cs.match_round,
-        cs.match_position,
-        cs.schedule_time,
-        cs.status,
-        cs.alliance1_id,
-        cs.alliance2_id,
-        a1.alliance_id as a1_id,
-        a2.alliance_id as a2_id,
-        t1.team_name as captain1_name,
-        t2.team_name as partner1_name,
-        t3.team_name as captain2_name,
-        t4.team_name as partner2_name,
-        a1.selection_round as alliance1_rank,
-        a2.selection_round as alliance2_rank
-      FROM tbl_championship_schedule cs
-      LEFT JOIN tbl_alliance_selections a1 ON cs.alliance1_id = a1.alliance_id
-      LEFT JOIN tbl_alliance_selections a2 ON cs.alliance2_id = a2.alliance_id
-      LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
-      LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
-      LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
-      LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
-      WHERE cs.category_id = :categoryId
-      ORDER BY cs.match_round, cs.match_position
-    """, {"categoryId": widget.categoryId});
+    // In championship_schedule.dart - update the query in _getMatchesFromSchedule()
+
+final result = await conn.execute("""
+  SELECT 
+    cs.match_id,
+    cs.category_id,
+    cs.match_round,
+    cs.match_position,
+    cs.match_number,  // ADD THIS
+    cs.schedule_time,
+    cs.status,
+    cs.alliance1_id,
+    cs.alliance2_id,
+    cs.winner_alliance_id,  // ADD THIS
+    a1.alliance_id as a1_id,
+    a2.alliance_id as a2_id,
+    t1.team_name as captain1_name,
+    t2.team_name as partner1_name,
+    t3.team_name as captain2_name,
+    t4.team_name as partner2_name,
+    a1.selection_round as alliance1_rank,
+    a2.selection_round as alliance2_rank
+  FROM tbl_championship_schedule cs
+  LEFT JOIN tbl_alliance_selections a1 ON cs.alliance1_id = a1.alliance_id
+  LEFT JOIN tbl_alliance_selections a2 ON cs.alliance2_id = a2.alliance_id
+  LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
+  LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
+  LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
+  LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
+  WHERE cs.category_id = :categoryId
+  ORDER BY cs.match_round, cs.match_position, cs.match_number
+""", {"categoryId": widget.categoryId});
     
     final rows = result.rows.map((r) {
       final data = r.assoc();
@@ -612,13 +771,15 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
               // Matches
               ...roundMatches.map((match) {
                 final isCompleted = match['status'] == 'completed';
-                final alliance1Name = match['alliance1_name'] ?? 'TBD';
-                final alliance2Name = match['alliance2_name'] ?? 'TBD';
-                final alliance1Rank = match['alliance1_rank'] ?? '#?';
-                final alliance2Rank = match['alliance2_rank'] ?? '#?';
-                final winnerId = match['winner_alliance_id'];
-                final isWinner1 = winnerId != null && winnerId.toString() == match['alliance1_id']?.toString();
-                final isWinner2 = winnerId != null && winnerId.toString() == match['alliance2_id']?.toString();
+final isBreak = match['status'] == 'break';  // ADD THIS LINE
+final alliance1Name = match['alliance1_name'] ?? 'TBD';
+final alliance2Name = match['alliance2_name'] ?? 'TBD';
+final alliance1Rank = match['alliance1_rank'] ?? '#?';
+final alliance2Rank = match['alliance2_rank'] ?? '#?';
+final winnerId = match['winner_alliance_id'];
+final isWinner1 = !isBreak && winnerId != null && winnerId.toString() == match['alliance1_id']?.toString();  // MODIFIED
+final isWinner2 = !isBreak && winnerId != null && winnerId.toString() == match['alliance2_id']?.toString();  // MODIFIED
+final matchNumber = match['match_number'] ?? 1;
 
                 return Container(
                   margin: const EdgeInsets.only(bottom: 12),
@@ -690,53 +851,75 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
                                     fontWeight: FontWeight.w500,
                                   ),
                                 ),
+                                const SizedBox(width: 10),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFFFD700).withOpacity(0.15),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Text(
+                                    'MATCH $matchNumber',
+                                    style: const TextStyle(
+                                      color: Color(0xFFFFD700),
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 10,
+                                    ),
+                                  ),
+                                ),
                               ],
                             ),
                             
                             // Status Badge
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                              decoration: BoxDecoration(
-                                color: isCompleted
-                                    ? Colors.green.withOpacity(0.15)
-                                    : Colors.orange.withOpacity(0.15),
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(
-                                  color: isCompleted
-                                      ? Colors.green.withOpacity(0.5)
-                                      : Colors.orange.withOpacity(0.5),
-                                  width: 1,
-                                ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    isCompleted ? Icons.check_circle : Icons.schedule,
-                                    color: isCompleted ? Colors.green : Colors.orange,
-                                    size: 12,
-                                  ),
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    isCompleted ? 'COMPLETED' : 'PENDING',
-                                    style: TextStyle(
-                                      color: isCompleted ? Colors.green : Colors.orange,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
+                            // Status Badge
+Container(
+  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+  decoration: BoxDecoration(
+    color: isBreak
+        ? Colors.grey.withOpacity(0.15)
+        : (isCompleted
+            ? Colors.green.withOpacity(0.15)
+            : Colors.orange.withOpacity(0.15)),
+    borderRadius: BorderRadius.circular(20),
+    border: Border.all(
+      color: isBreak
+          ? Colors.grey.withOpacity(0.5)
+          : (isCompleted
+              ? Colors.green.withOpacity(0.5)
+              : Colors.orange.withOpacity(0.5)),
+      width: 1,
+    ),
+  ),
+  child: Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Icon(
+        isBreak ? Icons.free_breakfast : (isCompleted ? Icons.check_circle : Icons.schedule),
+        color: isBreak ? Colors.grey : (isCompleted ? Colors.green : Colors.orange),
+        size: 12,
+      ),
+      const SizedBox(width: 6),
+      Text(
+        isBreak ? 'BREAK' : (isCompleted ? 'COMPLETED' : 'PENDING'),
+        style: TextStyle(
+          color: isBreak ? Colors.grey : (isCompleted ? Colors.green : Colors.orange),
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    ],
+  ),
+),
                           ],
                         ),
                       ),
                       
-                      // Match Content
-                      Padding(
+                          // Match Content
+                            Padding(
                         padding: const EdgeInsets.all(16),
                         child: Row(
                           children: [
+                              // Which match in the series (M1/M2/M3)
                             // Alliance 1
                             Expanded(
                               child: Container(
@@ -802,13 +985,13 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
                                     ),
                                     const SizedBox(height: 8),
                                     Text(
-                                      alliance1Name,
-                                      style: TextStyle(
-                                        color: isWinner1 ? Colors.green : Colors.white,
-                                        fontWeight: isWinner1 ? FontWeight.bold : FontWeight.w600,
-                                        fontSize: 13,
-                                        height: 1.3,
-                                      ),
+  alliance1Name,
+  style: TextStyle(
+    color: isBreak ? Colors.white38 : (isWinner1 ? Colors.green : Colors.white),
+    fontWeight: isWinner1 ? FontWeight.bold : FontWeight.w600,
+    fontSize: 13,
+    height: 1.3,
+  ),
                                       textAlign: TextAlign.center,
                                       maxLines: 2,
                                       overflow: TextOverflow.ellipsis,
@@ -848,38 +1031,41 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
                             ),
                             
                             // VS Divider
-                            Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 12),
-                              child: Container(
-                                width: 50,
-                                height: 50,
-                                decoration: BoxDecoration(
-                                  gradient: LinearGradient(
-                                    begin: Alignment.topLeft,
-                                    end: Alignment.bottomRight,
-                                    colors: isCompleted
-                                        ? [Colors.green.withOpacity(0.3), Colors.green.withOpacity(0.1)]
-                                        : [const Color(0xFFFFD700).withOpacity(0.3), const Color(0xFFFFD700).withOpacity(0.1)],
-                                  ),
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: isCompleted ? Colors.green : const Color(0xFFFFD700),
-                                    width: 2,
-                                  ),
-                                ),
-                                child: Center(
-                                  child: Text(
-                                    isCompleted ? 'WIN' : 'VS',
-                                    style: TextStyle(
-                                      color: isCompleted ? Colors.green : const Color(0xFFFFD700),
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 12,
-                                      letterSpacing: 1,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
+                            // VS Divider
+Padding(
+  padding: const EdgeInsets.symmetric(horizontal: 12),
+  child: Container(
+    width: 50,
+    height: 50,
+    decoration: BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: isBreak
+            ? [Colors.grey.withOpacity(0.3), Colors.grey.withOpacity(0.1)]
+            : (isCompleted
+                ? [Colors.green.withOpacity(0.3), Colors.green.withOpacity(0.1)]
+                : [const Color(0xFFFFD700).withOpacity(0.3), const Color(0xFFFFD700).withOpacity(0.1)]),
+      ),
+      shape: BoxShape.circle,
+      border: Border.all(
+        color: isBreak ? Colors.grey : (isCompleted ? Colors.green : const Color(0xFFFFD700)),
+        width: 2,
+      ),
+    ),
+    child: Center(
+      child: Text(
+        isBreak ? '--' : (isCompleted ? 'WIN' : 'VS'),
+        style: TextStyle(
+          color: isBreak ? Colors.grey : (isCompleted ? Colors.green : const Color(0xFFFFD700)),
+          fontWeight: FontWeight.bold,
+          fontSize: 12,
+          letterSpacing: 1,
+        ),
+      ),
+    ),
+  ),
+),
                             
                             // Alliance 2
                             Expanded(
