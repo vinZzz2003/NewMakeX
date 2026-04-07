@@ -480,12 +480,12 @@ final result = await conn.execute("""
     cs.category_id,
     cs.match_round,
     cs.match_position,
-    cs.match_number,  // ADD THIS
+    cs.match_number,  
     cs.schedule_time,
     cs.status,
     cs.alliance1_id,
     cs.alliance2_id,
-    cs.winner_alliance_id,  // ADD THIS
+    cs.winner_alliance_id,  
     a1.alliance_id as a1_id,
     a2.alliance_id as a2_id,
     t1.team_name as captain1_name,

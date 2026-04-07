@@ -2107,39 +2107,36 @@ allRoundsData.sort((a, b) {
     return {'winsA': winsA, 'winsB': winsB, 'completed': completedKeys.length};
   }
 
-  // Count total wins and losses for a specific alliance in a specific match position across all rounds
-  // Count total wins and losses for a specific alliance for a specific match number ACROSS ALL BRACKETS
   Map<String, int> _countWinsForMatchNumberAcrossRounds(
   int categoryId,
   int allianceAId,
   int allianceBId,
   int matchPosition,
   int matchNumber,
+  [String? bracketSide]  // Add this parameter
 ) {
   final allResults = _bestOf3Results[categoryId] ?? {};
-
+  
   int winsA = 0;
   int lossesA = 0;
   int completedCount = 0;
-
+  
   final allianceAResults = allResults[allianceAId] ?? [];
-
-  print("\n🔍🔍🔍 COUNTING FOR ALLIANCE $allianceAId, MATCH $matchNumber 🔍🔍🔍");
+  
   for (final r in allianceAResults) {
-    print("   Match ${r.matchNumber}: Round ${r.matchRound}, Pos ${r.matchPosition}, Side ${r.bracketSide}, Winner: ${r.winnerAllianceId}, Completed: ${r.isCompleted}");
+    // Add bracketSide filter
+    if (bracketSide != null && r.bracketSide != bracketSide) continue;
+    
     if (r.matchNumber == matchNumber && r.isCompleted) {
       completedCount++;
       if (r.winnerAllianceId == allianceAId) {
         winsA++;
-        print("      ✅ WIN for $allianceAId");
       } else {
         lossesA++;
-        print("      ❌ LOSS for $allianceAId (winner: ${r.winnerAllianceId})");
       }
     }
   }
-  print("🔍 RESULT: $winsA wins, $lossesA losses\n");
-
+  
   return {'winsA': winsA, 'winsB': lossesA, 'completed': completedCount};
 }
 
