@@ -317,42 +317,42 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
     } catch (_) {}
   }
 
-  // Load match pairings for championship
   Future<void> _loadMatchPairings(int categoryId) async {
+  try {
+    final conn = await DBHelper.getConnection();
+
+    // Try to prefer the double-elimination bracket table
+    String? slug;
     try {
-      final conn = await DBHelper.getConnection();
-
-      // Try to prefer the double-elimination bracket table
-      String? slug;
-      try {
-        final catRes = await conn.execute(
-          "SELECT category_type FROM tbl_category WHERE category_id = :catId LIMIT 1",
-          {"catId": categoryId},
-        );
-        if (catRes.rows.isNotEmpty) {
-          slug = catRes.rows.first.assoc()['category_type']?.toString();
-        }
-      } catch (_) {}
-
-      String doubleTable = 'tbl_double_elimination';
-      if (slug != null && slug.trim().isNotEmpty) {
-        var ctype = slug.replaceAll(RegExp(r"\(.*?\)"), '').toLowerCase();
-        ctype = ctype
-            .replaceAll(RegExp(r"[^a-z0-9]+"), '_')
-            .replaceAll(RegExp(r"_+"), '_')
-            .replaceAll(RegExp(r"^_+|_+$"), '')
-            .trim();
-        if (ctype.isNotEmpty) {
-          final candidate = 'tbl_${ctype}_double_elimination';
-          try {
-            await conn.execute('SELECT 1 FROM $candidate LIMIT 1');
-            doubleTable = candidate;
-          } catch (_) {}
-        }
+      final catRes = await conn.execute(
+        "SELECT category_type FROM tbl_category WHERE category_id = :catId LIMIT 1",
+        {"catId": categoryId},
+      );
+      if (catRes.rows.isNotEmpty) {
+        slug = catRes.rows.first.assoc()['category_type']?.toString();
       }
+    } catch (_) {}
 
-      final result = await conn.execute(
-        """
+    String doubleTable = 'tbl_double_elimination';
+    if (slug != null && slug.trim().isNotEmpty) {
+      var ctype = slug.replaceAll(RegExp(r"\(.*?\)"), '').toLowerCase();
+      ctype = ctype
+          .replaceAll(RegExp(r"[^a-z0-9]+"), '_')
+          .replaceAll(RegExp(r"_+"), '_')
+          .replaceAll(RegExp(r"^_+|_+$"), '')
+          .trim();
+      if (ctype.isNotEmpty) {
+        final candidate = 'tbl_${ctype}_double_elimination';
+        try {
+          await conn.execute('SELECT 1 FROM $candidate LIMIT 1');
+          doubleTable = candidate;
+        } catch (_) {}
+      }
+    }
+
+    // Execute the query and store the result
+    final queryResult = await conn.execute(
+      """
       SELECT 
         de.match_id,
         de.round_number,
@@ -378,33 +378,52 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
         CASE de.bracket_side WHEN 'winners' THEN 1 WHEN 'losers' THEN 2 WHEN 'grand' THEN 3 END,
         de.round_number, de.match_position
     """,
-        {"catId": categoryId},
-      );
+      {"catId": categoryId},
+    );
 
-      final Map<int, AllianceMatchPair> pairings = {};
-      final Map<int, AllianceMatchPair> pairByMatch = {};
+    final Map<int, AllianceMatchPair> pairings = {};
+    final Map<int, AllianceMatchPair> pairByMatch = {};
+    
+    // Track seen matches by (round, position, side) to deduplicate
+    final Set<String> seenMatches = {};
 
-      for (final row in result.rows) {
-        final data = row.assoc();
-        final matchId = int.parse(data['match_id'].toString());
-        final alliance1Id = int.parse(data['alliance1_id']?.toString() ?? '0');
-        final alliance2Id = int.parse(data['alliance2_id']?.toString() ?? '0');
-        final alliance1Rank = int.parse(
-          data['alliance1_rank']?.toString() ?? '0',
-        );
-        final alliance2Rank = int.parse(
-          data['alliance2_rank']?.toString() ?? '0',
-        );
-        final alliance1Name =
-            '${data['captain1_name']} / ${data['partner1_name']}';
-        final alliance2Name =
-            '${data['captain2_name']} / ${data['partner2_name']}';
-        final roundNumber = int.parse(data['round_number']?.toString() ?? '1');
-        final matchPosition = int.parse(
-          data['match_position']?.toString() ?? '1',
-        );
-        final bracketSide = data['bracket_side']?.toString() ?? 'winners';
-
+    // Use 'queryResult' instead of 'result'
+    for (final row in queryResult.rows) {
+      final data = row.assoc();
+      final matchId = int.parse(data['match_id'].toString());
+      final roundNumber = int.parse(data['round_number']?.toString() ?? '1');
+      final matchPosition = int.parse(data['match_position']?.toString() ?? '1');
+      final bracketSide = data['bracket_side']?.toString() ?? 'winners';
+      
+      // Create unique key
+      final key = '${roundNumber}_${matchPosition}_${bracketSide}';
+      
+      // Get alliance IDs
+      final alliance1Id = int.parse(data['alliance1_id']?.toString() ?? '0');
+      final alliance2Id = int.parse(data['alliance2_id']?.toString() ?? '0');
+      
+      // If we've seen this match before, check if current entry is better
+      if (seenMatches.contains(key)) {
+        final existing = pairByMatch[matchId];
+        
+        // Keep the entry with actual alliances, skip TBD entries if we have a better one
+        if ((alliance1Id == 0 || alliance2Id == 0) && 
+            existing != null && 
+            existing.alliance1Id != 0 && 
+            existing.alliance2Id != 0) {
+          continue; // Skip this TBD entry
+        }
+      }
+      
+      seenMatches.add(key);
+      
+      // Only store matches that have at least one alliance (for display purposes)
+      if (alliance1Id != 0 && alliance2Id != 0) {
+        final alliance1Rank = int.parse(data['alliance1_rank']?.toString() ?? '0');
+        final alliance2Rank = int.parse(data['alliance2_rank']?.toString() ?? '0');
+        final alliance1Name = '${data['captain1_name']} / ${data['partner1_name']}';
+        final alliance2Name = '${data['captain2_name']} / ${data['partner2_name']}';
+        
         final pair = AllianceMatchPair(
           matchId: matchId,
           alliance1Id: alliance1Id,
@@ -417,30 +436,26 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
           matchPosition: matchPosition,
           bracketSide: bracketSide,
         );
-
-        // Store ALL matches, even those with TBD (0) alliances
+        
         pairings[matchId] = pair;
         pairByMatch[matchId] = pair;
-
-        print(
-          "📊 Loaded match: Round ${pair.roundNumber}, Pos ${pair.matchPosition}, Side ${pair.bracketSide}, A1: ${pair.alliance1Id}, A2: ${pair.alliance2Id}",
-        );
+        
+        print("📊 Loaded match: Round $roundNumber, Pos $matchPosition, Side $bracketSide, A1: $alliance1Id, A2: $alliance2Id");
       }
-
-      if (mounted) {
-        setState(() {
-          _allianceMatchPairings[categoryId] = pairings;
-          _championshipPairingsByMatch[categoryId] = pairByMatch;
-        });
-      }
-
-      print(
-        "✅ Loaded ${pairings.length} matches from double-elimination for category $categoryId (table: $doubleTable)",
-      );
-    } catch (e) {
-      print("❌ Error loading match pairings: $e");
     }
+
+    if (mounted) {
+      setState(() {
+        _allianceMatchPairings[categoryId] = pairings;
+        _championshipPairingsByMatch[categoryId] = pairByMatch;
+      });
+    }
+
+    print("✅ Loaded ${pairings.length} valid matches from double-elimination for category $categoryId (table: $doubleTable)");
+  } catch (e) {
+    print("❌ Error loading match pairings: $e");
   }
+}
 
   AllianceMatchPair? _findPairingForAlliance(int categoryId, int allianceId) {
     final Map<int, AllianceMatchPair> pairings =
@@ -457,28 +472,184 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
     return null;
   }
 
-  // Helper to get alliance loss count
-  int _getAllianceLossCount(int categoryId, int allianceId) {
-    final allResults = _bestOf3Results[categoryId] ?? {};
-    final allianceResults = allResults[allianceId] ?? [];
+int _getAllianceLossCount(int categoryId, int allianceId) {
+  final allResults = _bestOf3Results[categoryId] ?? {};
+  final pairings = _allianceMatchPairings[categoryId] ?? {};
+  
+  int lossCount = 0;
+  final Set<String> processedSeries = {}; // Track unique series to avoid double-counting
+  
+  for (final pair in pairings.values) {
+    final seriesKey = '${pair.roundNumber}_${pair.matchPosition}_${pair.bracketSide}';
+    if (processedSeries.contains(seriesKey)) continue;
+    
+    if (pair.alliance1Id == allianceId || pair.alliance2Id == allianceId) {
+      if (pair.alliance1Id == 0 || pair.alliance2Id == 0) continue;
+      
+      processedSeries.add(seriesKey);
+      
+      final opponentId = pair.alliance1Id == allianceId ? pair.alliance2Id : pair.alliance1Id;
+      
+      // Get results for this specific series
+      final allianceResults = (allResults[allianceId] ?? []).where(
+        (r) => r.matchRound == pair.roundNumber && 
+               r.matchPosition == pair.matchPosition &&
+               r.bracketSide == pair.bracketSide
+      ).toList();
+      
+      final opponentResults = (allResults[opponentId] ?? []).where(
+        (r) => r.matchRound == pair.roundNumber && 
+               r.matchPosition == pair.matchPosition &&
+               r.bracketSide == pair.bracketSide
+      ).toList();
+      
+      int allianceWins = 0;
+      int opponentWins = 0;
+      final Set<int> processedMatches = {};
+      
+      for (final r in allianceResults) {
+        if (r.isCompleted && !processedMatches.contains(r.matchNumber)) {
+          processedMatches.add(r.matchNumber);
+          if (r.winnerAllianceId == allianceId) allianceWins++;
+          else if (r.winnerAllianceId == opponentId) opponentWins++;
+        }
+      }
+      
+      for (final r in opponentResults) {
+        if (r.isCompleted && !processedMatches.contains(r.matchNumber)) {
+          processedMatches.add(r.matchNumber);
+          if (r.winnerAllianceId == allianceId) allianceWins++;
+          else if (r.winnerAllianceId == opponentId) opponentWins++;
+        }
+      }
+      
+      final bool seriesComplete = (allianceWins >= 2) || (opponentWins >= 2) || (processedMatches.length >= 3);
+      
+      // Only count loss if series is complete AND opponent has more wins
+      if (seriesComplete && opponentWins > allianceWins) {
+        lossCount++;
+      }
+    }
+  }
+  
+  return lossCount;
+}
 
-    final Set<String> completedSeries = {};
-    int losses = 0;
+Future<void> _reorderChampionshipStandings(int categoryId) async {
+  final standings = _championshipStandingsByCategory[categoryId];
+  if (standings == null || standings.isEmpty) return;
+  
+  // CRITICAL: Get fresh wins directly from database to ensure accuracy
+  Map<int, int> freshWins = {};
+  
+  try {
+    final conn = await DBHelper.getConnection();
+    final result = await conn.execute(
+      """
+      SELECT winner_alliance_id, COUNT(DISTINCT CONCAT(match_round, ':', match_position, ':', match_number, ':', bracket_side)) as win_count
+      FROM tbl_championship_bestof3
+      WHERE category_id = :catId AND is_completed = 1 AND winner_alliance_id != 0
+      GROUP BY winner_alliance_id
+      """,
+      {"catId": categoryId},
+    );
+    
+    for (final row in result.rows) {
+      final data = row.assoc();
+      final winnerId = int.parse(data['winner_alliance_id'].toString());
+      final winCount = int.parse(data['win_count'].toString());
+      freshWins[winnerId] = winCount;
+    }
+  } catch (e) {
+    print("⚠️ Could not get fresh wins from DB: $e");
+    // Fallback to cached wins
+    freshWins = _allianceWins[categoryId] ?? {};
+  }
+  
+  // Create a NEW list with updated scores
+  final updatedStandings = <ChampionshipAllianceStanding>[];
+  
+  for (final standing in standings) {
+    // Get wins from fresh data
+    final wins = freshWins[standing.allianceId] ?? 0;
+    
+    // Create a new standing object with updated totalScore
+    updatedStandings.add(
+      ChampionshipAllianceStanding(
+        allianceId: standing.allianceId,
+        allianceRank: standing.allianceRank,
+        captainName: standing.captainName,
+        partnerName: standing.partnerName,
+        matchScores: standing.matchScores,
+        totalScore: wins * 10,
+      ),
+    );
+  }
+  
+  // Sort by totalScore (highest first)
+  updatedStandings.sort((a, b) {
+    if (a.totalScore != b.totalScore) {
+      return b.totalScore.compareTo(a.totalScore);
+    }
+    return a.allianceRank.compareTo(b.allianceRank);
+  });
+  
+  // Update the UI
+  if (mounted) {
+    setState(() {
+      _championshipStandingsByCategory[categoryId] = updatedStandings;
+    });
+    print("🔄 Reordered: ${updatedStandings.map((s) => '#${s.allianceRank} (${s.totalScore} pts)').join(' → ')}");
+  }
+}
 
-    for (final result in allianceResults) {
-      if (result.isCompleted) {
-        final seriesKey =
-            '${result.matchPosition}_${result.opponentAllianceId}';
-        if (!completedSeries.contains(seriesKey)) {
-          completedSeries.add(seriesKey);
-          if (result.winnerAllianceId != allianceId) {
-            losses++;
-          }
+  // Helper to get the winner of a specific match pair
+  int? _getMatchWinnerForPair(
+    int categoryId,
+    AllianceMatchPair pair,
+    Map<int, List<BestOf3MatchResult>> results,
+  ) {
+    if (pair.alliance1Id == 0 || pair.alliance2Id == 0) return null;
+    
+    final alliance1Results = results[pair.alliance1Id] ?? [];
+    final alliance2Results = results[pair.alliance2Id] ?? [];
+    
+    final Set<int> completedMatches = {};
+    int winsA = 0;
+    int winsB = 0;
+    
+    for (final r in alliance1Results) {
+      if (r.matchRound == pair.roundNumber &&
+          r.matchPosition == pair.matchPosition &&
+          r.bracketSide == pair.bracketSide &&
+          r.isCompleted) {
+        completedMatches.add(r.matchNumber);
+        if (r.winnerAllianceId == pair.alliance1Id) winsA++;
+        else if (r.winnerAllianceId == pair.alliance2Id) winsB++;
+      }
+    }
+    
+    for (final r in alliance2Results) {
+      if (r.matchRound == pair.roundNumber &&
+          r.matchPosition == pair.matchPosition &&
+          r.bracketSide == pair.bracketSide &&
+          r.isCompleted) {
+        if (!completedMatches.contains(r.matchNumber)) {
+          completedMatches.add(r.matchNumber);
+          if (r.winnerAllianceId == pair.alliance1Id) winsA++;
+          else if (r.winnerAllianceId == pair.alliance2Id) winsB++;
         }
       }
     }
-
-    return losses;
+    
+    final bool seriesComplete = (winsA >= 2) || (winsB >= 2) || (completedMatches.length >= 3);
+    
+    if (seriesComplete) {
+      if (winsA > winsB) return pair.alliance1Id;
+      if (winsB > winsA) return pair.alliance2Id;
+    }
+    
+    return null;
   }
 
   // Load Best-of-3 results from database
@@ -688,9 +859,19 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
         "✅ Saved Best-of-3 match $matchNumber result for category $categoryId",
       );
 
-      // Reload data to get updated results
-      await _loadBestOf3Results(categoryId);
-      await _loadChampionshipStandings(categoryId);
+// Reload data to get updated results
+// Reload data to get updated results
+await _loadBestOf3Results(categoryId);
+await _loadChampionshipStandings(categoryId);
+
+await _reorderChampionshipStandings(categoryId);
+
+// Force UI refresh with a microtask delay
+if (mounted) {
+  await Future.microtask(() {
+    setState(() {});
+  });
+}
 
       // Now check if the series is finished after this save
       try {
@@ -770,6 +951,12 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
                 print("🎯 Calling updateBracketWinner for match $matchId with winner $seriesWinner");
                 await DBHelper.updateBracketWinner(matchId, seriesWinner);
                 print("✅ Propagated winner $seriesWinner to match $matchId");
+
+                await _loadChampionshipStandings(categoryId);
+
+if (mounted) {
+  setState(() {});
+}
               }
             } else {
               print("⚠️ Could not find match_id for series R${roundNumber}P${matchPosition} $bracketSide");
@@ -2258,6 +2445,18 @@ allRoundsData.sort((a, b) {
 
       final alliances = alliancesResult.rows.map((r) => r.assoc()).toList();
 
+      final Map<int, int> freshLosses = {};
+    for (final alliance in alliances) {
+      final allianceId = int.parse(alliance['alliance_id'].toString());
+      freshLosses[allianceId] = _getAllianceLossCount(categoryId, allianceId);
+    }
+    
+    if (mounted) {
+      setState(() {
+        _allianceLossesByCategory[categoryId] = freshLosses;
+      });
+    }
+
       if (alliances.isEmpty) {
         if (mounted) {
           setState(() {
@@ -2268,7 +2467,8 @@ allRoundsData.sort((a, b) {
         return;
       }
 
-      final List<ChampionshipAllianceStanding> standings = [];
+      // Create standings list
+final List<ChampionshipAllianceStanding> standings = [];
 
 for (final alliance in alliances) {
   final allianceId = int.parse(alliance['alliance_id'].toString());
@@ -2287,27 +2487,24 @@ for (final alliance in alliances) {
       captainName: alliance['captain_name'].toString(),
       partnerName: alliance['partner_name'].toString(),
       matchScores: {},
-      totalScore: totalMatchWins * 10,  // Each match win = 10 points
+      totalScore: totalMatchWins * 10,
     ),
   );
 }
 
-      standings.sort((a, b) {
-        if (a.totalScore != b.totalScore) {
-          return b.totalScore.compareTo(a.totalScore);
-        }
-        return a.allianceRank.compareTo(b.allianceRank);
-      });
 
-      if (mounted) {
-        setState(() {
-          _championshipStandingsByCategory[categoryId] = standings;
-          _isLoadingAllianceByCategory[categoryId] = false;
-        });
-      }
+// Set the standings FIRST (unsorted)
+if (mounted) {
+  setState(() {
+    _championshipStandingsByCategory[categoryId] = List.from(standings);
+    _isLoadingAllianceByCategory[categoryId] = false;
+  });
+}
 
-      // Compute alliance losses using authoritative bracket winners when available
-            // Compute alliance losses using ONLY Best-of-3 results (don't rely on bracket table)
+// NOW reorder based on current scores (this will recalculate totals and sort)
+await _reorderChampionshipStandings(categoryId);
+
+
       try {
         final Map<int, AllianceMatchPair> pairings =
             _allianceMatchPairings[categoryId] ?? {};
@@ -3027,109 +3224,106 @@ final int seriesWinsB = seriesWins['winsB'] ?? 0;
       "📊 Unique pairings: ${uniquePairings.length} (should be 15 for 8-team bracket)",
     );
 
-    // Track losses per alliance (each series loss = 1 loss)
-    final Map<int, int> allianceLosses = Map<int, int>.from(_allianceLossesByCategory[categoryId] ?? {});
+// CORRECTED BRACKET LOGIC - Proper categorization for double-elimination
+final Map<int, int> allianceLosses = Map<int, int>.from(_allianceLossesByCategory[categoryId] ?? {});
 
-    // If we don't have precomputed losses yet, fall back to deriving from Best-of-3 results
-    if (allianceLosses.isEmpty) {
-      for (final standing in standings) {
-        allianceLosses[standing.allianceId] = _getAllianceLossCount(categoryId, standing.allianceId);
-      }
-    }
-
-    // Now assign alliances to brackets based on loss count
-    final Set<int> winnersSet = {};
-    final Set<int> losersSet = {};
-    final Set<int> eliminatedSet = {};
-
-    for (final standing in standings) {
-      final int losses = allianceLosses[standing.allianceId] ?? 0;
-
-      if (losses == 0) {
-        winnersSet.add(standing.allianceId);
-      } else if (losses == 1) {
-        losersSet.add(standing.allianceId);
-      } else {
-        eliminatedSet.add(standing.allianceId);
-      }
-    }
-
-    // Build standings for each bracket
-    final List<ChampionshipAllianceStanding> winnersStandings = [];
-    final List<ChampionshipAllianceStanding> losersStandings = [];
-    final List<ChampionshipAllianceStanding> eliminatedStandings = [];
-
-    for (final standing in standings) {
-      if (winnersSet.contains(standing.allianceId)) {
-        winnersStandings.add(standing);
-      } else if (losersSet.contains(standing.allianceId)) {
-        losersStandings.add(standing);
-      } else if (eliminatedSet.contains(standing.allianceId)) {
-        eliminatedStandings.add(standing);
-      }
-    }
-
-    // Sort by points
-    winnersStandings.sort((a, b) {
-      if (a.totalScore != b.totalScore)
-        return b.totalScore.compareTo(a.totalScore);
-      return a.allianceRank.compareTo(b.allianceRank);
-    });
-
-    losersStandings.sort((a, b) {
-      if (a.totalScore != b.totalScore)
-        return b.totalScore.compareTo(a.totalScore);
-      return a.allianceRank.compareTo(b.allianceRank);
-    });
-
-    eliminatedStandings.sort((a, b) {
-      if (a.totalScore != b.totalScore)
-        return b.totalScore.compareTo(a.totalScore);
-      return a.allianceRank.compareTo(b.allianceRank);
-    });
-
-    
-// Replace the Grand Finals section (around line 2940-2965) with:
-
-final List<ChampionshipAllianceStanding> grandFinalStandings = [];
-
-// Only show Grand Finals when Winner's Bracket has 1 alliance AND Loser's Bracket has 1 alliance
-// This means the bracket has progressed to the final two alliances
-if (winnersStandings.length == 1 && losersStandings.length == 1) {
-  try {
-    final winnerChampion = winnersStandings[0];
-    final loserChampion = losersStandings[0];
-
-    if (!grandFinalStandings.any((g) => g.allianceId == winnerChampion.allianceId)) {
-      grandFinalStandings.add(winnerChampion);
-    }
-    if (!grandFinalStandings.any((g) => g.allianceId == loserChampion.allianceId)) {
-      grandFinalStandings.add(loserChampion);
-    }
-  } catch (_) {}
+// If we don't have precomputed losses yet, fall back to deriving from Best-of-3 results
+if (allianceLosses.isEmpty) {
+  for (final standing in standings) {
+    allianceLosses[standing.allianceId] = _getAllianceLossCount(categoryId, standing.allianceId);
+  }
 }
 
-    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    print("🏆 FINAL BRACKET STANDINGS:");
-    print(
-      "Winner's Bracket (${winnersStandings.length}): ${winnersStandings.map((s) => '#${s.allianceRank} (${s.captainName.split(' ')[0]})').join(', ')}",
-    );
-    print(
-      "Loser's Bracket (${losersStandings.length}): ${losersStandings.map((s) => '#${s.allianceRank} (${s.captainName.split(' ')[0]})').join(', ')}",
-    );
-    print(
-      "Eliminated: ${eliminatedSet.map((id) => '#${standings.firstWhere((s) => s.allianceId == id, orElse: () => standings[0]).allianceRank}').join(', ')}",
-    );
-    print(
-      "Losses: ${allianceLosses.entries.map((e) => '#${standings.firstWhere((s) => s.allianceId == e.key, orElse: () => standings[0]).allianceRank}:${e.value}').join(', ')}",
-    );
-    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+// Create a map of allianceId -> standing for quick lookup
+final Map<int, ChampionshipAllianceStanding> allianceIdToStanding = {
+  for (final s in standings) s.allianceId: s
+};
+
+// CORRECTED: Categorize purely by loss count (0 = Winners, 1 = Losers, 2+ = Eliminated)
+final List<ChampionshipAllianceStanding> winnersStandings = [];
+final List<ChampionshipAllianceStanding> losersStandings = [];
+final List<ChampionshipAllianceStanding> eliminatedStandings = [];
+final List<ChampionshipAllianceStanding> grandFinalStandings = [];
+
+// First, separate by loss count ONLY (don't use bracketSide from pairings)
+for (final standing in standings) {
+  final int allianceId = standing.allianceId;
+  final int losses = allianceLosses[allianceId] ?? 0;
+  
+  if (losses == 0) {
+    winnersStandings.add(standing);
+  } else if (losses == 1) {
+    losersStandings.add(standing);
+  } else {
+    eliminatedStandings.add(standing);
+  }
+}
+
+// Sort by totalScore (points) within each bracket - highest first
+winnersStandings.sort((a, b) {
+  if (a.totalScore != b.totalScore) {
+    return b.totalScore.compareTo(a.totalScore);
+  }
+  return a.allianceRank.compareTo(b.allianceRank);
+});
+losersStandings.sort((a, b) {
+  if (a.totalScore != b.totalScore) {
+    return b.totalScore.compareTo(a.totalScore);
+  }
+  return a.allianceRank.compareTo(b.allianceRank);
+});
+eliminatedStandings.sort((a, b) {
+  if (a.totalScore != b.totalScore) {
+    return b.totalScore.compareTo(a.totalScore);
+  }
+  return a.allianceRank.compareTo(b.allianceRank);
+});
+
+// Determine Grand Finals participants:
+// - Winner's Bracket champion: The LAST remaining undefeated alliance (should be only 1)
+// - Loser's Bracket champion: The LAST remaining alliance with 1 loss (should be only 1)
+// 
+// Key insight: In double-elimination, Grand Finals happen when:
+// - Winner's Bracket has 1 alliance left (they won all matches)
+// - Loser's Bracket has 1 alliance left (they won through loser's bracket)
+//
+// For now, if we have multiple alliances with 0 losses, they are still in Winner's Bracket
+// If we have multiple with 1 loss, they are still in Loser's Bracket
+
+// Check if Winner's Bracket final is complete (only 1 undefeated alliance left)
+final bool winnersFinalComplete = winnersStandings.length == 1;
+
+// Check if Loser's Bracket final is complete (only 1 alliance with 1 loss left)
+final bool losersFinalComplete = losersStandings.length == 1;
+
+// Move alliances to Grand Finals ONLY when both brackets have exactly 1 alliance each
+if (winnersFinalComplete && losersFinalComplete) {
+  // Both brackets have their champions - move them to Grand Finals
+  grandFinalStandings.addAll(winnersStandings);
+  grandFinalStandings.addAll(losersStandings);
+  winnersStandings.clear();
+  losersStandings.clear();
+} else if (winnersStandings.length == 1 && losersStandings.isEmpty && eliminatedStandings.isNotEmpty) {
+  // Special case: Winner's bracket champion is waiting for Loser's bracket champion to be determined
+  // Keep them in winnersStandings for now (they will show as "Winner's Bracket Champion - Waiting")
+  // Don't move to Grand Finals yet
+}
+
+// Debug output - show alliance IDs and ranks
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+print("🏆 FINAL BRACKET STANDINGS (CORRECTED):");
+print("Winner's Bracket Active (${winnersStandings.length}): ${winnersStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
+print("Loser's Bracket Active (${losersStandings.length}): ${losersStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
+print("Grand Finals (${grandFinalStandings.length}): ${grandFinalStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
+print("Eliminated (${eliminatedStandings.length}): ${eliminatedStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     return Expanded(
-      child: SingleChildScrollView(
-        scrollDirection: Axis.vertical,
-        child: Column(
-          children: [
+  child: SingleChildScrollView(
+    scrollDirection: Axis.vertical,
+    child: Column(
+      key: ValueKey('championship_${DateTime.now().millisecondsSinceEpoch}_${standings.length}'),
+      children: [
             // Main header
             Container(
               color: const Color(0xFF5C2ECC),
@@ -3388,7 +3582,7 @@ if (winnersStandings.length == 1 && losersStandings.length == 1) {
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Text(
-                              '${grandFinalStandings.length} MATCHES',
+                              '${grandFinalStandings.length}  ALLIANCES',
                               style: const TextStyle(
                                 color: Colors.white70,
                                 fontSize: 10,
@@ -3746,21 +3940,24 @@ if (winnersStandings.length == 1 && losersStandings.length == 1) {
             ),
           ),
           _buildBestOf3MatchCell(
-            categoryId: categoryId,
-            allianceId: standing.allianceId,
-            opponentId: opponentId,
-            matchNumber: 1,
-            roundNumber: roundNumber,
-            matchPosition: matchPosition,
-            allianceName: '${standing.captainName} / ${standing.partnerName}',
-            opponentName: opponentName,
-            bracketSide: bracketSide,
-            result: match1Result,
-            onRefresh: () {
-              _loadBestOf3Results(categoryId);
-              _loadChampionshipStandings(categoryId);
-            },
-          ),
+  categoryId: categoryId,
+  allianceId: standing.allianceId,
+  opponentId: opponentId,
+  matchNumber: 1,
+  roundNumber: roundNumber,
+  matchPosition: matchPosition,
+  allianceName: '${standing.captainName} / ${standing.partnerName}',
+  opponentName: opponentName,
+  bracketSide: bracketSide,
+  result: match1Result,
+  onRefresh: () async {
+    await _loadBestOf3Results(categoryId);
+    await _loadChampionshipStandings(categoryId);
+    await _reorderChampionshipStandings(categoryId);
+    if (mounted) setState(() {});
+  },
+),
+
           _buildBestOf3MatchCell(
             categoryId: categoryId,
             allianceId: standing.allianceId,
@@ -3772,10 +3969,12 @@ if (winnersStandings.length == 1 && losersStandings.length == 1) {
             opponentName: opponentName,
             bracketSide: bracketSide,
             result: match2Result,
-            onRefresh: () {
-              _loadBestOf3Results(categoryId);
-              _loadChampionshipStandings(categoryId);
-            },
+             onRefresh: () async {
+  await _loadBestOf3Results(categoryId);
+  await _loadChampionshipStandings(categoryId);
+  await _reorderChampionshipStandings(categoryId);
+  if (mounted) setState(() {});
+},
           ),
           _buildBestOf3MatchCell(
             categoryId: categoryId,
@@ -3788,36 +3987,38 @@ if (winnersStandings.length == 1 && losersStandings.length == 1) {
             opponentName: opponentName,
             bracketSide: bracketSide,
             result: match3Result,
-            onRefresh: () {
-              _loadBestOf3Results(categoryId);
-              _loadChampionshipStandings(categoryId);
-            },
+             onRefresh: () async {
+  await _loadBestOf3Results(categoryId);
+  await _loadChampionshipStandings(categoryId);
+  await _reorderChampionshipStandings(categoryId);
+  if (mounted) setState(() {});
+},
           ),
           Expanded(
-            flex: 2,
-            child: Center(
-              child: Column(
-                children: [
-                  Text(
-                    '${allianceWins * 10}',
-                    style: const TextStyle(
-                      color: Color(0xFFFFD700),
-                      fontWeight: FontWeight.bold,
-                      fontSize: 18,
-                    ),
-                  ),
-                  const Text(
-                    'pts',
-                    style: TextStyle(
-                      color: Colors.white38,
-                      fontSize: 9,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+  flex: 2,
+  child: Center(
+    child: Column(
+      children: [
+        Text(
+          '${standing.totalScore}',
+          style: const TextStyle(
+            color: Color(0xFFFFD700),
+            fontWeight: FontWeight.bold,
+            fontSize: 18,
           ),
+        ),
+        const Text(
+          'pts',
+          style: TextStyle(
+            color: Colors.white38,
+            fontSize: 9,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
+    ),
+  ),
+),
         ],
       ),
     );
