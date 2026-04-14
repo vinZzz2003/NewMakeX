@@ -110,16 +110,99 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
   }
 
   Future<void> _loadMatches({bool autoProcessByes = true}) async {
-    try {
-      final conn = await DBHelper.getConnection();
+  try {
+    final conn = await DBHelper.getConnection();
 
-      try {
-        await conn.execute("SELECT 1 FROM tbl_double_elimination LIMIT 1");
-      } catch (e) {
-        await _createDoubleEliminationTable(conn);
+    try {
+      await conn.execute("SELECT 1 FROM tbl_double_elimination LIMIT 1");
+    } catch (e) {
+      await _createDoubleEliminationTable(conn);
+    }
+
+    final result = await conn.execute(
+      """
+      SELECT 
+        match_id,
+        round_name,
+        match_position,
+        bracket_side,
+        round_number,
+        alliance1_id,
+        alliance2_id,
+        winner_alliance_id,
+        next_match_id_winner,
+        next_match_id_loser,
+        next_match_position_winner,
+        next_match_position_loser,
+        status,
+        schedule_time
+      FROM tbl_double_elimination
+      WHERE category_id = :catId
+      ORDER BY 
+        CASE bracket_side
+          WHEN 'winners' THEN 1
+          WHEN 'losers' THEN 2
+          WHEN 'grand' THEN 3
+        END,
+        round_number,
+        match_position
+    """,
+      {"catId": widget.categoryId},
+    );
+
+    final matches = result.rows.map((r) {
+      final data = r.assoc();
+
+      if (data['alliance1_id'] != null &&
+          int.parse(data['alliance1_id'].toString()) > 0) {
+        final alliance = _getAllianceById(
+          int.parse(data['alliance1_id'].toString()),
+        );
+        data['alliance1_name'] = alliance != null
+            ? '${alliance['captain_name']} / ${alliance['partner_name']}'
+            : 'Unknown';
+        data['alliance1_rank'] = alliance != null
+            ? '#${alliance['alliance_rank']}'
+            : '#?';
+      } else {
+        data['alliance1_name'] = 'TBD';
+        data['alliance1_rank'] = '';
       }
 
-      final result = await conn.execute(
+      if (data['alliance2_id'] != null &&
+          int.parse(data['alliance2_id'].toString()) > 0) {
+        final alliance = _getAllianceById(
+          int.parse(data['alliance2_id'].toString()),
+        );
+        data['alliance2_name'] = alliance != null
+            ? '${alliance['captain_name']} / ${alliance['partner_name']}'
+            : 'Unknown';
+        data['alliance2_rank'] = alliance != null
+            ? '#${alliance['alliance_rank']}'
+            : '#?';
+      } else {
+        data['alliance2_name'] = 'TBD';
+        data['alliance2_rank'] = '';
+      }
+
+      return data;
+    }).toList();
+
+    print("✅ Loaded ${matches.length} double elimination matches");
+
+    setState(() {
+      _matches = matches;
+      _isLoading = false;
+    });
+
+    // Fix Grand Finals reset if needed
+    await _fixGrandFinalsResetIfNeeded();
+
+    // CRITICAL FIX: Reload matches after fixing GF2
+    // This ensures GF2 appears in the UI
+    if (mounted && await _needsReloadAfterReset()) {
+      print("🔄 Reloading matches after GF2 creation...");
+      final refreshedResult = await conn.execute(
         """
         SELECT 
           match_id,
@@ -150,7 +233,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
         {"catId": widget.categoryId},
       );
 
-      final matches = result.rows.map((r) {
+      final refreshedMatches = refreshedResult.rows.map((r) {
         final data = r.assoc();
 
         if (data['alliance1_id'] != null &&
@@ -188,27 +271,211 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
         return data;
       }).toList();
 
-      print("✅ Loaded ${matches.length} double elimination matches");
-
       setState(() {
-        _matches = matches;
-        _isLoading = false;
+        _matches = refreshedMatches;
       });
-
-      if (autoProcessByes &&
-          _autoProcessEnabled &&
-          !_isResetting &&
-          _numAlliances > 4) {
-        await _autoProcessByeMatches();
-      }
-    } catch (e) {
-      print("Error loading matches: $e");
-      setState(() {
-        _isLoading = false;
-        _error = "Error loading matches: $e";
-      });
+      
+      print("✅ Reloaded ${refreshedMatches.length} matches after GF2 creation");
     }
+
+    if (autoProcessByes &&
+        _autoProcessEnabled &&
+        !_isResetting &&
+        _numAlliances > 4) {
+      await _autoProcessByeMatches();
+    }
+  } catch (e) {
+    print("Error loading matches: $e");
+    setState(() {
+      _isLoading = false;
+      _error = "Error loading matches: $e";
+    });
   }
+}
+
+// Add this helper method to check if reload is needed
+Future<bool> _needsReloadAfterReset() async {
+  final conn = await DBHelper.getConnection();
+  final result = await conn.execute(
+    "SELECT COUNT(*) as cnt FROM tbl_double_elimination WHERE category_id = :catId AND round_name = 'GF2'",
+    {"catId": widget.categoryId},
+  );
+  final count = int.parse(result.rows.first.assoc()['cnt']?.toString() ?? '0');
+  // Also check if GF2 is not already in our current matches list
+  final hasGf2InMatches = _matches.any((m) => m['round_name'] == 'GF2');
+  return count > 0 && !hasGf2InMatches;
+}
+
+
+  Future<bool> _fixGrandFinalsResetIfNeeded() async {
+  final conn = await DBHelper.getConnection();
+  bool gf2Created = false;
+  
+  try {
+    // Check if we have a GF1 completed with a winner
+    final gf1Result = await conn.execute(
+      """
+      SELECT match_id, alliance1_id, alliance2_id, winner_alliance_id, status
+      FROM tbl_double_elimination
+      WHERE category_id = :catId AND round_name = 'GF1' AND bracket_side = 'grand'
+      LIMIT 1
+      """,
+      {"catId": widget.categoryId},
+    );
+    
+    if (gf1Result.rows.isEmpty) return false;
+    
+    final gf1 = gf1Result.rows.first.assoc();
+    final gf1Winner = int.tryParse(gf1['winner_alliance_id']?.toString() ?? '0') ?? 0;
+    final gf1Status = gf1['status']?.toString() ?? 'pending';
+    
+    // Check if GF1 is completed
+    if (gf1Winner == 0 || gf1Status != 'completed') return false;
+    
+    final alliance1Id = int.parse(gf1['alliance1_id'].toString());
+    final alliance2Id = int.parse(gf1['alliance2_id'].toString());
+    
+    // CRITICAL: Determine if reset is needed
+    // Reset is needed ONLY if the Loser's Bracket champion won GF1
+    // First, find out which alliance is from Loser's Bracket
+    // Check Loser's Bracket final winner (L4_1)
+    final loserFinalResult = await conn.execute(
+      """
+      SELECT winner_alliance_id FROM tbl_double_elimination
+      WHERE category_id = :catId AND bracket_side = 'losers'
+      ORDER BY round_number DESC LIMIT 1
+      """,
+      {"catId": widget.categoryId},
+    );
+    
+    int loserBracketChampion = 0;
+    if (loserFinalResult.rows.isNotEmpty) {
+      loserBracketChampion = int.tryParse(
+        loserFinalResult.rows.first.assoc()['winner_alliance_id']?.toString() ?? '0'
+      ) ?? 0;
+    }
+    
+    // Determine if reset is needed
+    final bool needReset = (gf1Winner == loserBracketChampion && loserBracketChampion != 0);
+    
+    print("🎯 GF1 completed! Winner: $gf1Winner, Loser Bracket Champion: $loserBracketChampion, needReset: $needReset");
+    
+    if (!needReset) {
+  // Winner's bracket champion won - tournament is OVER
+  print("🎯 Winner's bracket champion won! Tournament complete.");
+  
+  // Check if GF2 already exists before deleting
+  final gf2ExistsCheck = await conn.execute(
+    "SELECT COUNT(*) as cnt FROM tbl_double_elimination WHERE category_id = :catId AND round_name = 'GF2'",
+    {"catId": widget.categoryId},
+  );
+  final hasGf2 = int.parse(gf2ExistsCheck.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
+  
+  if (hasGf2) {
+    print("⚠️ GF2 already exists but needReset=false - tournament may have been reset already!");
+    // Don't delete GF2, just mark tournament complete
+  } else {
+    // Only delete if GF2 doesn't exist
+    await DBHelper.executeDual(
+      """
+      DELETE FROM tbl_double_elimination 
+      WHERE category_id = :catId AND round_name = 'GF2' AND bracket_side = 'grand'
+      """,
+      {"catId": widget.categoryId},
+    );
+    await DBHelper.executeDual(
+      """
+      DELETE FROM tbl_explorer_double_elimination 
+      WHERE category_id = :catId AND round_name = 'GF2' AND bracket_side = 'grand'
+      """,
+      {"catId": widget.categoryId},
+    );
+  }
+  
+  // Mark tournament as complete
+  await DBHelper.executeDual(
+    """
+    UPDATE tbl_double_elimination 
+    SET status = 'completed'
+    WHERE category_id = :catId AND bracket_side = 'grand'
+    """,
+    {"catId": widget.categoryId},
+  );
+  
+  return false;
+}
+    
+    // Only proceed with GF2 creation if reset is needed
+    print("🎯 Loser's bracket champion won! Creating GF2 for reset match...");
+    
+    // Check if GF2 already exists
+    final gf2Result = await conn.execute(
+      """
+      SELECT match_id, alliance1_id, alliance2_id, status
+      FROM tbl_double_elimination
+      WHERE category_id = :catId AND round_name = 'GF2' AND bracket_side = 'grand'
+      LIMIT 1
+      """,
+      {"catId": widget.categoryId},
+    );
+    
+    if (gf2Result.rows.isEmpty) {
+      // Create GF2
+      await DBHelper.executeDual(
+        """
+        INSERT INTO tbl_double_elimination 
+          (category_id, round_name, match_position, bracket_side, round_number, 
+           alliance1_id, alliance2_id, status)
+        VALUES
+          (:catId, 'GF2', 2, 'grand', 2, :a1, :a2, 'pending')
+        """,
+        {"catId": widget.categoryId, "a1": alliance1Id, "a2": alliance2Id},
+      );
+      await DBHelper.executeDual(
+        """
+        INSERT INTO tbl_explorer_double_elimination 
+          (category_id, round_name, match_position, bracket_side, round_number, 
+           alliance1_id, alliance2_id, status)
+        VALUES
+          (:catId, 'GF2', 2, 'grand', 2, :a1, :a2, 'pending')
+        """,
+        {"catId": widget.categoryId, "a1": alliance1Id, "a2": alliance2Id},
+      );
+      print("✅ Created GF2 with Alliance $alliance1Id vs Alliance $alliance2Id");
+      gf2Created = true;
+    } else {
+      final gf2 = gf2Result.rows.first.assoc();
+      final gf2Alliance1 = int.tryParse(gf2['alliance1_id']?.toString() ?? '0') ?? 0;
+      final gf2Alliance2 = int.tryParse(gf2['alliance2_id']?.toString() ?? '0') ?? 0;
+      
+      // Check if GF2 is missing the second alliance
+      if (gf2Alliance2 == 0 || gf2Alliance2 == null) {
+        print("⚠️ GF2 is missing alliance2_id, fixing...");
+        await DBHelper.executeDual(
+          """
+          UPDATE tbl_double_elimination 
+          SET alliance1_id = :a1, alliance2_id = :a2, status = 'pending', winner_alliance_id = NULL
+          WHERE round_name = 'GF2' AND category_id = :catId
+          """,
+          {"a1": alliance1Id, "a2": alliance2Id, "catId": widget.categoryId},
+        );
+        await DBHelper.executeDual(
+          """
+          UPDATE tbl_explorer_double_elimination 
+          SET alliance1_id = :a1, alliance2_id = :a2, status = 'pending', winner_alliance_id = NULL
+          WHERE round_name = 'GF2' AND category_id = :catId
+          """,
+          {"a1": alliance1Id, "a2": alliance2Id, "catId": widget.categoryId},
+        );
+        gf2Created = true;
+      }
+    }
+  } catch (e) {
+    print("❌ Error fixing Grand Finals reset: $e");
+  }
+  
+  return gf2Created;
+}
 
   Future<void> _createDoubleEliminationTable(MySQLConnection conn) async {
     try {
@@ -243,14 +510,19 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
   }
 
   Map<String, dynamic>? _getAllianceById(int id) {
-    try {
-      return _alliances.firstWhere(
-        (a) => int.parse(a['alliance_id'].toString()) == id,
-      );
-    } catch (e) {
-      return null;
-    }
+  try {
+    return _alliances.firstWhere(
+      (a) => int.parse(a['alliance_id'].toString()) == id,
+    );
+  } catch (e) {
+    return null;
   }
+}
+
+String _getAllianceRank(int allianceId) {
+  final alliance = _getAllianceById(allianceId);
+  return alliance != null ? '#${alliance['alliance_rank']}' : '#?';
+}
 
   Future<void> _syncWithScheduleTab(int matchId, int winnerId) async {
     final conn = await DBHelper.getConnection();
@@ -383,7 +655,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
 
     if (updated) {
       print("✅ Bye matches auto-processed, reloading...");
-      await _loadMatches(autoProcessByes: false);
+      
       widget.onMatchUpdated?.call();
     }
   }
@@ -394,10 +666,11 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
     final matchDetails = await conn.execute(
       """
       SELECT round_name, next_match_id_winner, next_match_position_winner,
-             alliance1_id, alliance2_id
+             next_match_id_loser, next_match_position_loser,
+             alliance1_id, alliance2_id, bracket_side, category_id
       FROM tbl_double_elimination
       WHERE match_id = :matchId
-    """,
+      """,
       {"matchId": matchId},
     );
 
@@ -405,21 +678,160 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
 
     final data = matchDetails.rows.first.assoc();
     final roundName = data['round_name'] as String;
+    final bracketSide = data['bracket_side']?.toString() ?? '';
+    
+    // SPECIAL HANDLING FOR GRAND FINALS RESET
+if (roundName == 'GF1' && bracketSide == 'grand') {
+  // Get both alliances from GF1
+  final alliance1Id = int.parse(data['alliance1_id']?.toString() ?? '0');
+  final alliance2Id = int.parse(data['alliance2_id']?.toString() ?? '0');
+  final categoryId = int.parse(data['category_id']?.toString() ?? '0');
+  
+  print("🎯 GF1 completed! Winner: $winnerId");
+  
+  // Find out which alliance is from Loser's Bracket
+  final loserFinalResult = await conn.execute(
+    """
+    SELECT winner_alliance_id FROM tbl_double_elimination
+    WHERE category_id = :catId AND bracket_side = 'losers'
+    ORDER BY round_number DESC LIMIT 1
+    """,
+    {"catId": categoryId},
+  );
+  
+  int loserBracketChampion = 0;
+  if (loserFinalResult.rows.isNotEmpty) {
+    loserBracketChampion = int.tryParse(
+      loserFinalResult.rows.first.assoc()['winner_alliance_id']?.toString() ?? '0'
+    ) ?? 0;
+  }
+  
+  // Check if reset is needed (Loser's bracket champion won)
+  final bool needReset = (winnerId == loserBracketChampion && loserBracketChampion != 0);
+  
+  if (needReset) {
+  // NEED RESET - Create GF2 dynamically
+  print("🎯 Loser's bracket champion won! Creating GF2 for reset match...");
+  
+  // Temporarily disable foreign key checks
+  await conn.execute("SET FOREIGN_KEY_CHECKS = 0");
+  
+  try {
+    // Check if GF2 already exists
+    final gf2Check = await conn.execute(
+      "SELECT match_id FROM tbl_double_elimination WHERE category_id = :catId AND round_name = 'GF2'",
+      {"catId": categoryId},
+    );
+    
+    int gf2Id;
+    if (gf2Check.rows.isEmpty) {
+      // Create GF2
+      final insertResult = await DBHelper.executeDual(
+        """
+        INSERT INTO tbl_double_elimination 
+          (category_id, round_name, match_position, bracket_side, round_number, 
+           alliance1_id, alliance2_id, status)
+        VALUES
+          (:catId, 'GF2', 2, 'grand', 2, :a1, :a2, 'pending')
+        """,
+        {"catId": categoryId, "a1": alliance1Id, "a2": alliance2Id},
+      );
+      gf2Id = insertResult.lastInsertID.toInt();
+      
+      await DBHelper.executeDual(
+        """
+        INSERT INTO tbl_explorer_double_elimination 
+          (category_id, round_name, match_position, bracket_side, round_number, 
+           alliance1_id, alliance2_id, status)
+        VALUES
+          (:catId, 'GF2', 2, 'grand', 2, :a1, :a2, 'pending')
+        """,
+        {"catId": categoryId, "a1": alliance1Id, "a2": alliance2Id},
+      );
+      
+      print("✅ Created GF2 with ID $gf2Id");
+    } else {
+      gf2Id = int.parse(gf2Check.rows.first.assoc()['match_id'].toString());
+      await DBHelper.executeDual(
+        """
+        UPDATE tbl_double_elimination 
+        SET alliance1_id = :a1, alliance2_id = :a2, status = 'pending', winner_alliance_id = NULL
+        WHERE match_id = :gf2Id
+        """,
+        {"a1": alliance1Id, "a2": alliance2Id, "gf2Id": gf2Id},
+      );
+      print("✅ Updated existing GF2 with ID $gf2Id");
+    }
+    
+    // Update GF1's next winner pointer to GF2
+    await DBHelper.executeDual(
+      """
+      UPDATE tbl_double_elimination 
+      SET next_match_id_winner = :gf2Id, next_match_position_winner = 1
+      WHERE match_id = :matchId
+      """,
+      {"gf2Id": gf2Id, "matchId": matchId},
+    );
+    
+    // COMMIT the transaction
+    await conn.execute("COMMIT");
+    print("✅ GF2 creation committed to database");
+    
+  } catch (e) {
+    print("❌ Error creating GF2: $e");
+    await conn.execute("ROLLBACK");
+  } finally {
+    await conn.execute("SET FOREIGN_KEY_CHECKS = 1");
+  }
+} else {
+    // Winner's bracket champion won - tournament is OVER
+    print("🎯 Winner's bracket champion won! Tournament complete. No GF2 needed.");
+    
+    // Delete any existing GF2 if it was created by mistake
+    await DBHelper.executeDual(
+      """
+      DELETE FROM tbl_double_elimination 
+      WHERE category_id = :catId AND round_name = 'GF2' AND bracket_side = 'grand'
+      """,
+      {"catId": categoryId},
+    );
+    await DBHelper.executeDual(
+      """
+      DELETE FROM tbl_explorer_double_elimination 
+      WHERE category_id = :catId AND round_name = 'GF2' AND bracket_side = 'grand'
+      """,
+      {"catId": categoryId},
+    );
+    
+    // Mark tournament as complete
+    await DBHelper.executeDual(
+      """
+      UPDATE tbl_double_elimination 
+      SET status = 'completed'
+      WHERE category_id = :catId AND bracket_side = 'grand'
+      """,
+      {"catId": categoryId},
+    );
+  }
+  
+  return; // Don't continue with normal propagation
+}
+
+    // NORMAL PROPAGATION LOGIC FOR OTHER MATCHES
     final alliance1Id = int.parse(data['alliance1_id']?.toString() ?? '0');
     final alliance2Id = int.parse(data['alliance2_id']?.toString() ?? '0');
     final loserId = winnerId == alliance1Id ? alliance2Id : alliance1Id;
 
     print("📊 Propagating from $roundName: winner=$winnerId, loser=$loserId");
 
+    // Propagate winner to next match
     final nextMatchIdWinnerStr = await _getNextMatchId(conn, matchId, 'winner');
     if (nextMatchIdWinnerStr != null && nextMatchIdWinnerStr != '0') {
       final nextMatchId = int.tryParse(nextMatchIdWinnerStr);
       if (nextMatchId != null) {
         final winnerPos = await _getNextMatchPosition(conn, matchId, 'winner');
 
-        print(
-          "🎯 Propagating winner to match ID $nextMatchId at position $winnerPos",
-        );
+        print("🎯 Propagating winner to match ID $nextMatchId at position $winnerPos");
 
         if (winnerPos == 1) {
           await DBHelper.executeDual(
@@ -427,64 +839,44 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
             UPDATE tbl_double_elimination 
             SET alliance1_id = :winnerId
             WHERE match_id = :nextMatchId AND (alliance1_id IS NULL OR alliance1_id = 0)
-          """,
+            """,
             {"winnerId": winnerId, "nextMatchId": nextMatchId},
           );
-        try {
-          final verify = await conn.execute(
-            "SELECT alliance1_id FROM tbl_double_elimination WHERE match_id = :nextMatchId LIMIT 1",
-            {"nextMatchId": nextMatchId},
-          );
-          if (verify.rows.isNotEmpty) {
-            final current = int.tryParse(verify.rows.first.assoc()['alliance1_id']?.toString() ?? '0') ?? 0;
-            if (current == 0) {
-              await DBHelper.executeDual(
-                """
-                UPDATE tbl_double_elimination 
-                SET alliance1_id = :winnerId
-                WHERE match_id = :nextMatchId AND (alliance1_id IS NULL OR alliance1_id = 0)
-              """,
-                {"winnerId": winnerId, "nextMatchId": nextMatchId},
-              );
-            }
-          }
-        } catch (e) {
-          print('ℹ️ verify winner propagation failed (UI): $e');
-        }
         } else {
           await DBHelper.executeDual(
             """
             UPDATE tbl_double_elimination 
             SET alliance2_id = :winnerId
             WHERE match_id = :nextMatchId AND (alliance2_id IS NULL OR alliance2_id = 0)
-          """,
+            """,
             {"winnerId": winnerId, "nextMatchId": nextMatchId},
           );
-        try {
-          final verify = await conn.execute(
-            "SELECT alliance2_id FROM tbl_double_elimination WHERE match_id = :nextMatchId LIMIT 1",
-            {"nextMatchId": nextMatchId},
-          );
-          if (verify.rows.isNotEmpty) {
-            final current = int.tryParse(verify.rows.first.assoc()['alliance2_id']?.toString() ?? '0') ?? 0;
-            if (current == 0) {
-              await DBHelper.executeDual(
-                """
-                UPDATE tbl_double_elimination 
-                SET alliance2_id = :winnerId
-                WHERE match_id = :nextMatchId AND (alliance2_id IS NULL OR alliance2_id = 0)
-              """,
-                {"winnerId": winnerId, "nextMatchId": nextMatchId},
-              );
-            }
-          }
-        } catch (e) {
-          print('ℹ️ verify winner propagation failed (UI): $e');
         }
+        
+        // Also update explorer table
+        if (winnerPos == 1) {
+          await DBHelper.executeDual(
+            """
+            UPDATE tbl_explorer_double_elimination 
+            SET alliance1_id = :winnerId
+            WHERE match_id = :nextMatchId AND (alliance1_id IS NULL OR alliance1_id = 0)
+            """,
+            {"winnerId": winnerId, "nextMatchId": nextMatchId},
+          );
+        } else {
+          await DBHelper.executeDual(
+            """
+            UPDATE tbl_explorer_double_elimination 
+            SET alliance2_id = :winnerId
+            WHERE match_id = :nextMatchId AND (alliance2_id IS NULL OR alliance2_id = 0)
+            """,
+            {"winnerId": winnerId, "nextMatchId": nextMatchId},
+          );
         }
       }
     }
 
+    // Propagate loser to next match
     if (loserId > 0) {
       final nextMatchIdLoserStr = await _getNextMatchId(conn, matchId, 'loser');
       if (nextMatchIdLoserStr != null && nextMatchIdLoserStr != '0') {
@@ -492,9 +884,7 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
         if (nextMatchIdLoser != null) {
           final loserPos = await _getNextMatchPosition(conn, matchId, 'loser');
 
-          print(
-            "🎯 Propagating loser to match ID $nextMatchIdLoser at position $loserPos",
-          );
+          print("🎯 Propagating loser to match ID $nextMatchIdLoser at position $loserPos");
 
           if (loserPos == 1) {
             await DBHelper.executeDual(
@@ -502,60 +892,39 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
               UPDATE tbl_double_elimination 
               SET alliance1_id = :loserId
               WHERE match_id = :nextMatchId AND (alliance1_id IS NULL OR alliance1_id = 0)
-            """,
+              """,
               {"loserId": loserId, "nextMatchId": nextMatchIdLoser},
             );
-          try {
-            final verify = await conn.execute(
-              "SELECT alliance1_id FROM tbl_double_elimination WHERE match_id = :nextMatchId LIMIT 1",
-              {"nextMatchId": nextMatchIdLoser},
-            );
-            if (verify.rows.isNotEmpty) {
-              final current = int.tryParse(verify.rows.first.assoc()['alliance1_id']?.toString() ?? '0') ?? 0;
-              if (current == 0) {
-                await DBHelper.executeDual(
-                  """
-                  UPDATE tbl_double_elimination 
-                  SET alliance1_id = :loserId
-                  WHERE match_id = :nextMatchId AND (alliance1_id IS NULL OR alliance1_id = 0)
-                """,
-                  {"loserId": loserId, "nextMatchId": nextMatchIdLoser},
-                );
-              }
-            }
-          } catch (e) {
-            print('ℹ️ verify loser propagation failed (UI): $e');
-          }
           } else {
             await DBHelper.executeDual(
               """
               UPDATE tbl_double_elimination 
               SET alliance2_id = :loserId
               WHERE match_id = :nextMatchId AND (alliance2_id IS NULL OR alliance2_id = 0)
-            """,
+              """,
               {"loserId": loserId, "nextMatchId": nextMatchIdLoser},
             );
-          try {
-            final verify = await conn.execute(
-              "SELECT alliance2_id FROM tbl_double_elimination WHERE match_id = :nextMatchId LIMIT 1",
-              {"nextMatchId": nextMatchIdLoser},
-            );
-            if (verify.rows.isNotEmpty) {
-              final current = int.tryParse(verify.rows.first.assoc()['alliance2_id']?.toString() ?? '0') ?? 0;
-              if (current == 0) {
-                await DBHelper.executeDual(
-                  """
-                  UPDATE tbl_double_elimination 
-                  SET alliance2_id = :loserId
-                  WHERE match_id = :nextMatchId AND (alliance2_id IS NULL OR alliance2_id = 0)
-                """,
-                  {"loserId": loserId, "nextMatchId": nextMatchIdLoser},
-                );
-              }
-            }
-          } catch (e) {
-            print('ℹ️ verify loser propagation failed (UI): $e');
           }
+          
+          // Also update explorer table
+          if (loserPos == 1) {
+            await DBHelper.executeDual(
+              """
+              UPDATE tbl_explorer_double_elimination 
+              SET alliance1_id = :loserId
+              WHERE match_id = :nextMatchId AND (alliance1_id IS NULL OR alliance1_id = 0)
+              """,
+              {"loserId": loserId, "nextMatchId": nextMatchIdLoser},
+            );
+          } else {
+            await DBHelper.executeDual(
+              """
+              UPDATE tbl_explorer_double_elimination 
+              SET alliance2_id = :loserId
+              WHERE match_id = :nextMatchId AND (alliance2_id IS NULL OR alliance2_id = 0)
+              """,
+              {"loserId": loserId, "nextMatchId": nextMatchIdLoser},
+            );
           }
         }
       }
@@ -606,81 +975,87 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
   }
 
   Future<void> _resetBracket() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF2D0E7A),
-        title: const Text(
-          'Reset Bracket?',
-          style: TextStyle(color: Colors.white),
-        ),
-        content: const Text(
-          'This will reset all match results and clear all winners. This action cannot be undone.',
-          style: TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text(
-              'CANCEL',
-              style: TextStyle(color: Colors.white54),
-            ),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text(
-              'RESET',
-              style: TextStyle(color: Colors.redAccent),
-            ),
-          ),
-        ],
+  final confirm = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: const Color(0xFF2D0E7A),
+      title: const Text(
+        'Reset Bracket?',
+        style: TextStyle(color: Colors.white),
       ),
+      content: const Text(
+        'This will reset all match results and clear all winners. This action cannot be undone.',
+        style: TextStyle(color: Colors.white70),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text(
+            'CANCEL',
+            style: TextStyle(color: Colors.white54),
+          ),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text(
+            'RESET',
+            style: TextStyle(color: Colors.redAccent),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  if (confirm != true) return;
+
+  setState(() => _isResetting = true);
+
+  try {
+    _autoProcessEnabled = false;
+
+    // Reload settings and alliances to ensure fresh data
+    final settings = await DBHelper.loadChampionshipSettings(widget.categoryId);
+    _settings = settings ?? ChampionshipSettings.defaults(widget.categoryId);
+    
+    await _loadAlliances(); // Reload alliances to get current state
+
+    final conn = await DBHelper.getConnection();
+    await DBHelper.executeDual(
+      "DELETE FROM tbl_double_elimination WHERE category_id = :catId",
+      {"catId": widget.categoryId},
+    );
+    await DBHelper.executeDual(
+      "DELETE FROM tbl_championship_schedule WHERE category_id = :catId",
+      {"catId": widget.categoryId},
     );
 
-    if (confirm != true) return;
+    await _generateFlexibleBracket();
 
-    setState(() => _isResetting = true);
-
-    try {
-      _autoProcessEnabled = false;
-
-      final conn = await DBHelper.getConnection();
-      await DBHelper.executeDual(
-        "DELETE FROM tbl_double_elimination WHERE category_id = :catId",
-        {"catId": widget.categoryId},
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✅ Bracket reset successfully'),
+          backgroundColor: Colors.green,
+        ),
       );
-      await DBHelper.executeDual(
-        "DELETE FROM tbl_championship_schedule WHERE category_id = :catId",
-        {"catId": widget.categoryId},
-      );
-
-      await _generateFlexibleBracket();
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('✅ Bracket reset successfully'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    } catch (e) {
-      print("❌ Error resetting bracket: $e");
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('❌ Error resetting bracket: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    } finally {
-      setState(() {
-        _isResetting = false;
-        _autoProcessEnabled = true;
-      });
     }
+  } catch (e) {
+    print("❌ Error resetting bracket: $e");
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Error resetting bracket: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  } finally {
+    setState(() {
+      _isResetting = false;
+      _autoProcessEnabled = true;
+    });
   }
+}
 
   Future<void> _generateDoubleEliminationBracket() async {
     if (_settings == null) return;
@@ -745,146 +1120,267 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
   }
 
   Future<void> _generateFlexibleBracket() async {
-    final conn = await DBHelper.getConnection();
+  final conn = await DBHelper.getConnection();
 
-    await _createDoubleEliminationTable(conn);
+  await _createDoubleEliminationTable(conn);
 
-    await DBHelper.executeDual(
-      "DELETE FROM tbl_double_elimination WHERE category_id = :catId",
-      {"catId": widget.categoryId},
-    );
+  await DBHelper.executeDual(
+    "DELETE FROM tbl_double_elimination WHERE category_id = :catId",
+    {"catId": widget.categoryId},
+  );
 
-    _bracketSize = 1;
-    while (_bracketSize < _numAlliances) {
-      _bracketSize <<= 1;
-    }
-
-    _totalRounds = (math.log(_bracketSize) / math.ln2).ceil();
-
-    print(
-      "🎯 Bracket size: $_bracketSize (next power of 2 after $_numAlliances)",
-    );
-    print("🎯 Total rounds: $_totalRounds");
-
-    columnWidth = 280 + (_totalRounds * 8).toDouble();
-
-    // Standard tournament seeding
-    List<int?> seededAlliances = List.filled(_bracketSize, null);
-    List<int> allianceIds = _alliances
-        .map((a) => int.parse(a['alliance_id'].toString()))
-        .toList();
-
-    if (_numAlliances == 8) {
-      // 8-team seeding: 1-8, 4-5, 3-6, 2-7
-      List<int> seedingOrder = [0, 7, 3, 4, 2, 5, 1, 6];
-      for (int i = 0; i < allianceIds.length; i++) {
-        int position = seedingOrder[i];
-        if (position < _bracketSize) {
-          seededAlliances[position] = allianceIds[i];
-        }
-      }
-    } else if (_numAlliances == 4) {
-      // 4-team seeding: 1-4, 2-3
-      List<int> seedingOrder = [0, 3, 1, 2];
-      for (int i = 0; i < allianceIds.length; i++) {
-        int position = seedingOrder[i];
-        if (position < _bracketSize) {
-          seededAlliances[position] = allianceIds[i];
-        }
-      }
-    } else {
-      // Generic seeding
-      for (int i = 0; i < allianceIds.length; i++) {
-        int allianceId = allianceIds[i];
-        int position;
-        if (i < allianceIds.length / 2) {
-          position = i * 2;
-        } else {
-          int pairIndex = allianceIds.length - 1 - i;
-          position = pairIndex * 2 + 1;
-        }
-        if (position < _bracketSize) {
-          seededAlliances[position] = allianceId;
-        }
-      }
-    }
-
-    print("📊 Seeded alliances: $seededAlliances");
-    int byeCount = seededAlliances.where((id) => id == null).length;
-    print("📊 Number of byes: $byeCount");
-
-    _matchNodes = {};
-    await _generateCorrectMatchNodes(seededAlliances);
-    await _insertAllMatches(conn);
-
-    print("✅ Bracket generated successfully");
-
-    await _loadMatches(autoProcessByes: false);
+  // Ensure settings is loaded
+  if (_settings == null) {
+    final settings = await DBHelper.loadChampionshipSettings(widget.categoryId);
+    _settings = settings ?? ChampionshipSettings.defaults(widget.categoryId);
   }
 
-  Future<void> _generateCorrectMatchNodes(List<int?> seededAlliances) async {
-    int matchIndex = 0;
+  // SPECIAL CASE: Only 2 alliances
+  if (_numAlliances == 2) {
+    print("🎯 Only 2 alliances detected - creating single final match");
+    
+    final allianceIds = _alliances
+        .map((a) => int.parse(a['alliance_id'].toString()))
+        .toList();
+    
+    await conn.execute("SET FOREIGN_KEY_CHECKS = 0");
+    try {
+      await DBHelper.executeDual(
+        """
+        INSERT INTO tbl_double_elimination 
+          (category_id, round_name, match_position, bracket_side, round_number, 
+           alliance1_id, alliance2_id, schedule_time, status)
+        VALUES
+          (:catId, 'FINAL', 1, 'grand', 1, 
+           :a1, :a2, :time, 'pending')
+        """,
+        {
+          "catId": widget.categoryId,
+          "a1": allianceIds[0],
+          "a2": allianceIds[1],
+          "time": _settings!.startTimeString,
+        },
+      );
+    } finally {
+      await conn.execute("SET FOREIGN_KEY_CHECKS = 1");
+    }
+    
+    print("✅ Created single final match for 2 alliances");
+    await _loadMatches(autoProcessByes: false);
+    return;
+  }
 
-    // STEP 1: Create Winner's Bracket matches
-    print("🎯 Creating Winner's Bracket");
+  _bracketSize = 1;
+  while (_bracketSize < _numAlliances) {
+    _bracketSize <<= 1;
+  }
 
-    // Create first round matches (W1_1 to W1_4)
-    for (int i = 0; i < _bracketSize; i += 2) {
-      matchIndex++;
-      int? a1 = seededAlliances[i];
-      int? a2 = seededAlliances[i + 1];
+  _totalRounds = (math.log(_bracketSize) / math.ln2).ceil();
 
-      bool hasTeam = (a1 != null && a1 > 0) || (a2 != null && a2 > 0);
+  print(
+    "🎯 Bracket size: $_bracketSize (next power of 2 after $_numAlliances)",
+  );
+  print("🎯 Total rounds: $_totalRounds");
 
-      if (!hasTeam) {
-        print("⚠️ Skipping match W1_$matchIndex - no teams");
-        continue;
+  columnWidth = 280 + (_totalRounds * 8).toDouble();
+
+  // Standard tournament seeding
+  List<int?> seededAlliances = List.filled(_bracketSize, null);
+  List<int> allianceIds = _alliances
+      .map((a) => int.parse(a['alliance_id'].toString()))
+      .toList();
+
+  if (_numAlliances == 8) {
+    // 8-team seeding: 1-8, 4-5, 3-6, 2-7
+    List<int> seedingOrder = [0, 7, 3, 4, 2, 5, 1, 6];
+    for (int i = 0; i < allianceIds.length; i++) {
+      int position = seedingOrder[i];
+      if (position < _bracketSize) {
+        seededAlliances[position] = allianceIds[i];
       }
-
-      String matchId = 'W1_$matchIndex';
-
-      _matchNodes[matchId] = {
-        'id': matchId,
-        'bracketSide': 'winners',
-        'roundNumber': 1,
-        'matchPosition': matchIndex,
-        'alliance1Id': a1,
-        'alliance2Id': a2,
-        'nextWinnerId': null,
-        'nextWinnerPos': null,
-        'nextLoserId': null,
-        'nextLoserPos': null,
-        'isByeMatch': (a1 == null || a1 == 0) || (a2 == null || a2 == 0),
-      };
     }
-
-    int actualFirstRoundMatches = _matchNodes.length;
-    print("📊 Actual first round matches: $actualFirstRoundMatches");
-
-    // Create W2 (Semi-finals) - 2 matches
-    for (int i = 0; i < 2; i++) {
-      String matchId = 'W2_${i + 1}';
-      _matchNodes[matchId] = {
-        'id': matchId,
-        'bracketSide': 'winners',
-        'roundNumber': 2,
-        'matchPosition': i + 1,
-        'alliance1Id': null,
-        'alliance2Id': null,
-        'nextWinnerId': null,
-        'nextWinnerPos': null,
-        'nextLoserId': null,
-        'nextLoserPos': null,
-        'isByeMatch': false,
-      };
+  } else if (_numAlliances == 4) {
+    // 4-team seeding: 1-4, 2-3
+    List<int> seedingOrder = [0, 3, 1, 2];
+    for (int i = 0; i < allianceIds.length; i++) {
+      int position = seedingOrder[i];
+      if (position < _bracketSize) {
+        seededAlliances[position] = allianceIds[i];
+      }
     }
+  } else {
+    // Generic seeding
+    for (int i = 0; i < allianceIds.length; i++) {
+      int allianceId = allianceIds[i];
+      int position;
+      if (i < allianceIds.length / 2) {
+        position = i * 2;
+      } else {
+        int pairIndex = allianceIds.length - 1 - i;
+        position = pairIndex * 2 + 1;
+      }
+      if (position < _bracketSize) {
+        seededAlliances[position] = allianceId;
+      }
+    }
+  }
 
-    // Create W3 (Winner's Final) - 1 match
-    _matchNodes['W3_1'] = {
-      'id': 'W3_1',
+  print("📊 Seeded alliances: $seededAlliances");
+  int byeCount = seededAlliances.where((id) => id == null).length;
+  print("📊 Number of byes: $byeCount");
+
+  _matchNodes = {};
+  await _generateCorrectMatchNodes(seededAlliances);
+  await _insertAllMatches(conn);
+
+  print("✅ Bracket generated successfully");
+
+  await _loadMatches(autoProcessByes: false);
+}
+
+  Future<void> _generateCorrectMatchNodes(List<int?> seededAlliances) async {
+  int matchIndex = 0;
+
+  // STEP 1: Create Winner's Bracket matches
+  print("🎯 Creating Winner's Bracket");
+
+  if (_numAlliances == 4) {
+  print("🎯 Generating 4-team double elimination bracket (using working 8-team pattern)");
+  
+  // Winner's Semi-finals (WSF_1 and WSF_2)
+  for (int i = 0; i < 2; i++) {
+    int? a1 = seededAlliances[i * 2];
+    int? a2 = seededAlliances[i * 2 + 1];
+    
+    String matchId = i == 0 ? 'WSF_1' : 'WSF_2';
+    
+    _matchNodes[matchId] = {
+      'id': matchId,
       'bracketSide': 'winners',
-      'roundNumber': 3,
-      'matchPosition': 1,
+      'roundNumber': 1,
+      'matchPosition': i + 1,
+      'alliance1Id': a1 != null && a1 > 0 ? a1 : null,
+      'alliance2Id': a2 != null && a2 > 0 ? a2 : null,
+      'nextWinnerId': i == 0 ? 'WF_1' : 'WF_1',
+      'nextWinnerPos': i == 0 ? 1 : 2,
+      'nextLoserId': i == 0 ? 'LSF_1' : 'LSF_1',
+      'nextLoserPos': i == 0 ? 1 : 2,
+      'isByeMatch': (a1 == null || a1 == 0) || (a2 == null || a2 == 0),
+    };
+  }
+  
+  // Winner's Final (WF_1) - MATCHES 8-TEAM PATTERN
+  _matchNodes['WF_1'] = {
+    'id': 'WF_1',
+    'bracketSide': 'winners',
+    'roundNumber': 2,
+    'matchPosition': 1,
+    'alliance1Id': null,
+    'alliance2Id': null,
+    'nextWinnerId': 'GF1',  // CRITICAL: Use 'GF1' not 'GF_1'
+    'nextWinnerPos': 1,
+    'nextLoserId': 'LF_1',
+    'nextLoserPos': 2,
+    'isByeMatch': false,
+  };
+  
+  // Loser's Semi-final (LSF_1)
+  _matchNodes['LSF_1'] = {
+    'id': 'LSF_1',
+    'bracketSide': 'losers',
+    'roundNumber': 1,
+    'matchPosition': 1,
+    'alliance1Id': null,
+    'alliance2Id': null,
+    'nextWinnerId': 'LF_1',
+    'nextWinnerPos': 1,
+    'nextLoserId': null,
+    'nextLoserPos': null,
+    'isByeMatch': false,
+  };
+  
+  // Loser's Final (LF_1)
+  _matchNodes['LF_1'] = {
+    'id': 'LF_1',
+    'bracketSide': 'losers',
+    'roundNumber': 2,
+    'matchPosition': 1,
+    'alliance1Id': null,
+    'alliance2Id': null,
+    'nextWinnerId': 'GF1',  // CRITICAL: Use 'GF1' not 'GF_1'
+    'nextWinnerPos': 2,
+    'nextLoserId': null,
+    'nextLoserPos': null,
+    'isByeMatch': false,
+  };
+  
+  // Grand Final 1 (GF1) - MATCHES 8-TEAM PATTERN
+  _matchNodes['GF1'] = {
+    'id': 'GF1',
+    'bracketSide': 'grand',
+    'roundNumber': 1,
+    'matchPosition': 1,
+    'alliance1Id': null,
+    'alliance2Id': null,
+    'nextWinnerId': null,  // Will be set to GF2 if reset needed
+    'nextWinnerPos': null,
+    'nextLoserId': null,
+    'nextLoserPos': null,
+    'isByeMatch': false,
+  };
+  
+
+  // by updateBracketWinner when loser's bracket champion wins GF1
+  
+  print("📊 Generated ${_matchNodes.length} matches for 4-team bracket");
+  print("   Winner's Bracket: WSF_1, WSF_2, WF_1");
+  print("   Loser's Bracket: LSF_1, LF_1");
+  print("   Grand Finals: GF1 (GF2 created dynamically if reset needed)");
+  return;
+}
+
+  // Original logic for 8+ teams (starts here)
+  // Create first round matches (W1_1 to W1_4)
+  for (int i = 0; i < _bracketSize; i += 2) {
+    matchIndex++;
+    int? a1 = seededAlliances[i];
+    int? a2 = seededAlliances[i + 1];
+
+    bool hasTeam = (a1 != null && a1 > 0) || (a2 != null && a2 > 0);
+
+    if (!hasTeam) {
+      print("⚠️ Skipping match W1_$matchIndex - no teams");
+      continue;
+    }
+
+    String matchId = 'W1_$matchIndex';
+
+    _matchNodes[matchId] = {
+      'id': matchId,
+      'bracketSide': 'winners',
+      'roundNumber': 1,
+      'matchPosition': matchIndex,
+      'alliance1Id': a1 != null && a1 > 0 ? a1 : null,
+      'alliance2Id': a2 != null && a2 > 0 ? a2 : null,
+      'nextWinnerId': null,
+      'nextWinnerPos': null,
+      'nextLoserId': null,
+      'nextLoserPos': null,
+      'isByeMatch': (a1 == null || a1 == 0) || (a2 == null || a2 == 0),
+    };
+  }
+
+  int actualFirstRoundMatches = _matchNodes.length;
+  print("📊 Actual first round matches: $actualFirstRoundMatches");
+
+  // Create W2 (Semi-finals) - 2 matches
+  for (int i = 0; i < 2; i++) {
+    String matchId = 'W2_${i + 1}';
+    _matchNodes[matchId] = {
+      'id': matchId,
+      'bracketSide': 'winners',
+      'roundNumber': 2,
+      'matchPosition': i + 1,
       'alliance1Id': null,
       'alliance2Id': null,
       'nextWinnerId': null,
@@ -893,71 +1389,56 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
       'nextLoserPos': null,
       'isByeMatch': false,
     };
+  }
 
-    // Connect Winner's bracket
-    // W1_1 and W1_2 winners go to W2_1
+  // Create W3 (Winner's Final) - 1 match
+  _matchNodes['W3_1'] = {
+    'id': 'W3_1',
+    'bracketSide': 'winners',
+    'roundNumber': 3,
+    'matchPosition': 1,
+    'alliance1Id': null,
+    'alliance2Id': null,
+    'nextWinnerId': null,
+    'nextWinnerPos': null,
+    'nextLoserId': null,
+    'nextLoserPos': null,
+    'isByeMatch': false,
+  };
+
+  // Connect Winner's bracket (only if nodes exist)
+  if (_matchNodes.containsKey('W1_1') && _matchNodes.containsKey('W1_2')) {
     _matchNodes['W1_1']!['nextWinnerId'] = 'W2_1';
     _matchNodes['W1_1']!['nextWinnerPos'] = 1;
     _matchNodes['W1_2']!['nextWinnerId'] = 'W2_1';
     _matchNodes['W1_2']!['nextWinnerPos'] = 2;
+  }
 
-    // W1_3 and W1_4 winners go to W2_2
+  if (_matchNodes.containsKey('W1_3') && _matchNodes.containsKey('W1_4')) {
     _matchNodes['W1_3']!['nextWinnerId'] = 'W2_2';
     _matchNodes['W1_3']!['nextWinnerPos'] = 1;
     _matchNodes['W1_4']!['nextWinnerId'] = 'W2_2';
     _matchNodes['W1_4']!['nextWinnerPos'] = 2;
+  }
 
-    // W2_1 and W2_2 winners go to W3_1
+  if (_matchNodes.containsKey('W2_1') && _matchNodes.containsKey('W2_2')) {
     _matchNodes['W2_1']!['nextWinnerId'] = 'W3_1';
     _matchNodes['W2_1']!['nextWinnerPos'] = 1;
     _matchNodes['W2_2']!['nextWinnerId'] = 'W3_1';
     _matchNodes['W2_2']!['nextWinnerPos'] = 2;
+  }
 
-    // STEP 2: Create Loser's Bracket matches
-    print("🎯 Creating Loser's Bracket");
+  // STEP 2: Create Loser's Bracket matches
+  print("🎯 Creating Loser's Bracket");
 
-    // L1 (Loser's Round 1) - 2 matches (4 first-round losers)
-    for (int i = 0; i < 2; i++) {
-      String matchId = 'L1_${i + 1}';
-      _matchNodes[matchId] = {
-        'id': matchId,
-        'bracketSide': 'losers',
-        'roundNumber': 1,
-        'matchPosition': i + 1,
-        'alliance1Id': null,
-        'alliance2Id': null,
-        'nextWinnerId': null,
-        'nextWinnerPos': null,
-        'nextLoserId': null,
-        'nextLoserPos': null,
-        'isByeMatch': false,
-      };
-    }
-
-    // L2 (Loser's Round 2) - 2 matches (L1 winners vs W2 losers)
-    for (int i = 0; i < 2; i++) {
-      String matchId = 'L2_${i + 1}';
-      _matchNodes[matchId] = {
-        'id': matchId,
-        'bracketSide': 'losers',
-        'roundNumber': 2,
-        'matchPosition': i + 1,
-        'alliance1Id': null,
-        'alliance2Id': null,
-        'nextWinnerId': null,
-        'nextWinnerPos': null,
-        'nextLoserId': null,
-        'nextLoserPos': null,
-        'isByeMatch': false,
-      };
-    }
-
-    // L3 (Loser's Round 3) - 1 match (L2 winners)
-    _matchNodes['L3_1'] = {
-      'id': 'L3_1',
+  // L1 (Loser's Round 1) - 2 matches (4 first-round losers)
+  for (int i = 0; i < 2; i++) {
+    String matchId = 'L1_${i + 1}';
+    _matchNodes[matchId] = {
+      'id': matchId,
       'bracketSide': 'losers',
-      'roundNumber': 3,
-      'matchPosition': 1,
+      'roundNumber': 1,
+      'matchPosition': i + 1,
       'alliance1Id': null,
       'alliance2Id': null,
       'nextWinnerId': null,
@@ -966,13 +1447,16 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
       'nextLoserPos': null,
       'isByeMatch': false,
     };
+  }
 
-    // L4 (Loser's Final) - 1 match (L3 winner vs W3 loser)
-    _matchNodes['L4_1'] = {
-      'id': 'L4_1',
+  // L2 (Loser's Round 2) - 2 matches (L1 winners vs W2 losers)
+  for (int i = 0; i < 2; i++) {
+    String matchId = 'L2_${i + 1}';
+    _matchNodes[matchId] = {
+      'id': matchId,
       'bracketSide': 'losers',
-      'roundNumber': 4,
-      'matchPosition': 1,
+      'roundNumber': 2,
+      'matchPosition': i + 1,
       'alliance1Id': null,
       'alliance2Id': null,
       'nextWinnerId': null,
@@ -981,136 +1465,180 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
       'nextLoserPos': null,
       'isByeMatch': false,
     };
+  }
 
-    // STEP 3: Connect Winner's bracket losers to Loser's bracket
-    print("🎯 Connecting winners to losers bracket");
+  // L3 (Loser's Round 3) - 1 match (L2 winners)
+  _matchNodes['L3_1'] = {
+    'id': 'L3_1',
+    'bracketSide': 'losers',
+    'roundNumber': 3,
+    'matchPosition': 1,
+    'alliance1Id': null,
+    'alliance2Id': null,
+    'nextWinnerId': null,
+    'nextWinnerPos': null,
+    'nextLoserId': null,
+    'nextLoserPos': null,
+    'isByeMatch': false,
+  };
 
-    // W1 losers go to L1
-    // W1_1 and W1_2 losers go to L1_1
-    // W1_3 and W1_4 losers go to L1_2
+  // L4 (Loser's Final) - 1 match (L3 winner vs W3 loser)
+  _matchNodes['L4_1'] = {
+    'id': 'L4_1',
+    'bracketSide': 'losers',
+    'roundNumber': 4,
+    'matchPosition': 1,
+    'alliance1Id': null,
+    'alliance2Id': null,
+    'nextWinnerId': null,
+    'nextWinnerPos': null,
+    'nextLoserId': null,
+    'nextLoserPos': null,
+    'isByeMatch': false,
+  };
+
+  // STEP 3: Connect Winner's bracket losers to Loser's bracket (only if nodes exist)
+  print("🎯 Connecting winners to losers bracket");
+
+  if (_matchNodes.containsKey('W1_1') && _matchNodes.containsKey('W1_2')) {
     _matchNodes['W1_1']!['nextLoserId'] = 'L1_1';
     _matchNodes['W1_1']!['nextLoserPos'] = 1;
     _matchNodes['W1_2']!['nextLoserId'] = 'L1_1';
     _matchNodes['W1_2']!['nextLoserPos'] = 2;
+  }
 
+  if (_matchNodes.containsKey('W1_3') && _matchNodes.containsKey('W1_4')) {
     _matchNodes['W1_3']!['nextLoserId'] = 'L1_2';
     _matchNodes['W1_3']!['nextLoserPos'] = 1;
     _matchNodes['W1_4']!['nextLoserId'] = 'L1_2';
     _matchNodes['W1_4']!['nextLoserPos'] = 2;
-
-    // W2 losers go to L2 (bottom position)
-    _matchNodes['W2_1']!['nextLoserId'] = 'L2_1';
-    _matchNodes['W2_1']!['nextLoserPos'] = 2;
-    _matchNodes['W2_2']!['nextLoserId'] = 'L2_2';
-    _matchNodes['W2_2']!['nextLoserPos'] = 2;
-
-    // W3 loser goes to L4 (Loser's Final)
-    _matchNodes['W3_1']!['nextLoserId'] = 'L4_1';
-    _matchNodes['W3_1']!['nextLoserPos'] = 2;
-
-    // STEP 4: Connect Loser's bracket matches to each other
-    print("🎯 Connecting loser's bracket progression");
-
-    // L1 winners go to L2 (top position)
-    _matchNodes['L1_1']!['nextWinnerId'] = 'L2_1';
-    _matchNodes['L1_1']!['nextWinnerPos'] = 1;
-    _matchNodes['L1_2']!['nextWinnerId'] = 'L2_2';
-    _matchNodes['L1_2']!['nextWinnerPos'] = 1;
-
-    // L2 winners go to L3
-    _matchNodes['L2_1']!['nextWinnerId'] = 'L3_1';
-    _matchNodes['L2_1']!['nextWinnerPos'] = 1;
-    _matchNodes['L2_2']!['nextWinnerId'] = 'L3_1';
-    _matchNodes['L2_2']!['nextWinnerPos'] = 2;
-
-    // L3 winner goes to L4 (Loser's Final) top position
-    _matchNodes['L3_1']!['nextWinnerId'] = 'L4_1';
-    _matchNodes['L3_1']!['nextWinnerPos'] = 1;
-
-    // STEP 5: Create Grand Finals
-    print("🎯 Creating Grand Finals");
-
-    // Winner's Final (W3_1) goes to GF1 position 1
-    _matchNodes['W3_1']!['nextWinnerId'] = 'GF1';
-    _matchNodes['W3_1']!['nextWinnerPos'] = 1;
-
-    // Loser's Final (L4_1) goes to GF1 position 2
-    _matchNodes['L4_1']!['nextWinnerId'] = 'GF1';
-    _matchNodes['L4_1']!['nextWinnerPos'] = 2;
-
-    // Create GF1
-    _matchNodes['GF1'] = {
-      'id': 'GF1',
-      'bracketSide': 'grand',
-      'roundNumber': 1,
-      'matchPosition': 1,
-      'alliance1Id': null,
-      'alliance2Id': null,
-      'nextWinnerId': 'GF2',
-      'nextWinnerPos': 1,
-      'nextLoserId': null,
-      'nextLoserPos': null,
-      'isByeMatch': false,
-    };
-
-    // Create GF2 (reset match)
-    _matchNodes['GF2'] = {
-      'id': 'GF2',
-      'bracketSide': 'grand',
-      'roundNumber': 2,
-      'matchPosition': 2,
-      'alliance1Id': null,
-      'alliance2Id': null,
-      'nextWinnerId': null,
-      'nextWinnerPos': null,
-      'nextLoserId': null,
-      'nextLoserPos': null,
-      'isByeMatch': false,
-    };
-
-    // GF1 winner goes to GF2 position 1 if needed
-    _matchNodes['GF1']!['nextWinnerId'] = 'GF2';
-    _matchNodes['GF1']!['nextWinnerPos'] = 1;
-
-    print("📊 Total matches generated: ${_matchNodes.length}");
-    print("   Winner's Bracket: 7 matches (W1:4, W2:2, W3:1)");
-    print("   Loser's Bracket: 6 matches (L1:2, L2:2, L3:1, L4:1)");
-    print("   Grand Finals: 2 matches (GF1, GF2)");
-    print("   Total: 15 matches");
   }
 
+  if (_matchNodes.containsKey('W2_1')) {
+    _matchNodes['W2_1']!['nextLoserId'] = 'L2_1';
+    _matchNodes['W2_1']!['nextLoserPos'] = 2;
+  }
+  
+  if (_matchNodes.containsKey('W2_2')) {
+    _matchNodes['W2_2']!['nextLoserId'] = 'L2_2';
+    _matchNodes['W2_2']!['nextLoserPos'] = 2;
+  }
+
+  if (_matchNodes.containsKey('W3_1')) {
+    _matchNodes['W3_1']!['nextLoserId'] = 'L4_1';
+    _matchNodes['W3_1']!['nextLoserPos'] = 2;
+  }
+
+  // STEP 4: Connect Loser's bracket matches to each other
+  print("🎯 Connecting loser's bracket progression");
+
+  if (_matchNodes.containsKey('L1_1')) {
+    _matchNodes['L1_1']!['nextWinnerId'] = 'L2_1';
+    _matchNodes['L1_1']!['nextWinnerPos'] = 1;
+  }
+  
+  if (_matchNodes.containsKey('L1_2')) {
+    _matchNodes['L1_2']!['nextWinnerId'] = 'L2_2';
+    _matchNodes['L1_2']!['nextWinnerPos'] = 1;
+  }
+
+  if (_matchNodes.containsKey('L2_1')) {
+    _matchNodes['L2_1']!['nextWinnerId'] = 'L3_1';
+    _matchNodes['L2_1']!['nextWinnerPos'] = 1;
+  }
+  
+  if (_matchNodes.containsKey('L2_2')) {
+    _matchNodes['L2_2']!['nextWinnerId'] = 'L3_1';
+    _matchNodes['L2_2']!['nextWinnerPos'] = 2;
+  }
+
+  if (_matchNodes.containsKey('L3_1')) {
+    _matchNodes['L3_1']!['nextWinnerId'] = 'L4_1';
+    _matchNodes['L3_1']!['nextWinnerPos'] = 1;
+  }
+
+  // STEP 5: Create Grand Finals
+  print("🎯 Creating Grand Finals");
+
+  if (_matchNodes.containsKey('W3_1')) {
+    _matchNodes['W3_1']!['nextWinnerId'] = 'GF1';
+    _matchNodes['W3_1']!['nextWinnerPos'] = 1;
+  }
+
+  if (_matchNodes.containsKey('L4_1')) {
+    _matchNodes['L4_1']!['nextWinnerId'] = 'GF1';
+    _matchNodes['L4_1']!['nextWinnerPos'] = 2;
+  }
+
+  // Create GF1 only
+  _matchNodes['GF1'] = {
+    'id': 'GF1',
+    'bracketSide': 'grand',
+    'roundNumber': 1,
+    'matchPosition': 1,
+    'alliance1Id': null,
+    'alliance2Id': null,
+    'nextWinnerId': null,
+    'nextWinnerPos': null,
+    'nextLoserId': null,
+    'nextLoserPos': null,
+    'isByeMatch': false,
+  };
+
+  print("📊 Total matches generated: ${_matchNodes.length}");
+  print("   Winner's Bracket: 7 matches (W1:4, W2:2, W3:1)");
+  print("   Loser's Bracket: 6 matches (L1:2, L2:2, L3:1, L4:1)");
+  print("   Grand Finals: 2 matches (GF1, GF2)");
+  print("   Total: 15 matches");
+}
+
   Future<void> _insertAllMatches(MySQLConnection conn) async {
-    int currentHour = _settings!.startTime.hour;
-    int currentMinute = _settings!.startTime.minute;
+  // Ensure settings is not null before using
+  if (_settings == null) {
+    final settings = await DBHelper.loadChampionshipSettings(widget.categoryId);
+    _settings = settings ?? ChampionshipSettings.defaults(widget.categoryId);
+  }
+  
+  int currentHour = _settings!.startTime.hour;
+  int currentMinute = _settings!.startTime.minute;
 
-    String formatTime(int hour, int minute) {
-      return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
-    }
+  String formatTime(int hour, int minute) {
+    return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
+  }
 
-    var sortedMatches = _matchNodes.values.toList()
-      ..sort((a, b) {
-        int sideOrder(String side) {
-          if (side == 'winners') return 1;
-          if (side == 'losers') return 2;
-          return 3;
-        }
+  var sortedMatches = _matchNodes.values.toList()
+    ..sort((a, b) {
+      int sideOrder(String side) {
+        if (side == 'winners') return 1;
+        if (side == 'losers') return 2;
+        return 3;
+      }
+      if (a['bracketSide'] != b['bracketSide']) {
+        return sideOrder(a['bracketSide']).compareTo(sideOrder(b['bracketSide']));
+      }
+      if (a['roundNumber'] != b['roundNumber']) {
+        return a['roundNumber'].compareTo(b['roundNumber']);
+      }
+      return a['matchPosition'].compareTo(b['matchPosition']);
+    });
 
-        if (a['bracketSide'] != b['bracketSide']) {
-          return sideOrder(
-            a['bracketSide'],
-          ).compareTo(sideOrder(b['bracketSide']));
-        }
-        if (a['roundNumber'] != b['roundNumber']) {
-          return a['roundNumber'].compareTo(b['roundNumber']);
-        }
-        return a['matchPosition'].compareTo(b['matchPosition']);
-      });
+  print("📊 Inserting ${sortedMatches.length} matches");
 
-    print("📊 Inserting ${sortedMatches.length} matches");
-
+  // Disable foreign key checks temporarily
+  await conn.execute("SET FOREIGN_KEY_CHECKS = 0");
+  
+  try {
     for (var node in sortedMatches) {
       String timeStr = formatTime(currentHour, currentMinute);
       String roundName = node['id'];
+
+      // Convert 0 to NULL for foreign key constraints
+      int? a1 = node['alliance1Id'];
+      int? a2 = node['alliance2Id'];
+      
+      // Use null for 0 values to satisfy foreign key constraint
+      Object? a1Param = (a1 != null && a1 > 0) ? a1 : null;
+      Object? a2Param = (a2 != null && a2 > 0) ? a2 : null;
 
       var result = await DBHelper.executeDual(
         """
@@ -1120,68 +1648,77 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
         VALUES
           (:catId, :roundName, :pos, :side, :roundNum, 
            :a1, :a2, :time, 'pending')
-      """,
+        """,
         {
           "catId": widget.categoryId,
           "roundName": roundName,
           "pos": node['matchPosition'],
           "side": node['bracketSide'],
           "roundNum": node['roundNumber'],
-          "a1": node['alliance1Id'],
-          "a2": node['alliance2Id'],
+          "a1": a1Param,
+          "a2": a2Param,
           "time": timeStr,
         },
       );
 
       node['dbId'] = result.lastInsertID.toInt();
 
-      currentMinute += _settings!.durationMinutes + _settings!.intervalMinutes;
-      while (currentMinute >= 60) {
-        currentMinute -= 60;
-        currentHour++;
-      }
-    }
-
-    for (var node in sortedMatches) {
-      if (node['nextWinnerId'] != null) {
-        var nextNode = _matchNodes[node['nextWinnerId']];
-        if (nextNode != null && nextNode['dbId'] != null) {
-          await DBHelper.executeDual(
-            """
-            UPDATE tbl_double_elimination 
-            SET next_match_id_winner = :nextId, next_match_position_winner = :pos
-            WHERE match_id = :currentId
-          """,
-            {
-              "nextId": nextNode['dbId'],
-              "pos": node['nextWinnerPos'],
-              "currentId": node['dbId'],
-            },
-          );
-        }
-      }
-
-      if (node['nextLoserId'] != null) {
-        var nextNode = _matchNodes[node['nextLoserId']];
-        if (nextNode != null && nextNode['dbId'] != null) {
-          await DBHelper.executeDual(
-            """
-            UPDATE tbl_double_elimination 
-            SET next_match_id_loser = :nextId, next_match_position_loser = :pos
-            WHERE match_id = :currentId
-          """,
-            {
-              "nextId": nextNode['dbId'],
-              "pos": node['nextLoserPos'],
-              "currentId": node['dbId'],
-            },
-          );
+      // Only advance time for matches that have teams
+      if ((node['alliance1Id'] != null && node['alliance1Id'] > 0) ||
+          (node['alliance2Id'] != null && node['alliance2Id'] > 0)) {
+        currentMinute += _settings!.durationMinutes + _settings!.intervalMinutes;
+        while (currentMinute >= 60) {
+          currentMinute -= 60;
+          currentHour++;
         }
       }
     }
-
-    print("✅ Inserted and connected all matches");
+  } finally {
+    // Re-enable foreign key checks
+    await conn.execute("SET FOREIGN_KEY_CHECKS = 1");
   }
+
+  // Set up next match connections
+  for (var node in sortedMatches) {
+    if (node['nextWinnerId'] != null) {
+      var nextNode = _matchNodes[node['nextWinnerId']];
+      if (nextNode != null && nextNode['dbId'] != null) {
+        await DBHelper.executeDual(
+          """
+          UPDATE tbl_double_elimination 
+          SET next_match_id_winner = :nextId, next_match_position_winner = :pos
+          WHERE match_id = :currentId
+          """,
+          {
+            "nextId": nextNode['dbId'],
+            "pos": node['nextWinnerPos'],
+            "currentId": node['dbId'],
+          },
+        );
+      }
+    }
+
+    if (node['nextLoserId'] != null) {
+      var nextNode = _matchNodes[node['nextLoserId']];
+      if (nextNode != null && nextNode['dbId'] != null) {
+        await DBHelper.executeDual(
+          """
+          UPDATE tbl_double_elimination 
+          SET next_match_id_loser = :nextId, next_match_position_loser = :pos
+          WHERE match_id = :currentId
+          """,
+          {
+            "nextId": nextNode['dbId'],
+            "pos": node['nextLoserPos'],
+            "currentId": node['dbId'],
+          },
+        );
+      }
+    }
+  }
+
+  print("✅ Inserted and connected all matches");
+}
 
   String _getRoundName(int round, int matchCount, String bracketSide) {
     if (bracketSide == 'winners') {
@@ -1242,12 +1779,13 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
         ? int.tryParse(alliance2IdStr)
         : null;
 
+    // Updated conditions to handle placeholder (-1) as TBD
     final hasBothTeams =
-        (alliance1Id != null && alliance1Id > 0) &&
-        (alliance2Id != null && alliance2Id > 0);
+        (alliance1Id != null && alliance1Id > 0 && alliance1Id != -1) &&
+        (alliance2Id != null && alliance2Id > 0 && alliance2Id != -1);
     final hasOneTeam =
-        (alliance1Id != null && alliance1Id > 0) ||
-        (alliance2Id != null && alliance2Id > 0);
+        (alliance1Id != null && alliance1Id > 0 && alliance1Id != -1) ||
+        (alliance2Id != null && alliance2Id > 0 && alliance2Id != -1);
     final hasNoTeams = (!hasBothTeams && !hasOneTeam);
 
     final winnerIdStr = match['winner_alliance_id']?.toString();
@@ -1680,123 +2218,213 @@ class _DoubleEliminationBracketState extends State<DoubleEliminationBracket> {
   }
 
   Widget _buildBracketContent() {
-    final Map<int, List<Map<String, dynamic>>> winnersByRound = {};
-    final Map<int, List<Map<String, dynamic>>> losersByRound = {};
-    final List<Map<String, dynamic>> grandFinalMatches = [];
-    final List<Map<String, dynamic>> eliminatedAlliances = [];
+  final Map<int, List<Map<String, dynamic>>> winnersByRound = {};
+  final Map<int, List<Map<String, dynamic>>> losersByRound = {};
+  final List<Map<String, dynamic>> grandFinalMatches = [];
 
-    for (final match in _matches) {
-      final side = match['bracket_side'] as String;
-      final roundNum = int.parse(match['round_number']?.toString() ?? '1');
+  for (final match in _matches) {
+    final side = match['bracket_side'] as String;
+    final roundNum = int.parse(match['round_number']?.toString() ?? '1');
 
-      if (side == 'winners') {
-        winnersByRound.putIfAbsent(roundNum, () => []).add(match);
-      } else if (side == 'losers') {
-        losersByRound.putIfAbsent(roundNum, () => []).add(match);
-      } else if (side == 'grand') {
-        grandFinalMatches.add(match);
+    if (side == 'winners') {
+      winnersByRound.putIfAbsent(roundNum, () => []).add(match);
+    } else if (side == 'losers') {
+      losersByRound.putIfAbsent(roundNum, () => []).add(match);
+    } else if (side == 'grand') {
+      grandFinalMatches.add(match);
+    }
+  }
+
+  final winnersRounds = winnersByRound.keys.toList()..sort();
+  final losersRounds = losersByRound.keys.toList()..sort();
+
+    // Track losses per alliance and elimination order
+  final Map<int, int> allianceLosses = {};
+  final Map<int, int> eliminationOrder = {}; // Store elimination index (1 = first eliminated)
+  final Map<int, int> eliminationRound = {}; // Store which round they were eliminated
+
+  for (final a in _alliances) {
+    final id = int.parse(a['alliance_id'].toString());
+    allianceLosses[id] = 0;
+  }
+
+  int eliminationCounter = 0;
+  
+    // Process matches in TRUE chronological tournament order
+  final sortedMatches = List<Map<String, dynamic>>.from(_matches);
+  sortedMatches.sort((a, b) {
+    // Grand Finals Round 2 (GF2) should ALWAYS be last
+    final nameA = a['round_name'] as String? ?? '';
+    final nameB = b['round_name'] as String? ?? '';
+    
+    if (nameA == 'GF2') return 1;
+    if (nameB == 'GF2') return -1;
+    
+    if (nameA == 'GF1' && nameB != 'GF1') return 1;
+    if (nameB == 'GF1' && nameA != 'GF1') return -1;
+    
+    // Winners bracket matches happen before losers bracket matches of same round
+    final sideA = a['bracket_side'] as String;
+    final sideB = b['bracket_side'] as String;
+    final sideOrder = {'winners': 1, 'losers': 2};
+    if (sideA != sideB && sideA != 'grand' && sideB != 'grand') {
+      return (sideOrder[sideA] ?? 3).compareTo(sideOrder[sideB] ?? 3);
+    }
+    
+    // Sort by round number
+    final roundA = int.parse(a['round_number']?.toString() ?? '0');
+    final roundB = int.parse(b['round_number']?.toString() ?? '0');
+    if (roundA != roundB) return roundA.compareTo(roundB);
+    
+    // For same round, sort by match_position
+    final posA = int.parse(a['match_position']?.toString() ?? '0');
+    final posB = int.parse(b['match_position']?.toString() ?? '0');
+    
+    // SPECIAL: For Losers Round 1, ensure L1_1 (pos 1) comes BEFORE L1_2 (pos 2)
+    if (sideA == 'losers' && roundA == 1) {
+      return posA.compareTo(posB);
+    }
+    
+    return posA.compareTo(posB);
+  });
+  
+  // DEBUG: Print the match processing order
+  print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  print("📋 MATCH PROCESSING ORDER:");
+  for (int i = 0; i < sortedMatches.length; i++) {
+    final m = sortedMatches[i];
+    final name = m['round_name'] as String? ?? '';
+    final side = m['bracket_side'] as String;
+    final pos = m['match_position'];
+    print("   ${i+1}. $name ($side, pos $pos)");
+  }
+  print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+  for (final match in sortedMatches) {
+    final winnerStr = match['winner_alliance_id']?.toString();
+    if (winnerStr == null || winnerStr == '0') continue;
+    
+    final winnerId = int.tryParse(winnerStr) ?? 0;
+    final a1 = int.tryParse(match['alliance1_id']?.toString() ?? '0') ?? 0;
+    final a2 = int.tryParse(match['alliance2_id']?.toString() ?? '0') ?? 0;
+    final roundNum = int.parse(match['round_number']?.toString() ?? '1');
+    final bracketSide = match['bracket_side'] as String;
+    
+    if (winnerId == 0) continue;
+    
+    final loserId = (winnerId == a1) ? a2 : a1;
+    if (loserId > 0 && loserId != 0) {
+      final currentLosses = allianceLosses[loserId] ?? 0;
+      final newLosses = currentLosses + 1;
+      allianceLosses[loserId] = newLosses;
+      
+      // CRITICAL: Only record elimination on the SECOND loss (newLosses == 2)
+      if (newLosses == 2 && !eliminationOrder.containsKey(loserId)) {
+        eliminationCounter++;
+        eliminationOrder[loserId] = eliminationCounter;
+        eliminationRound[loserId] = roundNum;
+        print("📊 ${_getAllianceRank(loserId)} ELIMINATED (2nd loss) in round $roundNum ($bracketSide) - Order: $eliminationCounter");
+      } else {
+        print("📊 ${_getAllianceRank(loserId)} now has $newLosses loss(es) (Round $roundNum, $bracketSide)");
       }
     }
+  }
 
-    final winnersRounds = winnersByRound.keys.toList()..sort();
-    final losersRounds = losersByRound.keys.toList()..sort();
-
-    // Compute eliminated alliances (lost 2 or more completed series)
-    final Map<int, int> allianceLosses = {};
-    for (final a in _alliances) {
-      allianceLosses[int.parse(a['alliance_id'].toString())] = 0;
+    // Build eliminated list sorted by match order (chronological)
+  final List<Map<String, dynamic>> eliminatedAlliances = [];
+  
+  // Get all alliances with exactly 2 losses (eliminated)
+  final List<Map<String, dynamic>> eliminatedWithOrder = [];
+  for (final a in _alliances) {
+    final id = int.parse(a['alliance_id'].toString());
+    final losses = allianceLosses[id] ?? 0;
+    if (losses >= 2 && eliminationOrder.containsKey(id)) {
+      eliminatedWithOrder.add({
+        'alliance_id': id,
+        'alliance_rank': '#${a['alliance_rank']}',
+        'alliance_name': '${a['captain_name']} / ${a['partner_name']}',
+        'elimination_order': eliminationOrder[id] ?? 999,
+        'elimination_round': eliminationRound[id] ?? 0,
+      });
     }
-
-    for (final m in _matches) {
-      final winnerStr = m['winner_alliance_id']?.toString();
-      if (winnerStr == null) continue;
-      final winnerId = int.tryParse(winnerStr) ?? 0;
-      final a1 = int.tryParse(m['alliance1_id']?.toString() ?? '0') ?? 0;
-      final a2 = int.tryParse(m['alliance2_id']?.toString() ?? '0') ?? 0;
-      if (winnerId == 0) continue;
-      final loserId = (winnerId == a1) ? a2 : a1;
-      if (loserId > 0) {
-        allianceLosses[loserId] = (allianceLosses[loserId] ?? 0) + 1;
-      }
-    }
-
-    allianceLosses.forEach((id, losses) {
-      if (losses >= 2) {
-        final alliance = _getAllianceById(id);
-        if (alliance != null) {
-          eliminatedAlliances.add({
-            'alliance_id': id,
-            'alliance_rank': '#${alliance['alliance_rank']}',
-            'alliance_name':
-                '${alliance['captain_name']} / ${alliance['partner_name']}',
-          });
-        }
-      }
+  }
+  
+  // Sort by elimination order (which is already chronological from match processing)
+  eliminatedWithOrder.sort((a, b) {
+    return (a['elimination_order'] as int).compareTo(b['elimination_order'] as int);
+  });
+  
+  for (final entry in eliminatedWithOrder) {
+    eliminatedAlliances.add({
+      'alliance_id': entry['alliance_id'],
+      'alliance_rank': entry['alliance_rank'],
+      'alliance_name': entry['alliance_name'],
     });
+  }
+  
+  // Print elimination order for debugging
+  print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  print("🏆 ELIMINATION ORDER (by 2nd loss):");
+  for (int i = 0; i < eliminatedAlliances.length; i++) {
+    final e = eliminatedAlliances[i];
+    print("   ${i+1}. ${e['alliance_rank']} - ${e['alliance_name']}");
+  }
+  print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    return IntrinsicHeight(
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildWinnerBracketColumn(
-            title: 'WINNER\'S BRACKET',
-            color: const Color(0xFF00CFFF),
-            matchesByRound: winnersByRound,
-            rounds: winnersRounds,
+  return IntrinsicHeight(
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildWinnerBracketColumn(
+          title: 'WINNER\'S BRACKET',
+          color: const Color(0xFF00CFFF),
+          matchesByRound: winnersByRound,
+          rounds: winnersRounds,
+          width: columnWidth,
+        ),
+        const SizedBox(width: columnGap),
+        Padding(
+          padding: const EdgeInsets.only(top: 60),
+          child: _buildLoserBracketColumn(
+            title: 'LOSER\'S BRACKET',
+            color: const Color(0xFFFF6B6B),
+            matchesByRound: losersByRound,
+            rounds: losersRounds,
             width: columnWidth,
           ),
-
-          const SizedBox(width: columnGap),
-
-          Padding(
-            padding: const EdgeInsets.only(top: 60),
-            child: _buildLoserBracketColumn(
-              title: 'LOSER\'S BRACKET',
-              color: const Color(0xFFFF6B6B),
-              matchesByRound: losersByRound,
-              rounds: losersRounds,
-              width: columnWidth,
-            ),
-          ),
-
-          const SizedBox(width: columnGap * 2),
-
-          Padding(
-            padding: const EdgeInsets.only(top: 120),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _buildHeader(
-                  'GRAND FINAL',
-                  const Color(0xFFFFD700),
-                  columnWidth,
+        ),
+        const SizedBox(width: columnGap * 2),
+        Padding(
+          padding: const EdgeInsets.only(top: 120),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildHeader('GRAND FINAL', const Color(0xFFFFD700), columnWidth),
+              const SizedBox(height: 20),
+              ...grandFinalMatches.map(
+                (match) => Padding(
+                  padding: const EdgeInsets.only(bottom: rowGap),
+                  child: _buildMatchCard(match, const Color(0xFFFFD700)),
                 ),
-                const SizedBox(height: 20),
-                ...grandFinalMatches.map(
-                  (match) => Padding(
-                    padding: const EdgeInsets.only(bottom: rowGap),
-                    child: _buildMatchCard(match, const Color(0xFFFFD700)),
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
-          const SizedBox(width: columnGap * 2),
+        ),
+        const SizedBox(width: columnGap * 2),
+        Padding(
+          padding: const EdgeInsets.only(top: 100),
+          child: _buildEliminatedColumn(
+            title: 'ELIMINATED',
+            color: Colors.grey,
+            eliminated: eliminatedAlliances,
+            width: columnWidth,
+          ),
+        ),
+      ],
+    ),
+  );
+}
 
-          // Eliminated column
-          Padding(
-            padding: const EdgeInsets.only(top: 100),
-            child: _buildEliminatedColumn(
-              title: 'ELIMINATED',
-              color: Colors.grey,
-              eliminated: eliminatedAlliances,
-              width: columnWidth,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   Widget _buildBracketLayout() {
     return Column(
