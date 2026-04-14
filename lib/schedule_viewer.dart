@@ -1958,6 +1958,782 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     }
   }
 
+  Widget _buildBattleOfChampionsTab(int categoryId, String categoryName) {
+  // Check if championship round is complete
+  return FutureBuilder<bool>(
+    future: _isChampionshipComplete(categoryId),
+    builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) {
+        return const Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(color: Color(0xFFFFD700)),
+              SizedBox(height: 16),
+              Text(
+                'Checking championship status...',
+                style: TextStyle(color: Colors.white54),
+              ),
+            ],
+          ),
+        );
+      }
+
+      final isComplete = snapshot.data ?? false;
+
+      if (!isComplete) {
+        return _buildLockedBattleChampionsScreen(categoryName);
+      }
+
+      // Championship is complete - show Battle of Champions
+      return _buildBattleChampionsContent(categoryId, categoryName);
+    },
+  );
+}
+
+Future<bool> _isChampionshipComplete(int categoryId) async {
+  try {
+    final conn = await DBHelper.getConnection();
+    
+    // Check if there's a champion determined
+    // For double elimination, check if Grand Finals are complete
+    final result = await conn.execute("""
+      SELECT COUNT(*) as cnt FROM tbl_double_elimination
+      WHERE category_id = :catId 
+        AND bracket_side = 'grand'
+        AND (round_name = 'GF1' OR round_name = 'GF2')
+        AND status = 'completed'
+        AND winner_alliance_id IS NOT NULL
+        AND winner_alliance_id != 0
+    """, {"catId": categoryId});
+    
+    if (result.rows.isNotEmpty) {
+      final count = int.parse(result.rows.first.assoc()['cnt']?.toString() ?? '0');
+      return count > 0;
+    }
+    
+    // Alternative: Check if there's a champion in alliance standings
+    final allianceResult = await conn.execute("""
+      SELECT COUNT(*) as cnt FROM tbl_alliance_selections
+      WHERE category_id = :catId
+    """, {"catId": categoryId});
+    
+    return int.parse(allianceResult.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
+  } catch (e) {
+    print("Error checking championship complete: $e");
+    return false;
+  }
+}
+
+Widget _buildLockedBattleChampionsScreen(String categoryName) {
+  return Center(
+    child: Container(
+      margin: const EdgeInsets.all(32),
+      padding: const EdgeInsets.all(32),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            const Color(0xFF2D0E7A).withOpacity(0.5),
+            const Color(0xFF1A0A4A).withOpacity(0.5),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: const Color(0xFFFFD700).withOpacity(0.3),
+          width: 2,
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: const Color(0xFFFFD700).withOpacity(0.1),
+              border: Border.all(
+                color: const Color(0xFFFFD700).withOpacity(0.4),
+                width: 2,
+              ),
+            ),
+            child: const Icon(
+              Icons.lock_outline_rounded,
+              color: Color(0xFFFFD700),
+              size: 64,
+            ),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'BATTLE OF CHAMPIONS',
+            style: TextStyle(
+              color: Color(0xFFFFD700),
+              fontSize: 22,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 2,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'Complete the Championship Round first',
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.6),
+              fontSize: 14,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'The champion will be crowned here after all\nchampionship matches are complete',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.4),
+              fontSize: 12,
+            ),
+          ),
+          const SizedBox(height: 24),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFD700).withOpacity(0.1),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(
+              categoryName.toUpperCase(),
+              style: const TextStyle(
+                color: Color(0xFFFFD700),
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+Widget _buildBattleChampionsContent(int categoryId, String categoryName) {
+  return FutureBuilder<List<Map<String, dynamic>>>(
+    future: _getBattleChampionsData(categoryId),
+    builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) {
+        return const Center(
+          child: CircularProgressIndicator(color: Color(0xFFFFD700)),
+        );
+      }
+
+      if (snapshot.hasError) {
+        return Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
+              const SizedBox(height: 16),
+              Text(
+                'Error loading champions: ${snapshot.error}',
+                style: const TextStyle(color: Colors.white54),
+              ),
+            ],
+          ),
+        );
+      }
+
+      final champions = snapshot.data ?? [];
+      
+      if (champions.isEmpty) {
+        return Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.emoji_events, size: 64, color: Colors.white24),
+              const SizedBox(height: 16),
+              const Text(
+                'No Champions Yet',
+                style: TextStyle(color: Colors.white38, fontSize: 18),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Complete the championship round for $categoryName',
+                style: const TextStyle(color: Colors.white24, fontSize: 14),
+              ),
+            ],
+          ),
+        );
+      }
+
+      return _buildChampionsDisplay(champions, categoryName);
+    },
+  );
+}
+
+Future<List<Map<String, dynamic>>> _getBattleChampionsData(int categoryId) async {
+  final List<Map<String, dynamic>> champions = [];
+  
+  try {
+    final conn = await DBHelper.getConnection();
+    
+    // Get all alliances for this category
+    final alliancesResult = await conn.execute("""
+      SELECT 
+        a.alliance_id,
+        a.selection_round as alliance_rank,
+        COALESCE(t1.team_name, 'Unknown') as captain_name,
+        COALESCE(t2.team_name, 'Unknown') as partner_name
+      FROM tbl_alliance_selections a
+      LEFT JOIN tbl_team t1 ON a.captain_team_id = t1.team_id
+      LEFT JOIN tbl_team t2 ON a.partner_team_id = t2.team_id
+      WHERE a.category_id = :catId
+      ORDER BY a.selection_round
+    """, {"catId": categoryId});
+    
+    // Determine the champion from Grand Finals results
+    final gfResult = await conn.execute("""
+      SELECT winner_alliance_id, round_name, status
+      FROM tbl_double_elimination
+      WHERE category_id = :catId 
+        AND bracket_side = 'grand'
+        AND status = 'completed'
+        AND winner_alliance_id IS NOT NULL
+        AND winner_alliance_id != 0
+      ORDER BY round_number DESC, match_id DESC
+      LIMIT 1
+    """, {"catId": categoryId});
+    
+    int championId = 0;
+    if (gfResult.rows.isNotEmpty) {
+      championId = int.parse(gfResult.rows.first.assoc()['winner_alliance_id'].toString());
+    } else {
+      // Fallback: champion is alliance #1 by rank
+      if (alliancesResult.rows.isNotEmpty) {
+        championId = int.parse(alliancesResult.rows.first.assoc()['alliance_id'].toString());
+      }
+    }
+    
+    // Get champion details
+    for (final row in alliancesResult.rows) {
+      final data = row.assoc();
+      final allianceId = int.parse(data['alliance_id'].toString());
+      final isChampion = (allianceId == championId);
+      
+      // Calculate wins for this alliance
+      final winsResult = await conn.execute("""
+        SELECT COUNT(DISTINCT CONCAT(match_round, ':', match_position, ':', match_number)) as wins
+        FROM tbl_championship_bestof3
+        WHERE category_id = :catId 
+          AND winner_alliance_id = :allianceId
+          AND is_completed = 1
+      """, {"catId": categoryId, "allianceId": allianceId});
+      
+      int wins = 0;
+      if (winsResult.rows.isNotEmpty) {
+        wins = int.parse(winsResult.rows.first.assoc()['wins']?.toString() ?? '0');
+      }
+      
+      champions.add({
+        'alliance_id': allianceId,
+        'alliance_rank': int.parse(data['alliance_rank'].toString()),
+        'captain_name': data['captain_name'].toString(),
+        'partner_name': data['partner_name'].toString(),
+        'is_champion': isChampion,
+        'wins': wins,
+      });
+    }
+    
+    // Sort: champion first, then by wins descending
+    champions.sort((a, b) {
+      if (a['is_champion'] == true && b['is_champion'] == false) return -1;
+      if (a['is_champion'] == false && b['is_champion'] == true) return 1;
+      return (b['wins'] as int).compareTo(a['wins'] as int);
+    });
+    
+  } catch (e) {
+    print("Error getting battle champions data: $e");
+  }
+  
+  return champions;
+}
+
+Widget _buildChampionsDisplay(List<Map<String, dynamic>> champions, String categoryName) {
+  final champion = champions.firstWhere((c) => c['is_champion'] == true, orElse: () => champions.first);
+  final runnerUp = champions.length > 1 ? champions[1] : null;
+  final semiFinalists = champions.skip(2).take(2).toList();
+  
+  return SingleChildScrollView(
+    padding: const EdgeInsets.all(24),
+    child: Column(
+      children: [
+        // Category Header
+        Container(
+          margin: const EdgeInsets.only(bottom: 24),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              colors: [Color(0xFFFFD700), Color(0xFFCCAC00)],
+            ),
+            borderRadius: BorderRadius.circular(30),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFFFFD700).withOpacity(0.3),
+                blurRadius: 20,
+                spreadRadius: 2,
+              ),
+            ],
+          ),
+          child: Text(
+            categoryName.toUpperCase(),
+            style: const TextStyle(
+              color: Colors.black,
+              fontWeight: FontWeight.bold,
+              fontSize: 18,
+              letterSpacing: 2,
+            ),
+          ),
+        ),
+        
+        // CHAMPION CARD
+        _buildMedalCard(
+          title: 'CHAMPION',
+          medalIcon: Icons.emoji_events,
+          medalColor: const Color(0xFFFFD700),
+          allianceRank: champion['alliance_rank'],
+          captainName: champion['captain_name'],
+          partnerName: champion['partner_name'],
+          wins: champion['wins'],
+          isChampion: true,
+        ),
+        
+        const SizedBox(height: 20),
+        
+        // RUNNER-UP CARD
+        if (runnerUp != null)
+          _buildMedalCard(
+            title: 'RUNNER-UP',
+            medalIcon: Icons.military_tech,
+            medalColor: const Color(0xFFC0C0C0),
+            allianceRank: runnerUp['alliance_rank'],
+            captainName: runnerUp['captain_name'],
+            partnerName: runnerUp['partner_name'],
+            wins: runnerUp['wins'],
+            isChampion: false,
+          ),
+        
+        const SizedBox(height: 20),
+        
+        // SEMI-FINALISTS SECTION
+        if (semiFinalists.isNotEmpty) ...[
+          Container(
+            margin: const EdgeInsets.only(bottom: 16),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFFCD7F32).withOpacity(0.15),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: const Color(0xFFCD7F32).withOpacity(0.3),
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: const [
+                Icon(Icons.star_half, color: Color(0xFFCD7F32), size: 16),
+                SizedBox(width: 8),
+                Text(
+                  'SEMI-FINALISTS',
+                  style: TextStyle(
+                    color: Color(0xFFCD7F32),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          
+          Row(
+            children: semiFinalists.asMap().entries.map((entry) {
+              final idx = entry.key;
+              final finalist = entry.value;
+              return Expanded(
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    right: idx == 0 ? 8 : 0,
+                    left: idx == 1 ? 8 : 0,
+                  ),
+                  child: _buildMedalCard(
+                    title: 'SEMI-FINALIST ${idx + 1}',
+                    medalIcon: Icons.star_half,
+                    medalColor: const Color(0xFFCD7F32),
+                    allianceRank: finalist['alliance_rank'],
+                    captainName: finalist['captain_name'],
+                    partnerName: finalist['partner_name'],
+                    wins: finalist['wins'],
+                    isChampion: false,
+                    compact: true,
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ],
+        
+        const SizedBox(height: 20),
+        
+        // ALL PARTICIPANTS SECTION
+        if (champions.length > 4) ...[
+          Container(
+            margin: const EdgeInsets.only(top: 8, bottom: 12),
+            child: const Text(
+              'ALL PARTICIPANTS',
+              style: TextStyle(
+                color: Colors.white38,
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 2,
+              ),
+            ),
+          ),
+          Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF130840),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white.withOpacity(0.1)),
+            ),
+            child: ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: champions.length,
+              separatorBuilder: (_, __) => const Divider(
+                color: Colors.white10,
+                height: 0,
+              ),
+              itemBuilder: (context, index) {
+                final alliance = champions[index];
+                final isTop3 = index < 3;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 32,
+                        height: 32,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: isTop3
+                              ? (index == 0
+                                  ? const Color(0xFFFFD700).withOpacity(0.2)
+                                  : index == 1
+                                      ? const Color(0xFFC0C0C0).withOpacity(0.2)
+                                      : const Color(0xFFCD7F32).withOpacity(0.2))
+                              : Colors.white.withOpacity(0.05),
+                          border: Border.all(
+                            color: isTop3
+                                ? (index == 0
+                                    ? const Color(0xFFFFD700)
+                                    : index == 1
+                                        ? const Color(0xFFC0C0C0)
+                                        : const Color(0xFFCD7F32))
+                                : Colors.white.withOpacity(0.1),
+                            width: 1.5,
+                          ),
+                        ),
+                        child: Center(
+                          child: Text(
+                            '${index + 1}',
+                            style: TextStyle(
+                              color: isTop3
+                                  ? (index == 0
+                                      ? const Color(0xFFFFD700)
+                                      : index == 1
+                                          ? const Color(0xFFC0C0C0)
+                                          : const Color(0xFFCD7F32))
+                                  : Colors.white38,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Alliance #${alliance['alliance_rank']}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              '${alliance['captain_name']} / ${alliance['partner_name']}',
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(0.5),
+                                fontSize: 10,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFD700).withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          '${alliance['wins']} wins',
+                          style: const TextStyle(
+                            color: Color(0xFFFFD700),
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ],
+    ),
+  );
+}
+
+Widget _buildMedalCard({
+  required String title,
+  required IconData medalIcon,
+  required Color medalColor,
+  required int allianceRank,
+  required String captainName,
+  required String partnerName,
+  required int wins,
+  required bool isChampion,
+  bool compact = false,
+}) {
+  return Container(
+    decoration: BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: isChampion
+            ? [medalColor.withOpacity(0.15), medalColor.withOpacity(0.05)]
+            : [const Color(0xFF2D0E7A), const Color(0xFF1E0A5A)],
+      ),
+      borderRadius: BorderRadius.circular(compact ? 12 : 16),
+      border: Border.all(
+        color: medalColor.withOpacity(isChampion ? 0.5 : 0.3),
+        width: isChampion ? 2 : 1.5,
+      ),
+      boxShadow: isChampion
+          ? [
+              BoxShadow(
+                color: medalColor.withOpacity(0.3),
+                blurRadius: 20,
+                spreadRadius: 2,
+              ),
+            ]
+          : [],
+    ),
+    child: Column(
+      children: [
+        // Header
+        Container(
+          padding: EdgeInsets.symmetric(vertical: compact ? 8 : 12, horizontal: 16),
+          decoration: BoxDecoration(
+            color: medalColor.withOpacity(0.15),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(compact ? 12 : 16)),
+            border: Border(
+              bottom: BorderSide(color: medalColor.withOpacity(0.3)),
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(medalIcon, color: medalColor, size: compact ? 20 : 24),
+              const SizedBox(width: 8),
+              Text(
+                title,
+                style: TextStyle(
+                  color: medalColor,
+                  fontWeight: FontWeight.w900,
+                  fontSize: compact ? 12 : 14,
+                  letterSpacing: 1.5,
+                ),
+              ),
+            ],
+          ),
+        ),
+        
+        // Content
+        Padding(
+          padding: EdgeInsets.all(compact ? 12 : 16),
+          child: Row(
+            children: [
+              // Alliance Rank Badge
+              Container(
+                width: compact ? 40 : 48,
+                height: compact ? 40 : 48,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: LinearGradient(
+                    colors: [medalColor, medalColor.withOpacity(0.7)],
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: medalColor.withOpacity(0.3),
+                      blurRadius: 8,
+                    ),
+                  ],
+                ),
+                child: Center(
+                  child: Text(
+                    '#$allianceRank',
+                    style: TextStyle(
+                      color: Colors.black,
+                      fontWeight: FontWeight.bold,
+                      fontSize: compact ? 12 : 14,
+                    ),
+                  ),
+                ),
+              ),
+              
+              const SizedBox(width: 16),
+              
+              // Teams
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color: medalColor.withOpacity(0.2),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.person, size: 14, color: Colors.white70),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            captainName,
+                            style: TextStyle(
+                              color: isChampion ? medalColor : Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: compact ? 12 : 13,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: medalColor.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text(
+                            'CAPTAIN',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 8,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color: medalColor.withOpacity(0.2),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.group, size: 14, color: Colors.white70),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            partnerName,
+                            style: TextStyle(
+                              color: isChampion ? medalColor : Colors.white70,
+                              fontSize: compact ? 11 : 12,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: medalColor.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text(
+                            'PARTNER',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 8,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              
+              // Wins Badge
+              if (!compact)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: medalColor.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: medalColor.withOpacity(0.3)),
+                  ),
+                  child: Column(
+                    children: [
+                      Text(
+                        '$wins',
+                        style: TextStyle(
+                          color: medalColor,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                      const Text(
+                        'WINS',
+                        style: TextStyle(
+                          color: Colors.white38,
+                          fontSize: 8,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
   // ═══════════════════════════════════════════════════════════════════════════
   // BUILD
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2900,74 +3676,85 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     );
   }
 
-  Widget _buildCategoryView(Map<String, dynamic> category, int catId,
-      List<Map<String, dynamic>> matches) {
-    final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
-    final isSoccer = catId == _soccerCategoryId;
+  // In _buildCategoryView method (around line 1800 in schedule_viewer.dart)
+// Change from length: 2 to length: 3
 
-    return DefaultTabController(
-      length: 2,
-      child: Builder(
-        builder: (tabContext) {
-          _categoryTabContexts[catId] = tabContext;
-          return Column(
-            children: [
-              _buildCategoryTitleBar(category, categoryName, matches),
+Widget _buildCategoryView(Map<String, dynamic> category, int catId,
+    List<Map<String, dynamic>> matches) {
+  final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
+  final isSoccer = catId == _soccerCategoryId;
 
-              Container(
-                color: const Color(0xFF130742),
-                child: TabBar(
-                  indicatorColor: const Color(0xFFFFD700),
-                  indicatorWeight: 3,
-                  labelColor: const Color(0xFFFFD700),
-                  unselectedLabelColor: Colors.white30,
-                  labelStyle: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 14,
-                      letterSpacing: 1.2),
-                  tabs: const [
-                    Tab(
-                      icon: Icon(Icons.calendar_today, size: 16),
-                      text: 'QUALIFICATION',
-                    ),
-                    Tab(
-                      icon: Icon(Icons.emoji_events, size: 16),
-                      text: 'CHAMPIONSHIP',
-                    ),
-                  ],
-                ),
+  return DefaultTabController(
+    length: 3,  // Change from 2 to 3 for Battle of Champions
+    child: Builder(
+      builder: (tabContext) {
+        _categoryTabContexts[catId] = tabContext;
+        return Column(
+          children: [
+            _buildCategoryTitleBar(category, categoryName, matches),
+
+            Container(
+              color: const Color(0xFF130742),
+              child: TabBar(
+                indicatorColor: const Color(0xFFFFD700),
+                indicatorWeight: 3,
+                labelColor: const Color(0xFFFFD700),
+                unselectedLabelColor: Colors.white30,
+                labelStyle: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                    letterSpacing: 1.2),
+                tabs: const [
+                  Tab(
+                    icon: Icon(Icons.calendar_today, size: 16),
+                    text: 'QUALIFICATION',
+                  ),
+                  Tab(
+                    icon: Icon(Icons.emoji_events, size: 16),
+                    text: 'CHAMPIONSHIP',
+                  ),
+                  Tab(
+                    icon: Icon(Icons.military_tech, size: 16),
+                    text: 'BATTLE OF CHAMPIONS',
+                  ),
+                ],
               ),
+            ),
 
-              Expanded(
-                child: TabBarView(
-                  children: [
-                    Column(
-                      children: [
-                        _buildQualificationActions(catId, categoryName),
-                        _buildAllianceSelectionButton(catId, categoryName),
-                        Expanded(
-                          child: isSoccer
-                              ? _buildSoccerScheduleTab(catId, matches,
-                                  _bracketSize(_soccerTeams.length), !_bracketSeeded)
-                              : _buildScheduleTable(category, catId, matches),
-                        ),
-                      ],
-                    ),
-                    ChampionshipSchedule(
-                      key: ValueKey(
-                          'championship-$catId-${_championshipRefreshVersionByCategory[catId] ?? 0}'),
-                      categoryId: catId,
-                      categoryName: categoryName,
-                    ),
-                  ],
-                ),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  // Tab 0: Qualification
+                  Column(
+                    children: [
+                      _buildQualificationActions(catId, categoryName),
+                      _buildAllianceSelectionButton(catId, categoryName),
+                      Expanded(
+                        child: isSoccer
+                            ? _buildSoccerScheduleTab(catId, matches,
+                                _bracketSize(_soccerTeams.length), !_bracketSeeded)
+                            : _buildScheduleTable(category, catId, matches),
+                      ),
+                    ],
+                  ),
+                  // Tab 1: Championship
+                  ChampionshipSchedule(
+                    key: ValueKey(
+                        'championship-$catId-${_championshipRefreshVersionByCategory[catId] ?? 0}'),
+                    categoryId: catId,
+                    categoryName: categoryName,
+                  ),
+                  // Tab 2: Battle of Champions (NEW)
+                  _buildBattleOfChampionsTab(catId, categoryName),
+                ],
               ),
-            ],
-          );
-        },
-      ),
-    );
-  }
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
 
   // Add these new methods to _ScheduleViewerState:
 
