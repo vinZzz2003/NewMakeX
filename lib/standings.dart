@@ -2575,215 +2575,128 @@ allRoundsData.sort((a, b) {
     return 'Alliance $allianceId';
   }
 
-  // Load championship standings with win-based scoring
   Future<void> _loadChampionshipStandings(int categoryId) async {
+  if (mounted) {
+    setState(() {
+      _isLoadingAllianceByCategory[categoryId] = true;
+    });
+  }
+
+  try {
+    // ADD THIS: Load championship settings first
+    final settings = await DBHelper.loadChampionshipSettings(categoryId);
+    final matchesPerAlliance = settings?.matchesPerAlliance ?? 3; // Default to 3 if not found
+    
+    // Store it for later use
     if (mounted) {
       setState(() {
-        _isLoadingAllianceByCategory[categoryId] = true;
+        _championshipMatchesPerAlliance[categoryId] = matchesPerAlliance;
       });
-    }
-
-    try {
-      await _loadMatchPairings(categoryId);
-      await _loadBestOf3Results(categoryId);
-
-      final conn = await DBHelper.getConnection();
-
-      final alliancesResult = await conn.execute(
-        """
-        SELECT 
-          a.alliance_id,
-          a.selection_round as alliance_rank,
-          COALESCE(t1.team_name, 'Unknown') as captain_name,
-          COALESCE(t2.team_name, 'Unknown') as partner_name
-        FROM tbl_alliance_selections a
-        LEFT JOIN tbl_team t1 ON a.captain_team_id = t1.team_id
-        LEFT JOIN tbl_team t2 ON a.partner_team_id = t2.team_id
-        WHERE a.category_id = :catId
-        ORDER BY a.selection_round
-      """,
-        {"catId": categoryId},
-      );
-
-      final alliances = alliancesResult.rows.map((r) => r.assoc()).toList();
-
-      final Map<int, int> freshLosses = {};
-    for (final alliance in alliances) {
-      final allianceId = int.parse(alliance['alliance_id'].toString());
-      freshLosses[allianceId] = _getAllianceLossCount(categoryId, allianceId);
     }
     
-    if (mounted) {
-      setState(() {
-        _allianceLossesByCategory[categoryId] = freshLosses;
-      });
-    }
+    print("📊 Championship matches per alliance for category $categoryId: $matchesPerAlliance");
 
-      if (alliances.isEmpty) {
-        if (mounted) {
-          setState(() {
-            _championshipStandingsByCategory[categoryId] = [];
-            _isLoadingAllianceByCategory[categoryId] = false;
-          });
-        }
-        return;
-      }
+    await _loadMatchPairings(categoryId);
+    await _loadBestOf3Results(categoryId);
 
-      // Create standings list
-final List<ChampionshipAllianceStanding> standings = [];
+    final conn = await DBHelper.getConnection();
 
-for (final alliance in alliances) {
-  final allianceId = int.parse(alliance['alliance_id'].toString());
-  final allianceRank = int.parse(alliance['alliance_rank'].toString());
-  
-  // Calculate total match wins across all match numbers (M1, M2, M3)
-  final match1Wins = _countWinsForMatchNumberAcrossRounds(categoryId, allianceId, 0, 0, 1)['winsA'] ?? 0;
-  final match2Wins = _countWinsForMatchNumberAcrossRounds(categoryId, allianceId, 0, 0, 2)['winsA'] ?? 0;
-  final match3Wins = _countWinsForMatchNumberAcrossRounds(categoryId, allianceId, 0, 0, 3)['winsA'] ?? 0;
-  final totalMatchWins = match1Wins + match2Wins + match3Wins;
+    final alliancesResult = await conn.execute(
+      """
+      SELECT 
+        a.alliance_id,
+        a.selection_round as alliance_rank,
+        COALESCE(t1.team_name, 'Unknown') as captain_name,
+        COALESCE(t2.team_name, 'Unknown') as partner_name
+      FROM tbl_alliance_selections a
+      LEFT JOIN tbl_team t1 ON a.captain_team_id = t1.team_id
+      LEFT JOIN tbl_team t2 ON a.partner_team_id = t2.team_id
+      WHERE a.category_id = :catId
+      ORDER BY a.selection_round
+    """,
+      {"catId": categoryId},
+    );
 
-  standings.add(
-    ChampionshipAllianceStanding(
-      allianceId: allianceId,
-      allianceRank: allianceRank,
-      captainName: alliance['captain_name'].toString(),
-      partnerName: alliance['partner_name'].toString(),
-      matchScores: {},
-      totalScore: totalMatchWins * 10,
-    ),
-  );
-}
+    final alliances = alliancesResult.rows.map((r) => r.assoc()).toList();
 
-
-// Set the standings FIRST (unsorted)
-if (mounted) {
-  setState(() {
-    _championshipStandingsByCategory[categoryId] = List.from(standings);
-    _isLoadingAllianceByCategory[categoryId] = false;
-  });
-}
-
-// NOW reorder based on current scores (this will recalculate totals and sort)
-await _reorderChampionshipStandings(categoryId);
-
-
-      try {
-        final Map<int, AllianceMatchPair> pairings =
-            _allianceMatchPairings[categoryId] ?? {};
-
-        // Deduplicate pairings by round/position/side
-        final Set<String> processedSeries = {};
-        final List<AllianceMatchPair> uniquePairings = [];
-        for (final pair in pairings.values) {
-          final key = '${pair.roundNumber}_${pair.matchPosition}_${pair.bracketSide}';
-          if (!processedSeries.contains(key)) {
-            processedSeries.add(key);
-            uniquePairings.add(pair);
-          }
-        }
-
-        final Map<int, int> allianceLosses = {};
-        for (final s in standings) {
-          allianceLosses[s.allianceId] = 0;
-        }
-
-        // Use Best-of-3 results exclusively
-        final matchResults = _bestOf3Results[categoryId] ?? {};
-
-        print("📊 Processing ${uniquePairings.length} series for loss calculation (category $categoryId)");
-
-        for (final pair in uniquePairings) {
-          final roundNumber = pair.roundNumber;
-          final matchPosition = pair.matchPosition;
-          final bracketSide = pair.bracketSide;
-          
-          // Skip if either alliance is 0 (TBD)
-          if (pair.alliance1Id == 0 || pair.alliance2Id == 0) {
-            print("  ⏭️ Skipping series R${roundNumber}P${matchPosition} ($bracketSide): TBD alliance");
-            continue;
-          }
-          
-          // Get Best-of-3 results for this specific series
-          final alliance1Results = matchResults[pair.alliance1Id] ?? [];
-          final alliance2Results = matchResults[pair.alliance2Id] ?? [];
-          
-          final Set<int> completedMatches = {};
-          int winsA = 0;
-          int winsB = 0;
-          
-          // Count wins from alliance 1 results
-          for (final r in alliance1Results) {
-            if (r.matchRound == roundNumber && 
-                r.matchPosition == matchPosition && 
-                r.bracketSide == bracketSide &&
-                r.isCompleted) {
-              completedMatches.add(r.matchNumber);
-              if (r.winnerAllianceId == pair.alliance1Id) winsA++;
-              else if (r.winnerAllianceId == pair.alliance2Id) winsB++;
-            }
-          }
-          
-          // Count wins from alliance 2 results
-          for (final r in alliance2Results) {
-            if (r.matchRound == roundNumber && 
-                r.matchPosition == matchPosition && 
-                r.bracketSide == bracketSide &&
-                r.isCompleted) {
-              if (!completedMatches.contains(r.matchNumber)) {
-                completedMatches.add(r.matchNumber);
-                if (r.winnerAllianceId == pair.alliance1Id) winsA++;
-                else if (r.winnerAllianceId == pair.alliance2Id) winsB++;
-              }
-            }
-          }
-          
-          // Determine if series is complete (2 wins or 3 matches played)
-          final bool seriesComplete = (winsA >= 2) || (winsB >= 2) || (completedMatches.length >= 3);
-          
-          if (seriesComplete) {
-            // Determine loser based on series results
-            final int loserId;
-            if (winsA > winsB) {
-              loserId = pair.alliance2Id;
-              print("  ✅ Series R${roundNumber}P${matchPosition} ($bracketSide): "
-                    "Winner: A${pair.alliance1Id} ($winsA-$winsB), Loser: A$loserId");
-            } else if (winsB > winsA) {
-              loserId = pair.alliance1Id;
-              print("  ✅ Series R${roundNumber}P${matchPosition} ($bracketSide): "
-                    "Winner: A${pair.alliance2Id} ($winsA-$winsB), Loser: A$loserId");
-            } else {
-              // If tie (shouldn't happen with 3 matches), don't count loss
-              print("  ⚠️ Series R${roundNumber}P${matchPosition} ($bracketSide): "
-                    "Tie $winsA-$winsB, no loss assigned");
-              continue;
-            }
-            allianceLosses[loserId] = (allianceLosses[loserId] ?? 0) + 1;
-          } else {
-            print("  ⏭️ Series R${roundNumber}P${matchPosition} ($bracketSide): "
-                  "Not complete ($winsA-$winsB, ${completedMatches.length}/3 matches)");
-          }
-        }
-
-        print("📊 Final alliance losses for category $categoryId: $allianceLosses");
-
-        if (mounted) {
-          setState(() {
-            _allianceLossesByCategory[categoryId] = allianceLosses;
-          });
-        }
-      } catch (e) {
-        print('❌ Error computing alliance losses: $e');
-      }
-    } catch (e) {
-      print("Error loading championship standings: $e");
+    if (alliances.isEmpty) {
       if (mounted) {
         setState(() {
           _championshipStandingsByCategory[categoryId] = [];
           _isLoadingAllianceByCategory[categoryId] = false;
         });
       }
+      return;
+    }
+
+    // Create standings list - now using matchesPerAlliance for match display
+    final List<ChampionshipAllianceStanding> standings = [];
+
+    for (final alliance in alliances) {
+      final allianceId = int.parse(alliance['alliance_id'].toString());
+      final allianceRank = int.parse(alliance['alliance_rank'].toString());
+      
+      // Calculate total match wins across ALL match numbers (1, 2, 3)
+      // For each match number, count wins
+      int totalWins = 0;
+      final matchScores = <int, Map<String, int>>{};
+      
+      for (int matchNum = 1; matchNum <= matchesPerAlliance; matchNum++) {
+        final matchWins = _countWinsForMatchNumberAcrossRounds(
+          categoryId, 
+          allianceId, 
+          0, 
+          0, 
+          matchNum
+        );
+        final winsForMatch = matchWins['winsA'] ?? 0;
+        totalWins += winsForMatch;
+        
+        // Store match score info (you can expand this to store actual scores if needed)
+        matchScores[matchNum] = {
+          'score': winsForMatch * 10, // 10 points per win
+          'violation': 0,
+        };
+      }
+
+      standings.add(
+        ChampionshipAllianceStanding(
+          allianceId: allianceId,
+          allianceRank: allianceRank,
+          captainName: alliance['captain_name'].toString(),
+          partnerName: alliance['partner_name'].toString(),
+          matchScores: matchScores,
+          totalScore: totalWins * 10, // 10 points per win
+        ),
+      );
+    }
+
+    // Sort by totalScore (highest first)
+    standings.sort((a, b) {
+      if (a.totalScore != b.totalScore) {
+        return b.totalScore.compareTo(a.totalScore);
+      }
+      return a.allianceRank.compareTo(b.allianceRank);
+    });
+
+    if (mounted) {
+      setState(() {
+        _championshipStandingsByCategory[categoryId] = standings;
+        _isLoadingAllianceByCategory[categoryId] = false;
+      });
+    }
+    
+    print("✅ Loaded ${standings.length} championship standings with $matchesPerAlliance matches per alliance");
+  } catch (e) {
+    print("Error loading championship standings: $e");
+    if (mounted) {
+      setState(() {
+        _championshipStandingsByCategory[categoryId] = [];
+        _isLoadingAllianceByCategory[categoryId] = false;
+      });
     }
   }
+}
 
   // Build Best-of-3 match cell - shows win/loss counts
   Widget _buildBestOf3MatchCell({
@@ -4679,327 +4592,322 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
     );
   }
 
-  // Original championship table for non-Explorer categories
   Widget _buildOriginalChampionshipTable(int categoryId) {
-    bool isLoading = _isLoadingAllianceByCategory[categoryId] ?? false;
-    List<ChampionshipAllianceStanding> standings =
-        _championshipStandingsByCategory[categoryId] ?? [];
-    int matchesPerAlliance = _championshipMatchesPerAlliance[categoryId] ?? 1;
+  bool isLoading = _isLoadingAllianceByCategory[categoryId] ?? false;
+  List<ChampionshipAllianceStanding> standings =
+      _championshipStandingsByCategory[categoryId] ?? [];
+  
+  int matchesPerAlliance = _championshipMatchesPerAlliance[categoryId] ?? 3;
 
-    if (isLoading) {
-      return const Expanded(
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              CircularProgressIndicator(color: Color(0xFFFFD700)),
-              SizedBox(height: 16),
-              Text(
-                'Loading championship standings...',
-                style: TextStyle(color: Colors.white54, fontSize: 14),
-              ),
-            ],
-          ),
+  if (isLoading) {
+    return const Expanded(
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(color: Color(0xFFFFD700)),
+            SizedBox(height: 16),
+            Text(
+              'Loading championship standings...',
+              style: TextStyle(color: Colors.white54, fontSize: 14),
+            ),
+          ],
         ),
-      );
-    }
-
-    if (standings.isEmpty) {
-      return Expanded(
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.emoji_events,
-                size: 64,
-                color: Colors.white.withOpacity(0.2),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'No Championship Data Yet',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Generate championship schedule first',
-                style: TextStyle(
-                  color: Colors.white.withOpacity(0.5),
-                  fontSize: 14,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    return Expanded(
-      child: Column(
-        children: [
-          Container(
-            color: const Color(0xFF5C2ECC),
-            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-            child: Row(
-              children: [
-                _headerCell('RANK', flex: 1),
-                _headerCell('ALLIANCE', flex: 1),
-                _headerCell('TEAMS', flex: 4),
-                ...List.generate(
-                  matchesPerAlliance,
-                  (i) => Expanded(
-                    flex: 3,
-                    child: Center(
-                      child: Text(
-                        'MATCH ${i + 1}',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                _headerCell('MAX SCORE', flex: 2, center: true),
-              ],
-            ),
-          ),
-
-          Container(
-            color: const Color(0xFF4A1A9C),
-            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-            child: Row(
-              children: [
-                const Expanded(flex: 1, child: SizedBox()),
-                const Expanded(flex: 1, child: SizedBox()),
-                const Expanded(flex: 4, child: SizedBox()),
-                ...List.generate(
-                  matchesPerAlliance,
-                  (i) => Expanded(
-                    flex: 3,
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                      children: [
-                        Expanded(
-                          child: Center(
-                            child: Text(
-                              'ALL',
-                              style: TextStyle(
-                                color: const Color(0xFFFFD700).withOpacity(0.9),
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                        Expanded(
-                          child: Center(
-                            child: Text(
-                              'VIO',
-                              style: TextStyle(
-                                color: Colors.redAccent.withOpacity(0.9),
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const Expanded(flex: 2, child: SizedBox()),
-              ],
-            ),
-          ),
-
-          Expanded(
-            child: ListView.builder(
-              itemCount: standings.length,
-              itemBuilder: (context, index) {
-                final standing = standings[index];
-                final isEven = index % 2 == 0;
-
-                return Container(
-                  color: isEven
-                      ? const Color(0xFF1E0E5A)
-                      : const Color(0xFF160A42),
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 12,
-                    horizontal: 16,
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        flex: 1,
-                        child: Text(
-                          '${index + 1}',
-                          style: TextStyle(
-                            color: _rankColor(index + 1),
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                          ),
-                        ),
-                      ),
-                      Expanded(
-                        flex: 1,
-                        child: Text(
-                          '#${standing.allianceRank}',
-                          style: const TextStyle(
-                            color: Color(0xFFFFD700),
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                          ),
-                        ),
-                      ),
-                      Expanded(
-                        flex: 4,
-                        child: Padding(
-                          padding: const EdgeInsets.only(right: 12),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 6,
-                            ),
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                colors: [
-                                  const Color(0xFFFFD700).withOpacity(0.15),
-                                  const Color(0xFF00CFFF).withOpacity(0.1),
-                                ],
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                              ),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(
-                                color: const Color(0xFFFFD700).withOpacity(0.3),
-                                width: 1.5,
-                              ),
-                            ),
-                            child: Center(
-                              child: Text(
-                                '${standing.captainName.toUpperCase()} / ${standing.partnerName.toUpperCase()}',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                                textAlign: TextAlign.center,
-                                overflow: TextOverflow.ellipsis,
-                                maxLines: 2,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      ...List.generate(matchesPerAlliance, (i) {
-                        final matchScore = standing.getMatchScore(i + 1);
-                        final hasScore = matchScore != null;
-
-                        return Expanded(
-                          flex: 3,
-                          child: Container(
-                            margin: const EdgeInsets.symmetric(horizontal: 2),
-                            decoration: BoxDecoration(
-                              border: Border.all(
-                                color: hasScore
-                                    ? const Color(0xFFFFD700).withOpacity(0.3)
-                                    : Colors.white.withOpacity(0.1),
-                                width: 1,
-                              ),
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                              children: [
-                                Expanded(
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 8,
-                                    ),
-                                    child: Center(
-                                      child: Text(
-                                        hasScore
-                                            ? '${matchScore!['score']}'
-                                            : '—',
-                                        style: TextStyle(
-                                          color: hasScore
-                                              ? const Color(0xFFFFD700)
-                                              : Colors.white24,
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 14,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                Expanded(
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 8,
-                                    ),
-                                    child: Center(
-                                      child: Text(
-                                        hasScore
-                                            ? '${matchScore!['violation']}'
-                                            : '—',
-                                        style: TextStyle(
-                                          color: hasScore
-                                              ? Colors.redAccent
-                                              : Colors.white24,
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 14,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        );
-                      }),
-                      Expanded(
-                        flex: 2,
-                        child: Center(
-                          child: Column(
-                            children: [
-                              Text(
-                                '${standing.totalScore}',
-                                style: const TextStyle(
-                                  color: Color(0xFFFFD700),
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 18,
-                                ),
-                              ),
-                              const Text(
-                                'MAX',
-                                style: TextStyle(
-                                  color: Colors.white38,
-                                  fontSize: 9,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
-          ),
-        ],
       ),
     );
   }
+
+  if (standings.isEmpty) {
+    return Expanded(
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.emoji_events,
+              size: 64,
+              color: Colors.white.withOpacity(0.2),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'No Championship Data Yet',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Generate championship schedule first',
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.5),
+                fontSize: 14,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  return Expanded(
+    child: Column(
+      children: [
+        Container(
+          color: const Color(0xFF5C2ECC),
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+          child: Row(
+            children: [
+              _headerCell('RANK', flex: 1),
+              _headerCell('ALLIANCE', flex: 1),
+              _headerCell('TEAMS', flex: 4),
+              ...List.generate(
+                matchesPerAlliance,
+                (i) => Expanded(
+                  flex: 2,
+                  child: Center(
+                    child: Text(
+                      'MATCH ${i + 1}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              _headerCell('MAX SCORE', flex: 2, center: true),
+            ],
+          ),
+        ),
+        Container(
+          color: const Color(0xFF4A1A9C),
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+          child: Row(
+            children: [
+              const Expanded(flex: 1, child: SizedBox()),
+              const Expanded(flex: 1, child: SizedBox()),
+              const Expanded(flex: 4, child: SizedBox()),
+              ...List.generate(
+                matchesPerAlliance,
+                (i) => [
+                  Expanded(
+                    flex: 1,
+                    child: Center(
+                      child: Text(
+                        'ALL',
+                        style: TextStyle(
+                          color: const Color(0xFFFFD700).withOpacity(0.9),
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    flex: 1,
+                    child: Center(
+                      child: Text(
+                        'VIO',
+                        style: TextStyle(
+                          color: Colors.redAccent.withOpacity(0.9),
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ).expand((x) => x).toList(),
+              const Expanded(flex: 2, child: SizedBox()),
+            ],
+          ),
+        ),
+        Expanded(
+          child: ListView.builder(
+            itemCount: standings.length,
+            itemBuilder: (context, index) {
+              final standing = standings[index];
+              final isEven = index % 2 == 0;
+              return Container(
+                color: isEven ? const Color(0xFF1E0E5A) : const Color(0xFF160A42),
+                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                child: Row(
+                  children: [
+                    Expanded(
+                      flex: 1,
+                      child: Text(
+                        '${index + 1}',
+                        style: TextStyle(
+                          color: _rankColor(index + 1),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      flex: 1,
+                      child: Text(
+                        '#${standing.allianceRank}',
+                        style: const TextStyle(
+                          color: Color(0xFFFFD700),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      flex: 4,
+                      child: Padding(
+                        padding: const EdgeInsets.only(right: 12),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [
+                                const Color(0xFFFFD700).withOpacity(0.15),
+                                const Color(0xFF00CFFF).withOpacity(0.1),
+                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: const Color(0xFFFFD700).withOpacity(0.3),
+                              width: 1.5,
+                            ),
+                          ),
+                          child: Center(
+                            child: Text(
+                              '${standing.captainName.toUpperCase()} / ${standing.partnerName.toUpperCase()}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              textAlign: TextAlign.center,
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 2,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    ...List.generate(matchesPerAlliance, (matchIndex) {
+                      final matchNumber = matchIndex + 1;
+                      final matchScore = standing.getMatchScore(matchNumber);
+                      final hasScore = matchScore != null;
+                      return [
+                        Expanded(
+                          flex: 1,
+                          child: GestureDetector(
+                            onTap: () => _showChampionshipScoreDialog(
+                              categoryId: categoryId,
+                              allianceId: standing.allianceId,
+                              allianceRank: standing.allianceRank,
+                              allianceName: '${standing.captainName} / ${standing.partnerName}',
+                              matchNumber: matchNumber,
+                              currentScore: matchScore,
+                            ),
+                            child: Container(
+                              margin: const EdgeInsets.symmetric(horizontal: 1),
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              decoration: BoxDecoration(
+                                border: Border.all(
+                                  color: hasScore ? const Color(0xFFFFD700).withOpacity(0.3) : Colors.white.withOpacity(0.1),
+                                  width: 1,
+                                ),
+                                borderRadius: BorderRadius.circular(4),
+                                color: hasScore ? const Color(0xFFFFD700).withOpacity(0.05) : null,
+                              ),
+                              child: Center(
+                                child: Text(
+                                  hasScore ? '${matchScore!['score']}' : '—',
+                                  style: TextStyle(
+                                    color: hasScore ? const Color(0xFFFFD700) : Colors.white24,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          flex: 1,
+                          child: GestureDetector(
+                            onTap: () => _showChampionshipScoreDialog(
+                              categoryId: categoryId,
+                              allianceId: standing.allianceId,
+                              allianceRank: standing.allianceRank,
+                              allianceName: '${standing.captainName} / ${standing.partnerName}',
+                              matchNumber: matchNumber,
+                              currentScore: matchScore,
+                            ),
+                            child: Container(
+                              margin: const EdgeInsets.symmetric(horizontal: 1),
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              decoration: BoxDecoration(
+                                border: Border.all(
+                                  color: hasScore ? Colors.redAccent.withOpacity(0.3) : Colors.white.withOpacity(0.1),
+                                  width: 1,
+                                ),
+                                borderRadius: BorderRadius.circular(4),
+                                color: hasScore ? Colors.redAccent.withOpacity(0.05) : null,
+                              ),
+                              child: Center(
+                                child: Text(
+                                  hasScore ? '${matchScore!['violation']}' : '—',
+                                  style: TextStyle(
+                                    color: hasScore ? Colors.redAccent : Colors.white24,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ];
+                    }).expand((x) => x).toList(),
+                    Expanded(
+                      flex: 2,
+                      child: Center(
+                        child: Column(
+                          children: [
+                            Text(
+                              '${standing.totalScore}',
+                              style: const TextStyle(
+                                color: Color(0xFFFFD700),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 18,
+                              ),
+                            ),
+                            const Text(
+                              'MAX',
+                              style: TextStyle(
+                                color: Colors.white38,
+                                fontSize: 9,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    ),
+  );
+}
 
   Future<void> _loadAllianceStandings(int categoryId) async {
     setState(() {
@@ -7558,6 +7466,329 @@ Widget _buildDurationField({
         ],
       ),
     );
+  }
+void _showChampionshipScoreDialog({
+    required int categoryId,
+    required int allianceId,
+    required int allianceRank,
+    required String allianceName,
+    required int matchNumber,
+    required Map<String, int>? currentScore,
+  }) {
+    final allianceScoreController = TextEditingController(
+      text: currentScore?['score']?.toString() ?? '0',
+    );
+    final violationController = TextEditingController(
+      text: currentScore?['violation']?.toString() ?? '0',
+    );
+    
+    String opponentName = 'TBD';
+    final pairings = _allianceMatchPairings[categoryId] ?? {};
+    for (final pair in pairings.values) {
+      if ((pair.alliance1Id == allianceId || pair.alliance2Id == allianceId) &&
+          pair.roundNumber == matchNumber) {
+        opponentName = pair.alliance1Id == allianceId 
+            ? pair.alliance2Name 
+            : pair.alliance1Name;
+        break;
+      }
+    }
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final alliance = int.tryParse(allianceScoreController.text) ?? 0;
+          final violation = int.tryParse(violationController.text) ?? 0;
+          final total = alliance - violation;
+          
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            child: Container(
+              width: 400,
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)],
+                ),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: const Color(0xFFFFD700).withOpacity(0.4),
+                  width: 1.5,
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFD700).withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Icon(
+                          Icons.emoji_events,
+                          color: Color(0xFFFFD700),
+                          size: 20,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Match $matchNumber',
+                              style: const TextStyle(
+                                color: Color(0xFFFFD700),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                            Text(
+                              'Alliance #$allianceRank: $allianceName',
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(0.7),
+                                fontSize: 11,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            Text(
+                              'vs $opponentName',
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(0.5),
+                                fontSize: 10,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  _buildChampionshipScoreField(
+                    label: 'ALLIANCE SCORE',
+                    controller: allianceScoreController,
+                    color: const Color(0xFFFFD700),
+                    hint: '0',
+                    onChanged: (_) => setDialogState(() {}),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildChampionshipScoreField(
+                    label: 'VIOLATION (-)',
+                    controller: violationController,
+                    color: Colors.redAccent,
+                    hint: '0',
+                    onChanged: (_) => setDialogState(() {}),
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFD700).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          'TOTAL SCORE:',
+                          style: TextStyle(
+                            color: Color(0xFFFFD700),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                          ),
+                        ),
+                        Text(
+                          '$total',
+                          style: const TextStyle(
+                            color: Color(0xFFFFD700),
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          child: Text(
+                            'CANCEL',
+                            style: TextStyle(color: Colors.white.withOpacity(0.5)),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: () async {
+                            final allianceScore = int.tryParse(allianceScoreController.text) ?? 0;
+                            final violation = int.tryParse(violationController.text) ?? 0;
+                            final totalScore = allianceScore - violation;
+                            
+                            await _saveChampionshipScore(
+                              categoryId: categoryId,
+                              allianceId: allianceId,
+                              matchNumber: matchNumber,
+                              allianceScore: allianceScore,
+                              violation: violation,
+                              totalScore: totalScore,
+                            );
+                            
+                            if (ctx.mounted) Navigator.pop(ctx);
+                            await _loadChampionshipStandings(categoryId);
+                            if (mounted) setState(() {});
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFFFFD700),
+                            foregroundColor: Colors.black,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                          ),
+                          child: const Text('SAVE SCORE'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildChampionshipScoreField({
+    required String label,
+    required TextEditingController controller,
+    required Color color,
+    required String hint,
+    Function(String)? onChanged,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.bold,
+            fontSize: 11,
+            letterSpacing: 0.5,
+          ),
+        ),
+        const SizedBox(height: 4),
+        TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          onChanged: onChanged,
+          style: TextStyle(
+            color: color,
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+          ),
+          decoration: InputDecoration(
+            hintText: hint,
+            hintStyle: TextStyle(color: color.withOpacity(0.3), fontSize: 18),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: BorderSide(color: color.withOpacity(0.3)),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: BorderSide(color: color.withOpacity(0.3)),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: BorderSide(color: color, width: 2),
+            ),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 12,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _saveChampionshipScore({
+    required int categoryId,
+    required int allianceId,
+    required int matchNumber,
+    required int allianceScore,
+    required int violation,
+    required int totalScore,
+  }) async {
+    try {
+      final conn = await DBHelper.getConnection();
+      
+      final allianceResult = await conn.execute(
+        """
+        SELECT captain_team_id, partner_team_id 
+        FROM tbl_alliance_selections 
+        WHERE alliance_id = :allianceId AND category_id = :catId
+        """,
+        {"allianceId": allianceId, "catId": categoryId},
+      );
+      
+      if (allianceResult.rows.isEmpty) {
+        throw Exception('Alliance not found');
+      }
+      
+      final alliance = allianceResult.rows.first.assoc();
+      final captainTeamId = int.parse(alliance['captain_team_id'].toString());
+      final partnerTeamId = int.parse(alliance['partner_team_id'].toString());
+      
+      final refResult = await conn.execute(
+        "SELECT referee_id FROM tbl_referee LIMIT 1",
+      );
+      final refereeId = refResult.rows.isNotEmpty
+          ? int.parse(refResult.rows.first.assoc()['referee_id'].toString())
+          : null;
+      
+      final matchResult = await conn.execute(
+        """
+        SELECT match_id FROM tbl_championship_schedule
+        WHERE category_id = :catId AND match_number = :matchNum
+        LIMIT 1
+        """,
+        {"catId": categoryId, "matchNum": matchNumber},
+      );
+      
+      final matchId = matchResult.rows.isNotEmpty
+          ? int.parse(matchResult.rows.first.assoc()['match_id'].toString())
+          : 0;
+      
+      for (final teamId in [captainTeamId, partnerTeamId]) {
+        await DBHelper.upsertScore(
+          teamId: teamId,
+          roundId: matchNumber,
+          matchId: matchId,
+          refereeId: refereeId,
+          independentScore: totalScore,
+          allianceScore: allianceScore,
+          violation: violation,
+          totalScore: totalScore,
+          totalDuration: '00:00',
+        );
+      }
+      
+      print("✅ Saved championship score for Alliance #$allianceId, Match $matchNumber: $totalScore pts");
+      
+    } catch (e) {
+      print("❌ Error saving championship score: $e");
+      rethrow;
+    }
   }
 }
 
