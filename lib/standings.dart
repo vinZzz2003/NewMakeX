@@ -182,7 +182,7 @@ class ChampionshipAllianceStanding {
   final String captainName;
   final String partnerName;
   final Map<int, Map<String, int>> matchScores;
-  int totalScore;
+  int totalScore;  // This now represents MAX SCORE (highest individual match)
 
   ChampionshipAllianceStanding({
     required this.allianceId,
@@ -272,6 +272,7 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
   final Map<int, Map<int, int>> _allianceWins = {};
   final Map<int, Map<int, int>> _allianceMatchesPlayed = {};
   final Map<int, Map<int, AllianceMatchPair>> _allianceMatchPairings = {};
+  final Map<int, List<Map<String, dynamic>>> _battleStandingsByCategory = {};
 
   bool _isLoading = true;
   bool _isInitializingScores = false;
@@ -2583,11 +2584,10 @@ allRoundsData.sort((a, b) {
   }
 
   try {
-    // ADD THIS: Load championship settings first
+    // Load championship settings
     final settings = await DBHelper.loadChampionshipSettings(categoryId);
-    final matchesPerAlliance = settings?.matchesPerAlliance ?? 3; // Default to 3 if not found
+    final matchesPerAlliance = settings?.matchesPerAlliance ?? 3;
     
-    // Store it for later use
     if (mounted) {
       setState(() {
         _championshipMatchesPerAlliance[categoryId] = matchesPerAlliance;
@@ -2600,9 +2600,9 @@ allRoundsData.sort((a, b) {
     await _loadBestOf3Results(categoryId);
 
     final conn = await DBHelper.getConnection();
-
-    final alliancesResult = await conn.execute(
-      """
+    
+    // Get all alliances for this category
+    final alliancesResult = await conn.execute("""
       SELECT 
         a.alliance_id,
         a.selection_round as alliance_rank,
@@ -2613,9 +2613,7 @@ allRoundsData.sort((a, b) {
       LEFT JOIN tbl_team t2 ON a.partner_team_id = t2.team_id
       WHERE a.category_id = :catId
       ORDER BY a.selection_round
-    """,
-      {"catId": categoryId},
-    );
+    """, {"catId": categoryId});
 
     final alliances = alliancesResult.rows.map((r) => r.assoc()).toList();
 
@@ -2629,35 +2627,57 @@ allRoundsData.sort((a, b) {
       return;
     }
 
-    // Create standings list - now using matchesPerAlliance for match display
+    // Get ALL Best-of-3 results for this category
+    final bestOf3Result = await conn.execute("""
+      SELECT 
+        alliance_id,
+        match_number,
+        alliance_score,
+        opponent_score,
+        winner_alliance_id,
+        is_completed
+      FROM tbl_championship_bestof3
+      WHERE category_id = :catId AND is_completed = 1
+    """, {"catId": categoryId});
+    
+    // Count wins per alliance (number of matches won, not sum of scores)
+    final Map<int, int> winsCount = {};
+    // Also track total points (sum of alliance_score) if needed
+    final Map<int, int> totalPoints = {};
+    
+    for (final row in bestOf3Result.rows) {
+      final data = row.assoc();
+      final allianceId = int.parse(data['alliance_id'].toString());
+      final allianceScore = int.parse(data['alliance_score'].toString());
+      final opponentScore = int.parse(data['opponent_score'].toString());
+      final winnerId = int.parse(data['winner_alliance_id'].toString());
+      
+      // Count as win if this alliance won the match
+      if (winnerId == allianceId) {
+        winsCount[allianceId] = (winsCount[allianceId] ?? 0) + 1;
+      }
+      
+      // Track total points (alliance_score)
+      totalPoints[allianceId] = (totalPoints[allianceId] ?? 0) + allianceScore;
+      
+      print("   Alliance $allianceId: Match ${data['match_number']} - Score: $allianceScore vs $opponentScore, Winner: ${winnerId == allianceId ? 'YES' : 'NO'}");
+    }
+
+    // Create standings list
     final List<ChampionshipAllianceStanding> standings = [];
 
     for (final alliance in alliances) {
       final allianceId = int.parse(alliance['alliance_id'].toString());
       final allianceRank = int.parse(alliance['alliance_rank'].toString());
       
-      // Calculate total match wins across ALL match numbers (1, 2, 3)
-      // For each match number, count wins
-      int totalWins = 0;
+      // Get wins count (number of matches won)
+      final wins = winsCount[allianceId] ?? 0;
+      // MAX SCORE = wins × 10
+      final maxScore = wins * 10;
+      
       final matchScores = <int, Map<String, int>>{};
       
-      for (int matchNum = 1; matchNum <= matchesPerAlliance; matchNum++) {
-        final matchWins = _countWinsForMatchNumberAcrossRounds(
-          categoryId, 
-          allianceId, 
-          0, 
-          0, 
-          matchNum
-        );
-        final winsForMatch = matchWins['winsA'] ?? 0;
-        totalWins += winsForMatch;
-        
-        // Store match score info (you can expand this to store actual scores if needed)
-        matchScores[matchNum] = {
-          'score': winsForMatch * 10, // 10 points per win
-          'violation': 0,
-        };
-      }
+      print("   Alliance #$allianceRank: $wins wins → MAX SCORE = $maxScore");
 
       standings.add(
         ChampionshipAllianceStanding(
@@ -2666,7 +2686,7 @@ allRoundsData.sort((a, b) {
           captainName: alliance['captain_name'].toString(),
           partnerName: alliance['partner_name'].toString(),
           matchScores: matchScores,
-          totalScore: totalWins * 10, // 10 points per win
+          totalScore: maxScore,
         ),
       );
     }
@@ -2686,7 +2706,11 @@ allRoundsData.sort((a, b) {
       });
     }
     
-    print("✅ Loaded ${standings.length} championship standings with $matchesPerAlliance matches per alliance");
+    print("✅ Loaded ${standings.length} championship standings");
+    for (final s in standings) {
+      final wins = s.totalScore ~/ 10;
+      print("   Alliance #${s.allianceRank}: $wins wins → ${s.totalScore} points");
+    }
   } catch (e) {
     print("Error loading championship standings: $e");
     if (mounted) {
@@ -6224,6 +6248,21 @@ Widget _buildDurationField({
         standingsByCategory[catId] = standings;
         print("✅ Category $catId: ${standings.length} teams processed");
 
+        // ============================================================
+// ADD THIS BLOCK - Load Battle of Champions standings
+// ============================================================
+try {
+  final battleStandings = await DBHelper.getBattleOfChampionsStandings();
+  _battleStandingsByCategory[catId] = battleStandings.where((s) => 
+    s['category_id']?.toString() == catId.toString() || 
+    s['alliance1_id'] != null
+  ).toList();
+  print("✅ Loaded ${_battleStandingsByCategory[catId]?.length ?? 0} battle standings for category $catId");
+} catch (e) {
+  print("⚠️ Could not load battle standings for category $catId: $e");
+  _battleStandingsByCategory[catId] = [];
+}
+
         if (!_selectedTypeByCategory.containsKey(catId)) {
           _selectedTypeByCategory[catId] = StandingType.qualification;
         }
@@ -7020,127 +7059,996 @@ Widget _buildDurationField({
     );
   }
 
-    Widget _buildBattleOfChampionsView(int categoryId) {
+Widget _buildBattleOfChampionsView(int categoryId) {
   bool isLoading = _isLoadingAllianceByCategory[categoryId] ?? false;
-  List<ChampionStanding> standings = _championStandingsByCategory[categoryId] ?? [];
+  
+  // Get battle matches for this category
+  return FutureBuilder<List<Map<String, dynamic>>>(
+    future: DBHelper.getBattleOfChampionsMatches(categoryId),
+    builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) {
+        return const Expanded(
+          child: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                CircularProgressIndicator(color: Color(0xFFFFD700)),
+                SizedBox(height: 16),
+                Text('Loading Battle of Champions...', style: TextStyle(color: Colors.white54)),
+              ],
+            ),
+          ),
+        );
+      }
 
-  if (isLoading) {
-    return const Expanded(
-      child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            CircularProgressIndicator(color: Color(0xFFFFD700)),
-            SizedBox(height: 16),
-            Text(
-              'Loading champion standings...',
-              style: TextStyle(color: Colors.white54),
+      if (snapshot.hasError) {
+        return Expanded(
+          child: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
+                const SizedBox(height: 16),
+                Text('Error: ${snapshot.error}', style: const TextStyle(color: Colors.white54)),
+              ],
             ),
-          ],
-        ),
-      ),
-    );
-  }
+          ),
+        );
+      }
 
-  if (standings.isEmpty) {
-    return Expanded(
-      child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.military_tech_rounded,
-              size: 64,
-              color: Colors.white.withOpacity(0.2),
+      final matches = snapshot.data ?? [];
+      
+      if (matches.isEmpty) {
+        return Expanded(
+          child: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: const Color(0xFFFFD700).withOpacity(0.1),
+                    border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.3), width: 2),
+                  ),
+                  child: const Icon(Icons.military_tech, size: 64, color: Color(0xFFFFD700)),
+                ),
+                const SizedBox(height: 24),
+                const Text('No Battle of Champions Data', 
+                  style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 8),
+                Text('Generate Battle of Champions schedule first', 
+                  style: TextStyle(color: Colors.white.withOpacity(0.5))),
+              ],
             ),
-            const SizedBox(height: 16),
-            const Text(
-              'Battle of Champions Not Completed',
-              style: TextStyle(color: Colors.white, fontSize: 18),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Complete the championship round first',
-              style: TextStyle(color: Colors.white.withOpacity(0.5)),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+          ),
+        );
+      }
 
-  // The standings should already be sorted from _loadChampionStandings
-  // But ensure the order is correct: Champion, Runner-up, then Semi-finalists (by points)
-  standings.sort((a, b) {
-    int getOrder(ChampionStanding s) {
-      if (s.title == 'Champion') return 1;
-      if (s.title == 'Runner-up') return 2;
-      return 3;
-    }
-    final orderCompare = getOrder(a).compareTo(getOrder(b));
-    if (orderCompare != 0) return orderCompare;
-    // For semi-finalists, keep the order they were added (already sorted by points)
-    return 0;
-  });
-
-  return Expanded(
-    child: SingleChildScrollView(
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        children: [
-          // Champion Card
-          if (standings.where((s) => s.title == 'Champion').isNotEmpty)
-            _buildChampionCard(
-              standings.firstWhere((s) => s.title == 'Champion'),
-              isChampion: true,
-            ),
-          
-          const SizedBox(height: 12),
-          
-          // Runner-up Card
-          if (standings.where((s) => s.title == 'Runner-up').isNotEmpty)
-            _buildChampionCard(
-              standings.firstWhere((s) => s.title == 'Runner-up'),
-              isChampion: false,
-            ),
-          
-          const SizedBox(height: 12),
-          
-          // Semi-finalists Section
-          if (standings.where((s) => s.title == 'Semi-finalist').isNotEmpty) ...[
-            Container(
-              margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              decoration: BoxDecoration(
-                color: const Color(0xFFCD7F32).withOpacity(0.15),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(
-                  color: const Color(0xFFCD7F32).withOpacity(0.3),
+      // Build data for captain and partner
+      final Map<String, Map<String, dynamic>> playerStats = {};
+      
+      for (final match in matches) {
+        final team1Id = match['team1_id'].toString();
+        final team2Id = match['team2_id'].toString();
+        final team1Name = match['team1_name'].toString();
+        final team2Name = match['team2_name'].toString();
+        final team1Rank = match['team1_rank'].toString();
+        final team2Rank = match['team2_rank'].toString();
+        final matchNumber = match['match_number'] as int;
+        final team1Score = match['team1_score'] as int;
+        final team1Violation = match['team1_violation'] as int;
+        final team2Score = match['team2_score'] as int;
+        final team2Violation = match['team2_violation'] as int;
+        final team1Final = team1Score - team1Violation;
+        final team2Final = team2Score - team2Violation;
+        
+        if (!playerStats.containsKey(team1Id)) {
+          playerStats[team1Id] = {
+            'team_id': team1Id,
+            'team_name': team1Name,
+            'rank': team1Rank,
+            'role': 'CAPTAIN',
+            'match1_score': 0,
+            'match1_violation': 0,
+            'match1_final': 0,
+            'match2_score': 0,
+            'match2_violation': 0,
+            'match2_final': 0,
+            'match3_score': 0,
+            'match3_violation': 0,
+            'match3_final': 0,
+            'total_score': 0,
+            'total_violation': 0,
+            'total_final': 0,
+            'wins': 0,
+            'matches': {},
+          };
+        }
+        
+        if (!playerStats.containsKey(team2Id)) {
+          playerStats[team2Id] = {
+            'team_id': team2Id,
+            'team_name': team2Name,
+            'rank': team2Rank,
+            'role': 'PARTNER',
+            'match1_score': 0,
+            'match1_violation': 0,
+            'match1_final': 0,
+            'match2_score': 0,
+            'match2_violation': 0,
+            'match2_final': 0,
+            'match3_score': 0,
+            'match3_violation': 0,
+            'match3_final': 0,
+            'total_score': 0,
+            'total_violation': 0,
+            'total_final': 0,
+            'wins': 0,
+            'matches': {},
+          };
+        }
+        
+        // Store match data for editing
+        playerStats[team1Id]!['matches'][matchNumber] = {
+          'score': team1Score,
+          'violation': team1Violation,
+          'final': team1Final,
+          'match_id': match['match_id'],
+          'opponent_id': team2Id,
+          'opponent_name': team2Name,
+          'opponent_role': 'PARTNER',
+        };
+        playerStats[team2Id]!['matches'][matchNumber] = {
+          'score': team2Score,
+          'violation': team2Violation,
+          'final': team2Final,
+          'match_id': match['match_id'],
+          'opponent_id': team1Id,
+          'opponent_name': team1Name,
+          'opponent_role': 'CAPTAIN',
+        };
+        
+        // Update match scores
+        if (matchNumber == 1) {
+          playerStats[team1Id]!['match1_score'] = team1Score;
+          playerStats[team1Id]!['match1_violation'] = team1Violation;
+          playerStats[team1Id]!['match1_final'] = team1Final;
+          playerStats[team2Id]!['match1_score'] = team2Score;
+          playerStats[team2Id]!['match1_violation'] = team2Violation;
+          playerStats[team2Id]!['match1_final'] = team2Final;
+        } else if (matchNumber == 2) {
+          playerStats[team1Id]!['match2_score'] = team1Score;
+          playerStats[team1Id]!['match2_violation'] = team1Violation;
+          playerStats[team1Id]!['match2_final'] = team1Final;
+          playerStats[team2Id]!['match2_score'] = team2Score;
+          playerStats[team2Id]!['match2_violation'] = team2Violation;
+          playerStats[team2Id]!['match2_final'] = team2Final;
+        } else if (matchNumber == 3) {
+          playerStats[team1Id]!['match3_score'] = team1Score;
+          playerStats[team1Id]!['match3_violation'] = team1Violation;
+          playerStats[team1Id]!['match3_final'] = team1Final;
+          playerStats[team2Id]!['match3_score'] = team2Score;
+          playerStats[team2Id]!['match3_violation'] = team2Violation;
+          playerStats[team2Id]!['match3_final'] = team2Final;
+        }
+        
+        // Update totals
+        playerStats[team1Id]!['total_score'] = (playerStats[team1Id]!['total_score'] as int) + team1Score;
+        playerStats[team1Id]!['total_violation'] = (playerStats[team1Id]!['total_violation'] as int) + team1Violation;
+        playerStats[team1Id]!['total_final'] = (playerStats[team1Id]!['total_final'] as int) + team1Final;
+        
+        playerStats[team2Id]!['total_score'] = (playerStats[team2Id]!['total_score'] as int) + team2Score;
+        playerStats[team2Id]!['total_violation'] = (playerStats[team2Id]!['total_violation'] as int) + team2Violation;
+        playerStats[team2Id]!['total_final'] = (playerStats[team2Id]!['total_final'] as int) + team2Final;
+        
+        // Count wins
+        if (team1Final > team2Final) {
+          playerStats[team1Id]!['wins'] = (playerStats[team1Id]!['wins'] as int) + 1;
+        } else if (team2Final > team1Final) {
+          playerStats[team2Id]!['wins'] = (playerStats[team2Id]!['wins'] as int) + 1;
+        }
+      }
+      
+      // Convert to list and sort by total_final (highest first)
+      List<Map<String, dynamic>> players = playerStats.values.toList();
+      players.sort((a, b) => (b['total_final'] as int).compareTo(a['total_final'] as int));
+      
+      // Add rank
+      for (int i = 0; i < players.length; i++) {
+        players[i]['rank_num'] = i + 1;
+      }
+      
+      return Expanded(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              // Header Banner
+              Container(
+                margin: const EdgeInsets.only(bottom: 20),
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFFFFD700), Color(0xFFCCAC00)],
+                  ),
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFFFFD700).withOpacity(0.3),
+                      blurRadius: 20,
+                      spreadRadius: 2,
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.2),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.military_tech, color: Colors.black, size: 32),
+                    ),
+                    const SizedBox(width: 16),
+                    const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'BATTLE OF CHAMPIONS',
+                          style: TextStyle(
+                            color: Colors.black,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 20,
+                            letterSpacing: 2,
+                          ),
+                        ),
+                        Text(
+                          'Captain vs Partner • Best of 3',
+                          style: TextStyle(
+                            color: Colors.black87,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.emoji_events, color: Color(0xFFCD7F32), size: 14),
-                  SizedBox(width: 6),
-                  Text(
-                    'SEMI-FINALISTS',
-                    style: TextStyle(
-                      color: Color(0xFFCD7F32),
-                      fontWeight: FontWeight.bold,
-                      fontSize: 11,
-                      letterSpacing: 1,
+              
+              // Standings Table
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF130840),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.2)),
+                ),
+                child: Column(
+                  children: [
+                    // Main Header
+                    Container(
+                      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [const Color(0xFFFFD700).withOpacity(0.15), const Color(0xFFFFD700).withOpacity(0.05)],
+                        ),
+                        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(flex: 1, child: _headerCell('RANK', center: true)),
+                          Expanded(flex: 2, child: _headerCell('TEAM ID', center: true)),
+                          Expanded(flex: 3, child: _headerCell('TEAM NAME', center: true)),
+                          Expanded(flex: 1, child: _headerCell('M1', center: true)),
+                          Expanded(flex: 1, child: _headerCell('M2', center: true)),
+                          Expanded(flex: 1, child: _headerCell('M3', center: true)),
+                          Expanded(flex: 1, child: _headerCell('TOTAL', center: true)),
+                          Expanded(flex: 1, child: _headerCell('WINS', center: true)),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                    
+                    // Sub-header
+                    Container(
+                      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 16),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFD700).withOpacity(0.08),
+                        border: const Border(
+                          bottom: BorderSide(color: Color(0xFFFFD700), width: 0.5),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(flex: 1, child: const SizedBox()),
+                          Expanded(flex: 2, child: const SizedBox()),
+                          Expanded(flex: 3, child: const SizedBox()),
+                          ...List.generate(3, (index) => Expanded(
+                            flex: 1,
+                            child: Column(
+                              children: [
+                                const Text('SCORE', style: TextStyle(color: Color(0xFFFFD700), fontSize: 9, fontWeight: FontWeight.bold)),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    const Text('PTS', style: TextStyle(color: Color(0xFF00CFFF), fontSize: 8)),
+                                    const Text('/', style: TextStyle(color: Colors.white24, fontSize: 8)),
+                                    const Text('VIO', style: TextStyle(color: Colors.redAccent, fontSize: 8)),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          )),
+                          Expanded(flex: 1, child: const SizedBox()),
+                          Expanded(flex: 1, child: const SizedBox()),
+                        ],
+                      ),
+                    ),
+                    
+                    // Table Rows
+                    ...players.map((player) {
+                      final index = player['rank_num'] as int;
+                      final isEven = index % 2 == 0;
+                      final isCaptain = player['role'] == 'CAPTAIN';
+                      final playerColor = isCaptain ? const Color(0xFF00CFFF) : const Color(0xFF00FF88);
+                      final wins = player['wins'] as int;
+                      
+                      // Get opponent for this player
+                      final opponent = players.firstWhere((p) => p['team_id'] != player['team_id'], orElse: () => player);
+                      
+                      return Container(
+                        color: isEven ? const Color(0xFF1E0E5A) : const Color(0xFF160A42),
+                        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                        child: Row(
+                          children: [
+                            // Rank
+                            Expanded(
+                              flex: 1,
+                              child: Center(
+                                child: Container(
+                                  width: 36,
+                                  height: 36,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    gradient: LinearGradient(
+                                      colors: index == 1 
+                                          ? [const Color(0xFFFFD700), const Color(0xFFCCAC00)]
+                                          : [playerColor.withOpacity(0.3), playerColor.withOpacity(0.1)],
+                                    ),
+                                    border: Border.all(
+                                      color: index == 1 ? const Color(0xFFFFD700) : playerColor.withOpacity(0.5),
+                                      width: index == 1 ? 2 : 1.5,
+                                    ),
+                                  ),
+                                  child: Center(
+                                    child: Text(
+                                      index == 1 ? '🏆' : '$index',
+                                      style: TextStyle(
+                                        color: index == 1 ? Colors.black : playerColor,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: index == 1 ? 16 : 12,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            // Team ID
+                            Expanded(
+                              flex: 2,
+                              child: Center(
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: playerColor.withOpacity(0.15),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Text(
+                                    'C${player['team_id'].toString().padLeft(3, '0')}R',
+                                    style: TextStyle(
+                                      color: playerColor,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            // Team Name
+                            Expanded(
+                              flex: 3,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    colors: [playerColor.withOpacity(0.15), playerColor.withOpacity(0.05)],
+                                  ),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: playerColor.withOpacity(0.3)),
+                                ),
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        player['team_name'],
+                                        style: TextStyle(
+                                          color: playerColor,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12,
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: playerColor.withOpacity(0.2),
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: Text(
+                                        player['role'],
+                                        style: TextStyle(
+                                          color: playerColor,
+                                          fontSize: 9,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            // Match 1
+                            _buildBattleScoreCell(
+                              player: player,
+                              matchNumber: 1,
+                              playerColor: playerColor,
+                              onTap: () => _showBattleScoreEditDialog(
+                                matchData: player['matches'][1],
+                                opponentMatchData: opponent['matches'][1],
+                                playerName: player['team_name'],
+                                opponentName: opponent['team_name'],
+                                playerRole: player['role'],
+                                opponentRole: opponent['role'],
+                                matchNumber: 1,
+                                onSaved: () => setState(() {}),
+                              ),
+                            ),
+                            // Match 2
+                            _buildBattleScoreCell(
+                              player: player,
+                              matchNumber: 2,
+                              playerColor: playerColor,
+                              onTap: () => _showBattleScoreEditDialog(
+                                matchData: player['matches'][2],
+                                opponentMatchData: opponent['matches'][2],
+                                playerName: player['team_name'],
+                                opponentName: opponent['team_name'],
+                                playerRole: player['role'],
+                                opponentRole: opponent['role'],
+                                matchNumber: 2,
+                                onSaved: () => setState(() {}),
+                              ),
+                            ),
+                            // Match 3
+                            _buildBattleScoreCell(
+                              player: player,
+                              matchNumber: 3,
+                              playerColor: playerColor,
+                              onTap: () => _showBattleScoreEditDialog(
+                                matchData: player['matches'][3],
+                                opponentMatchData: opponent['matches'][3],
+                                playerName: player['team_name'],
+                                opponentName: opponent['team_name'],
+                                playerRole: player['role'],
+                                opponentRole: opponent['role'],
+                                matchNumber: 3,
+                                onSaved: () => setState(() {}),
+                              ),
+                            ),
+                            // Total Score
+                            Expanded(
+                              flex: 1,
+                              child: Center(
+                                child: Column(
+                                  children: [
+                                    Text(
+                                      '${player['total_score']}',
+                                      style: const TextStyle(color: Color(0xFFFFD700), fontSize: 16, fontWeight: FontWeight.bold),
+                                    ),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF00E5A0).withOpacity(0.15),
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: Text(
+                                        '${player['total_final']}',
+                                        style: const TextStyle(color: Color(0xFF00E5A0), fontSize: 10, fontWeight: FontWeight.bold),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            // Wins
+                            Expanded(
+                              flex: 1,
+                              child: Center(
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      colors: wins >= 2 
+                                          ? [Colors.green.withOpacity(0.3), Colors.green.withOpacity(0.1)]
+                                          : [Colors.white.withOpacity(0.08), Colors.white.withOpacity(0.03)],
+                                    ),
+                                    borderRadius: BorderRadius.circular(20),
+                                    border: Border.all(
+                                      color: wins >= 2 ? Colors.green.withOpacity(0.5) : Colors.white.withOpacity(0.1),
+                                    ),
+                                  ),
+                                  child: Text(
+                                    '$wins-${3 - wins}',
+                                    style: TextStyle(
+                                      color: wins >= 2 ? Colors.green : Colors.white54,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }),
+                    
+                    // Winner Declaration
+                    if (players.isNotEmpty && players.any((p) => p['wins'] >= 2))
+                      Container(
+                        margin: const EdgeInsets.all(16),
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF00E5A0), Color(0xFF00BFA5)],
+                          ),
+                          borderRadius: BorderRadius.circular(12),
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF00E5A0).withOpacity(0.3),
+                              blurRadius: 16,
+                              spreadRadius: 2,
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(Icons.emoji_events, color: Colors.white, size: 32),
+                            const SizedBox(width: 16),
+                            Text(
+                              '🏆 CHAMPION: ${players.firstWhere((p) => p['wins'] >= 2)['team_name']} (${players.firstWhere((p) => p['wins'] >= 2)['role']}) with ${players.firstWhere((p) => p['wins'] >= 2)['wins']} wins 🏆',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+// Helper widget for clickable score cell
+Widget _buildBattleScoreCell({
+  required Map<String, dynamic> player,
+  required int matchNumber,
+  required Color playerColor,
+  required VoidCallback onTap,
+}) {
+  final score = player['match${matchNumber}_score'] as int;
+  final violation = player['match${matchNumber}_violation'] as int;
+  final finalScore = player['match${matchNumber}_final'] as int;
+  final hasScore = score > 0;
+  
+  return Expanded(
+    flex: 1,
+    child: GestureDetector(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          color: hasScore ? playerColor.withOpacity(0.1) : Colors.white.withOpacity(0.03),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: hasScore ? playerColor.withOpacity(0.4) : Colors.white.withOpacity(0.1),
+            width: 1,
+          ),
+        ),
+        child: Column(
+          children: [
+            Text(
+              score > 0 ? '$score' : '—',
+              style: TextStyle(
+                color: score > 0 ? const Color(0xFFFFD700) : Colors.white38,
+                fontWeight: FontWeight.bold,
+                fontSize: 14,
               ),
             ),
-            ...standings
-                .where((s) => s.title == 'Semi-finalist')
-                .map((standing) => _buildChampionCard(standing, isChampion: false)),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  finalScore > 0 ? '$finalScore' : '0',
+                  style: TextStyle(
+                    color: finalScore > 0 ? const Color(0xFF00CFFF) : Colors.white38,
+                    fontSize: 9,
+                  ),
+                ),
+                Text('/', style: TextStyle(color: Colors.white24, fontSize: 9)),
+                Text(
+                  violation > 0 ? '$violation' : '0',
+                  style: TextStyle(
+                    color: violation > 0 ? Colors.redAccent : Colors.white38,
+                    fontSize: 9,
+                  ),
+                ),
+              ],
+            ),
           ],
-        ],
+        ),
       ),
+    ),
+  );
+}
+
+// Score edit dialog - Complete version that saves both players
+void _showBattleScoreEditDialog({
+  required Map<String, dynamic> matchData,
+  required Map<String, dynamic> opponentMatchData,
+  required String playerName,
+  required String opponentName,
+  required String playerRole,
+  required String opponentRole,
+  required int matchNumber,
+  required VoidCallback onSaved,
+}) async {
+  // Safely get values
+  final currentPlayerScore = int.tryParse(matchData['score']?.toString() ?? '0') ?? 0;
+  final currentPlayerViolation = int.tryParse(matchData['violation']?.toString() ?? '0') ?? 0;
+  final currentOpponentScore = int.tryParse(opponentMatchData['score']?.toString() ?? '0') ?? 0;
+  final currentOpponentViolation = int.tryParse(opponentMatchData['violation']?.toString() ?? '0') ?? 0;
+  final matchId = int.tryParse(matchData['match_id']?.toString() ?? '0') ?? 0;
+  
+  final playerScoreController = TextEditingController(text: currentPlayerScore.toString());
+  final playerViolationController = TextEditingController(text: currentPlayerViolation.toString());
+  final opponentScoreController = TextEditingController(text: currentOpponentScore.toString());
+  final opponentViolationController = TextEditingController(text: currentOpponentViolation.toString());
+  
+  await showDialog(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setDialogState) {
+        final playerScore = int.tryParse(playerScoreController.text) ?? 0;
+        final playerViolation = int.tryParse(playerViolationController.text) ?? 0;
+        final opponentScore = int.tryParse(opponentScoreController.text) ?? 0;
+        final opponentViolation = int.tryParse(opponentViolationController.text) ?? 0;
+        final playerFinal = playerScore - playerViolation;
+        final opponentFinal = opponentScore - opponentViolation;
+        final winner = playerFinal > opponentFinal ? playerName : (opponentFinal > playerFinal ? opponentName : 'Draw');
+        
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: Container(
+            width: 550,
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)],
+              ),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.4), width: 1.5),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Header
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFD700).withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(Icons.edit_note, color: Color(0xFFFFD700), size: 24),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'BATTLE OF CHAMPIONS',
+                            style: TextStyle(color: Color(0xFFFFD700), fontSize: 14, fontWeight: FontWeight.bold),
+                          ),
+                          Text(
+                            'Match $matchNumber of 3',
+                            style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white54),
+                      onPressed: () => Navigator.pop(ctx, false),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                
+                // Player 1
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF00CFFF).withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.3)),
+                  ),
+                  child: Column(
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF00CFFF).withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(playerRole, style: const TextStyle(color: Color(0xFF00CFFF), fontSize: 10, fontWeight: FontWeight.bold)),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              playerName,
+                              style: const TextStyle(color: Color(0xFF00CFFF), fontWeight: FontWeight.bold, fontSize: 14),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _buildScoreField(
+                              label: 'SCORE',
+                              controller: playerScoreController,
+                              color: const Color(0xFFFFD700),
+                               hint: '0',
+                              onChanged: (_) => setDialogState(() {}),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _buildScoreField(
+                              label: 'VIOLATION (-)',
+                              controller: playerViolationController,
+                              color: Colors.redAccent,
+                               hint: '0',
+                              onChanged: (_) => setDialogState(() {}),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          const Text('FINAL: ', style: TextStyle(color: Colors.white70)),
+                          Text(
+                            '$playerFinal',
+                            style: const TextStyle(color: Color(0xFFFFD700), fontWeight: FontWeight.bold, fontSize: 16),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                
+                const SizedBox(height: 16),
+                
+                // VS
+                Container(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  child: const Center(
+                    child: Text('VS', style: TextStyle(color: Color(0xFFFFD700), fontSize: 18, fontWeight: FontWeight.bold)),
+                  ),
+                ),
+                
+                const SizedBox(height: 16),
+                
+                // Player 2
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF00FF88).withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.3)),
+                  ),
+                  child: Column(
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF00FF88).withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(opponentRole, style: const TextStyle(color: Color(0xFF00FF88), fontSize: 10, fontWeight: FontWeight.bold)),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              opponentName,
+                              style: const TextStyle(color: Color(0xFF00FF88), fontWeight: FontWeight.bold, fontSize: 14),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _buildScoreField(
+                              label: 'SCORE',
+                              controller: opponentScoreController,
+                              color: const Color(0xFFFFD700),
+                              hint: '0',
+                              onChanged: (_) => setDialogState(() {}),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _buildScoreField(
+                              label: 'VIOLATION (-)',
+                              controller: opponentViolationController,
+                              color: Colors.redAccent,
+                              hint: '0',
+                              onChanged: (_) => setDialogState(() {}),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          const Text('FINAL: ', style: TextStyle(color: Colors.white70)),
+                          Text(
+                            '$opponentFinal',
+                            style: const TextStyle(color: Color(0xFFFFD700), fontWeight: FontWeight.bold, fontSize: 16),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                
+                const SizedBox(height: 20),
+                
+                // Winner preview
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFD700).withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.3)),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.emoji_events, color: Color(0xFFFFD700), size: 20),
+                      const SizedBox(width: 8),
+                      Text(
+                        '🏆 Winner: $winner',
+                        style: const TextStyle(color: Color(0xFFFFD700), fontWeight: FontWeight.bold, fontSize: 14),
+                      ),
+                    ],
+                  ),
+                ),
+                
+                const SizedBox(height: 20),
+                
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        style: TextButton.styleFrom(
+                          side: BorderSide(color: Colors.white.withOpacity(0.2)),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        child: Text('CANCEL', style: TextStyle(color: Colors.white.withOpacity(0.5))),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () async {
+                          if (playerScore < 0 || playerViolation < 0 || opponentScore < 0 || opponentViolation < 0) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Scores cannot be negative'), backgroundColor: Colors.orange),
+                            );
+                            return;
+                          }
+                          
+                          final playerFinalScore = playerScore - playerViolation;
+                          final opponentFinalScore = opponentScore - opponentViolation;
+                          final winnerId = playerFinalScore > opponentFinalScore 
+                              ? int.tryParse(matchData['team_id']?.toString() ?? '0') ?? 0
+                              : (opponentFinalScore > playerFinalScore 
+                                  ? int.tryParse(opponentMatchData['team_id']?.toString() ?? '0') ?? 0
+                                  : 0);
+                          
+                          try {
+                            await DBHelper.saveBattleOfChampionsResult(
+                              matchId: matchId,
+                              team1Score: playerScore,
+                              team1Violation: playerViolation,
+                              team2Score: opponentScore,
+                              team2Violation: opponentViolation,
+                              winnerId: winnerId,
+                            );
+                            
+                            if (ctx.mounted) {
+                              ScaffoldMessenger.of(ctx).showSnackBar(
+                                const SnackBar(content: Text('✅ Score saved!'), backgroundColor: Colors.green),
+                              );
+                              Navigator.pop(ctx);
+                              onSaved();
+                            }
+                          } catch (e) {
+                            if (ctx.mounted) {
+                              ScaffoldMessenger.of(ctx).showSnackBar(
+                                SnackBar(content: Text('❌ Error: $e'), backgroundColor: Colors.red),
+                              );
+                            }
+                          }
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFFFD700),
+                          foregroundColor: Colors.black,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        child: const Text('SAVE', style: TextStyle(fontWeight: FontWeight.bold)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     ),
   );
 }
@@ -7722,74 +8630,68 @@ void _showChampionshipScoreDialog({
   }
 
   Future<void> _saveChampionshipScore({
-    required int categoryId,
-    required int allianceId,
-    required int matchNumber,
-    required int allianceScore,
-    required int violation,
-    required int totalScore,
-  }) async {
-    try {
-      final conn = await DBHelper.getConnection();
-      
-      final allianceResult = await conn.execute(
-        """
-        SELECT captain_team_id, partner_team_id 
-        FROM tbl_alliance_selections 
-        WHERE alliance_id = :allianceId AND category_id = :catId
-        """,
-        {"allianceId": allianceId, "catId": categoryId},
-      );
-      
-      if (allianceResult.rows.isEmpty) {
-        throw Exception('Alliance not found');
-      }
-      
-      final alliance = allianceResult.rows.first.assoc();
-      final captainTeamId = int.parse(alliance['captain_team_id'].toString());
-      final partnerTeamId = int.parse(alliance['partner_team_id'].toString());
-      
-      final refResult = await conn.execute(
-        "SELECT referee_id FROM tbl_referee LIMIT 1",
-      );
-      final refereeId = refResult.rows.isNotEmpty
-          ? int.parse(refResult.rows.first.assoc()['referee_id'].toString())
-          : null;
-      
-      final matchResult = await conn.execute(
-        """
-        SELECT match_id FROM tbl_championship_schedule
-        WHERE category_id = :catId AND match_number = :matchNum
-        LIMIT 1
-        """,
-        {"catId": categoryId, "matchNum": matchNumber},
-      );
-      
-      final matchId = matchResult.rows.isNotEmpty
-          ? int.parse(matchResult.rows.first.assoc()['match_id'].toString())
-          : 0;
-      
-      for (final teamId in [captainTeamId, partnerTeamId]) {
-        await DBHelper.upsertScore(
-          teamId: teamId,
-          roundId: matchNumber,
-          matchId: matchId,
-          refereeId: refereeId,
-          independentScore: totalScore,
-          allianceScore: allianceScore,
-          violation: violation,
-          totalScore: totalScore,
-          totalDuration: '00:00',
-        );
-      }
-      
-      print("✅ Saved championship score for Alliance #$allianceId, Match $matchNumber: $totalScore pts");
-      
-    } catch (e) {
-      print("❌ Error saving championship score: $e");
-      rethrow;
+  required int categoryId,
+  required int allianceId,
+  required int matchNumber,
+  required int allianceScore,
+  required int violation,
+  required int totalScore,
+}) async {
+  try {
+    final conn = await DBHelper.getConnection();
+    
+    // Determine which table to use based on category
+    final bool isStarter = categoryId == 1;
+    final String targetTable = isStarter 
+        ? 'tbl_starter_championship_scores' 
+        : 'tbl_explorer_championship_scores';
+    
+    // Also get the correct alliance selections table
+    final String allianceTable = isStarter
+        ? 'tbl_starter_alliance_selections'
+        : 'tbl_explorer_alliance_selections';
+    
+    final allianceResult = await conn.execute(
+      """
+      SELECT captain_team_id, partner_team_id 
+      FROM $allianceTable
+      WHERE alliance_id = :allianceId AND category_id = :catId
+      """,
+      {"allianceId": allianceId, "catId": categoryId},
+    );
+    
+    if (allianceResult.rows.isEmpty) {
+      throw Exception('Alliance not found');
     }
+    
+    final alliance = allianceResult.rows.first.assoc();
+    final captainTeamId = int.parse(alliance['captain_team_id'].toString());
+    final partnerTeamId = int.parse(alliance['partner_team_id'].toString());
+    
+    // Save to category-specific championship scores table
+    await conn.execute("""
+      INSERT INTO $targetTable 
+        (alliance_id, match_position, score, violation, updated_at)
+      VALUES
+        (:allianceId, :matchNum, :score, :violation, NOW())
+      ON DUPLICATE KEY UPDATE
+        score = :score,
+        violation = :violation,
+        updated_at = NOW()
+    """, {
+      "allianceId": allianceId,
+      "matchNum": matchNumber,
+      "score": totalScore,
+      "violation": violation,
+    });
+    
+    print("✅ Saved championship score for Alliance #$allianceId, Match $matchNumber: $totalScore pts to $targetTable");
+    
+  } catch (e) {
+    print("❌ Error saving championship score: $e");
+    rethrow;
   }
+}
 }
 
 class _PulsingDot extends StatefulWidget {

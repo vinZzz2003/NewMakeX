@@ -10,6 +10,8 @@ import 'generate_schedule.dart';
 import 'alliance_selection.dart';
 import 'dart:math' as math;
 import 'dart:convert';
+import 'constants.dart';
+import 'package:flutter/scheduler.dart';
 
 // ── Match status enum ────────────────────────────────────────────────────────
 enum MatchStatus { pending, inProgress, done }
@@ -1958,10 +1960,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     }
   }
 
-  Widget _buildBattleOfChampionsTab(int categoryId, String categoryName) {
-  // Check if championship round is complete
-  return FutureBuilder<bool>(
-    future: _isChampionshipComplete(categoryId),
+ Widget _buildBattleOfChampionsTab(int categoryId, String categoryName) {
+  return FutureBuilder<List<Map<String, dynamic>>>(
+    future: _getBattleOfChampionsSchedule(categoryId),
     builder: (context, snapshot) {
       if (snapshot.connectionState == ConnectionState.waiting) {
         return const Center(
@@ -1971,7 +1972,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               CircularProgressIndicator(color: Color(0xFFFFD700)),
               SizedBox(height: 16),
               Text(
-                'Checking championship status...',
+                'Loading Battle of Champions...',
                 style: TextStyle(color: Colors.white54),
               ),
             ],
@@ -1979,15 +1980,934 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         );
       }
 
-      final isComplete = snapshot.data ?? false;
-
-      if (!isComplete) {
-        return _buildLockedBattleChampionsScreen(categoryName);
+      if (snapshot.hasError) {
+        return Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
+              const SizedBox(height: 16),
+              Text(
+                'Error: ${snapshot.error}',
+                style: const TextStyle(color: Colors.white54),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () => _generateBattleOfChampions(categoryId),
+                child: const Text('GENERATE BATTLE'),
+              ),
+            ],
+          ),
+        );
       }
 
-      // Championship is complete - show Battle of Champions
-      return _buildBattleChampionsContent(categoryId, categoryName);
+      final matches = snapshot.data ?? [];
+      
+      if (matches.isEmpty) {
+        // NO AUTO-GENERATION - Just show the generate button
+        return Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: const Color(0xFFFFD700).withOpacity(0.1),
+                  border: Border.all(
+                    color: const Color(0xFFFFD700).withOpacity(0.3),
+                    width: 2,
+                  ),
+                ),
+                child: const Icon(
+                  Icons.military_tech,
+                  size: 64,
+                  color: Color(0xFFFFD700),
+                ),
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                'BATTLE OF CHAMPIONS',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 2,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Generate Best of 3 match between Captain and Partner',
+                style: TextStyle(
+                  color: Colors.white.withOpacity(0.5),
+                  fontSize: 14,
+                ),
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                onPressed: () => _generateBattleOfChampions(categoryId),
+                icon: const Icon(Icons.auto_awesome),
+                label: const Text('GENERATE BATTLE OF CHAMPIONS'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFFFD700),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      return _buildBattleOfChampionsSchedule(matches, categoryId);
     },
+  );
+}
+
+Future<List<Map<String, dynamic>>> _getBattleOfChampionsSchedule(int categoryId) async {
+  try {
+    final matches = await DBHelper.getBattleOfChampionsMatches(categoryId);
+    print("📊 Battle of Champions matches for category $categoryId: ${matches.length}");
+    for (final match in matches) {
+      print("   Match ${match['match_number']}: ${match['captain1_name']} vs ${match['captain2_name']}");
+    }
+    return matches;
+  } catch (e) {
+    print("Error getting battle schedule: $e");
+    return [];
+  }
+}
+
+Future<void> _generateBattleOfChampions(int categoryId) async {
+  final confirm = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: const Color(0xFF2D0E7A),
+      title: const Text('Generate Battle of Champions?', style: TextStyle(color: Colors.white)),
+      content: Text(
+        'This will create a Best of 3 match between:\n\n'
+        '🏆 Captain vs Partner of the Champion Alliance\n\n'
+        'This will generate 3 matches (Best of 3).',
+        style: const TextStyle(color: Colors.white70),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('GENERATE', style: TextStyle(color: kAccentGold)),
+        ),
+      ],
+    ),
+  );
+  
+  if (confirm != true) return;
+  
+  try {
+    await DBHelper.generateBattleOfChampionsSchedule(categoryId);
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✅ Battle of Champions schedule generated!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      setState(() {});
+    }
+  } catch (e) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('❌ Error: $e'), backgroundColor: Colors.red),
+      );
+    }
+  }
+}
+
+Widget _buildBattleOfChampionsSchedule(List<Map<String, dynamic>> matches, int categoryId) {
+  return Column(
+    children: [
+      // Header with match info
+      Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [Color(0xFFFFD700), Color(0xFFCCAC00)],
+          ),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text(
+              'BATTLE OF CHAMPIONS',
+              style: TextStyle(
+                color: Colors.black,
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+                letterSpacing: 2,
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Text(
+                'BEST OF 3',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      
+      // Match cards
+      Expanded(
+        child: ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: matches.length,
+          itemBuilder: (context, index) {
+            final match = matches[index];
+            final matchNumber = match['match_number'] as int;
+            final isCompleted = match['is_completed'] == 1 || match['is_completed'] == true;
+            final scheduleTime = match['schedule_time']?.toString() ?? '--:--';
+            
+            final team1Name = match['team1_name']?.toString() ?? 'Unknown';
+            final team2Name = match['team2_name']?.toString() ?? 'Unknown';
+            final team1Rank = match['team1_rank']?.toString() ?? '#?';
+            final team2Rank = match['team2_rank']?.toString() ?? '#?';
+            
+            final team1Score = int.parse(match['team1_score']?.toString() ?? '0');
+            final team1Violation = int.parse(match['team1_violation']?.toString() ?? '0');
+            final team2Score = int.parse(match['team2_score']?.toString() ?? '0');
+            final team2Violation = int.parse(match['team2_violation']?.toString() ?? '0');
+            final team1Final = team1Score - team1Violation;
+            final team2Final = team2Score - team2Violation;
+            final winnerId = match['winner_team_id'];
+            final isWinner1 = winnerId != null && winnerId.toString() == match['team1_id'].toString();
+            
+            return Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    const Color(0xFF2D0E7A).withOpacity(0.9),
+                    const Color(0xFF1A0A4A).withOpacity(0.9),
+                  ],
+                ),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: isCompleted ? Colors.green.withOpacity(0.5) : const Color(0xFFFFD700).withOpacity(0.3),
+                  width: 1.5,
+                ),
+              ),
+              child: Column(
+                children: [
+                  // Header
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: isCompleted ? Colors.green.withOpacity(0.1) : const Color(0xFFFFD700).withOpacity(0.1),
+                      borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFFD700).withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            'MATCH $matchNumber OF 3',
+                            style: const TextStyle(
+                              color: Color(0xFFFFD700),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ),
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.access_time,
+                              color: Colors.white54,
+                              size: 12,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              scheduleTime,
+                              style: const TextStyle(color: Colors.white54, fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  
+                  // Match content
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Row(
+                      children: [
+                        // Team 1
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: isCompleted ? null : () => _showBattleScoreDialog(match, index),
+                            child: Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: [
+                                    isWinner1 ? Colors.green.withOpacity(0.2) : const Color(0xFF00CFFF).withOpacity(0.1),
+                                    isWinner1 ? Colors.green.withOpacity(0.1) : const Color(0xFF00CFFF).withOpacity(0.05),
+                                  ],
+                                ),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: isWinner1 ? Colors.green : const Color(0xFF00CFFF).withOpacity(0.4),
+                                  width: isWinner1 ? 2 : 1.5,
+                                ),
+                              ),
+                              child: Column(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF00CFFF).withOpacity(0.2),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(Icons.flag, color: Color(0xFF00CFFF), size: 10),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          team1Rank,
+                                          style: const TextStyle(color: Color(0xFF00CFFF), fontSize: 10, fontWeight: FontWeight.bold),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    team1Name,
+                                    style: TextStyle(
+                                      color: isWinner1 ? Colors.green : Colors.white,
+                                      fontWeight: isWinner1 ? FontWeight.bold : FontWeight.w600,
+                                      fontSize: 12,
+                                    ),
+                                    textAlign: TextAlign.center,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  if (isCompleted) ...[
+                                    const SizedBox(height: 8),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFFFD700).withOpacity(0.15),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            '$team1Score pts',
+                                            style: const TextStyle(color: Color(0xFFFFD700), fontSize: 11, fontWeight: FontWeight.bold),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: Colors.red.withOpacity(0.15),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            '-$team1Violation',
+                                            style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      'FINAL: $team1Final',
+                                      style: TextStyle(
+                                        color: isWinner1 ? Colors.green : Colors.white70,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        
+                        // VS Divider
+                        Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 12),
+                          width: 50,
+                          height: 50,
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: isCompleted
+                                  ? [Colors.green.withOpacity(0.3), Colors.green.withOpacity(0.1)]
+                                  : [const Color(0xFFFFD700).withOpacity(0.3), const Color(0xFFFFD700).withOpacity(0.1)],
+                            ),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: isCompleted ? Colors.green : const Color(0xFFFFD700),
+                              width: 2,
+                            ),
+                          ),
+                          child: Center(
+                            child: Text(
+                              isCompleted ? 'WIN' : 'VS',
+                              style: TextStyle(
+                                color: isCompleted ? Colors.green : const Color(0xFFFFD700),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ),
+                        
+                        // Team 2
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: isCompleted ? null : () => _showBattleScoreDialog(match, index),
+                            child: Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: [
+                                    !isWinner1 && isCompleted ? Colors.green.withOpacity(0.2) : const Color(0xFF00FF88).withOpacity(0.1),
+                                    !isWinner1 && isCompleted ? Colors.green.withOpacity(0.1) : const Color(0xFF00FF88).withOpacity(0.05),
+                                  ],
+                                ),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: !isWinner1 && isCompleted ? Colors.green : const Color(0xFF00FF88).withOpacity(0.4),
+                                  width: !isWinner1 && isCompleted ? 2 : 1.5,
+                                ),
+                              ),
+                              child: Column(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF00FF88).withOpacity(0.2),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(Icons.flag, color: Color(0xFF00FF88), size: 10),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          team2Rank,
+                                          style: const TextStyle(color: Color(0xFF00FF88), fontSize: 10, fontWeight: FontWeight.bold),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    team2Name,
+                                    style: TextStyle(
+                                      color: !isWinner1 && isCompleted ? Colors.green : Colors.white,
+                                      fontWeight: !isWinner1 && isCompleted ? FontWeight.bold : FontWeight.w600,
+                                      fontSize: 12,
+                                    ),
+                                    textAlign: TextAlign.center,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  if (isCompleted) ...[
+                                    const SizedBox(height: 8),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFFFD700).withOpacity(0.15),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            '$team2Score pts',
+                                            style: const TextStyle(color: Color(0xFFFFD700), fontSize: 11, fontWeight: FontWeight.bold),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: Colors.red.withOpacity(0.15),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            '-$team2Violation',
+                                            style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      'FINAL: $team2Final',
+                                      style: TextStyle(
+                                        color: !isWinner1 && isCompleted ? Colors.green : Colors.white70,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  
+                  // Status footer
+                  Container(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    decoration: BoxDecoration(
+                      color: isCompleted ? Colors.green.withOpacity(0.1) : const Color(0xFFFFD700).withOpacity(0.1),
+                      borderRadius: const BorderRadius.vertical(bottom: Radius.circular(14)),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          isCompleted ? Icons.check_circle : Icons.schedule,
+                          color: isCompleted ? Colors.green : const Color(0xFFFFD700),
+                          size: 14,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          isCompleted ? 'COMPLETED' : 'PENDING',
+                          style: TextStyle(
+                            color: isCompleted ? Colors.green : const Color(0xFFFFD700),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 11,
+                            letterSpacing: 1,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    ],
+  );
+}
+
+void _showBattleScoreDialog(Map<String, dynamic> match, int matchIndex) {
+  final matchId = match['match_id'];
+  final matchNumber = match['match_number'] as int;
+  
+  // Safely get values with proper type conversion
+  final team1Name = match['team1_name']?.toString() ?? 'Unknown';
+  final team2Name = match['team2_name']?.toString() ?? 'Unknown';
+  
+  // Convert to int safely
+  final team1Id = int.tryParse(match['team1_id']?.toString() ?? '0') ?? 0;
+  final team2Id = int.tryParse(match['team2_id']?.toString() ?? '0') ?? 0;
+  
+  final team1Rank = match['team1_rank']?.toString() ?? '#?';
+  final team2Rank = match['team2_rank']?.toString() ?? '#?';
+  
+  final team1ScoreController = TextEditingController(
+    text: match['team1_score']?.toString() ?? '0',
+  );
+  final team1ViolationController = TextEditingController(
+    text: match['team1_violation']?.toString() ?? '0',
+  );
+  final team2ScoreController = TextEditingController(
+    text: match['team2_score']?.toString() ?? '0',
+  );
+  final team2ViolationController = TextEditingController(
+    text: match['team2_violation']?.toString() ?? '0',
+  );
+  
+  showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setDialogState) {
+        final team1Score = int.tryParse(team1ScoreController.text) ?? 0;
+        final team1Violation = int.tryParse(team1ViolationController.text) ?? 0;
+        final team2Score = int.tryParse(team2ScoreController.text) ?? 0;
+        final team2Violation = int.tryParse(team2ViolationController.text) ?? 0;
+        final team1Final = team1Score - team1Violation;
+        final team2Final = team2Score - team2Violation;
+        final winnerName = team1Final > team2Final 
+            ? team1Name 
+            : (team2Final > team1Final ? team2Name : 'Draw');
+        
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: Container(
+            width: 500,
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)],
+              ),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.4), width: 1.5),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Header
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFD700).withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(Icons.military_tech, color: Color(0xFFFFD700), size: 24),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'BATTLE OF CHAMPIONS',
+                            style: TextStyle(color: Color(0xFFFFD700), fontSize: 14, fontWeight: FontWeight.bold, letterSpacing: 1),
+                          ),
+                          Text(
+                            'Match $matchNumber of 3',
+                            style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white54),
+                      onPressed: () => Navigator.pop(ctx),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                
+                // Team 1
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.05),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.3)),
+                  ),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Container(
+                            width: 30,
+                            height: 30,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: const Color(0xFFFFD700).withOpacity(0.2),
+                            ),
+                            child: Center(
+                              child: Text(
+                                team1Rank.replaceAll('#', ''),
+                                style: const TextStyle(color: Color(0xFFFFD700), fontWeight: FontWeight.bold, fontSize: 12),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              team1Name,
+                              style: const TextStyle(color: Color(0xFF00CFFF), fontWeight: FontWeight.bold, fontSize: 14),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _buildScoreField(
+                              label: 'SCORE',
+                              controller: team1ScoreController,
+                              color: const Color(0xFFFFD700),
+                              onChanged: (_) => setDialogState(() {}),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _buildScoreField(
+                              label: 'VIOLATION (-)',
+                              controller: team1ViolationController,
+                              color: Colors.redAccent,
+                              onChanged: (_) => setDialogState(() {}),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          const Text('FINAL: ', style: TextStyle(color: Colors.white70)),
+                          Text(
+                            '$team1Final',
+                            style: const TextStyle(color: Color(0xFFFFD700), fontWeight: FontWeight.bold, fontSize: 16),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                
+                const SizedBox(height: 16),
+                
+                // VS
+                Container(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  child: const Center(
+                    child: Text('VS', style: TextStyle(color: Color(0xFFFFD700), fontSize: 18, fontWeight: FontWeight.bold)),
+                  ),
+                ),
+                
+                const SizedBox(height: 16),
+                
+                // Team 2
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.05),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.3)),
+                  ),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Container(
+                            width: 30,
+                            height: 30,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: const Color(0xFFFFD700).withOpacity(0.2),
+                            ),
+                            child: Center(
+                              child: Text(
+                                team2Rank.replaceAll('#', ''),
+                                style: const TextStyle(color: Color(0xFFFFD700), fontWeight: FontWeight.bold, fontSize: 12),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              team2Name,
+                              style: const TextStyle(color: Color(0xFF00FF88), fontWeight: FontWeight.bold, fontSize: 14),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _buildScoreField(
+                              label: 'SCORE',
+                              controller: team2ScoreController,
+                              color: const Color(0xFFFFD700),
+                              onChanged: (_) => setDialogState(() {}),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _buildScoreField(
+                              label: 'VIOLATION (-)',
+                              controller: team2ViolationController,
+                              color: Colors.redAccent,
+                              onChanged: (_) => setDialogState(() {}),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          const Text('FINAL: ', style: TextStyle(color: Colors.white70)),
+                          Text(
+                            '$team2Final',
+                            style: const TextStyle(color: Color(0xFFFFD700), fontWeight: FontWeight.bold, fontSize: 16),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                
+                const SizedBox(height: 20),
+                
+                // Winner preview
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFD700).withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.3)),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.emoji_events, color: Color(0xFFFFD700), size: 20),
+                      const SizedBox(width: 8),
+                      Text(
+                        '🏆 Winner: $winnerName',
+                        style: const TextStyle(color: Color(0xFFFFD700), fontWeight: FontWeight.bold, fontSize: 14),
+                      ),
+                    ],
+                  ),
+                ),
+                
+                const SizedBox(height: 20),
+                
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        style: TextButton.styleFrom(
+                          side: BorderSide(color: Colors.white.withOpacity(0.2)),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        child: Text('CANCEL', style: TextStyle(color: Colors.white.withOpacity(0.5))),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () async {
+                          final winnerId = team1Final > team2Final ? team1Id : team2Id;
+                          
+                          if (team1Final == team2Final) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Cannot determine winner - scores are tied'), backgroundColor: Colors.orange),
+                            );
+                            return;
+                          }
+                          
+                          try {
+                            await DBHelper.saveBattleOfChampionsResult(
+                              matchId: int.parse(matchId.toString()),
+                              team1Score: team1Score,
+                              team1Violation: team1Violation,
+                              team2Score: team2Score,
+                              team2Violation: team2Violation,
+                              winnerId: winnerId,
+                            );
+                            
+                            if (ctx.mounted) Navigator.pop(ctx);
+                            
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('✅ Match result saved!'), backgroundColor: Colors.green),
+                            );
+                            
+                            setState(() {});
+                          } catch (e) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('❌ Error: $e'), backgroundColor: Colors.red),
+                            );
+                          }
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFFFD700),
+                          foregroundColor: Colors.black,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        child: const Text('SAVE RESULT', style: TextStyle(fontWeight: FontWeight.bold)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    ),
+  );
+}
+
+
+Widget _buildScoreField({
+  required String label,
+  required TextEditingController controller,
+  required Color color,
+  required Function(String) onChanged,
+}) {
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(label, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 4),
+      TextField(
+        controller: controller,
+        keyboardType: TextInputType.number,
+        style: TextStyle(color: color, fontSize: 14, fontWeight: FontWeight.bold),
+        onChanged: onChanged,
+        decoration: InputDecoration(
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(6),
+            borderSide: BorderSide(color: color.withOpacity(0.3)),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(6),
+            borderSide: BorderSide(color: color.withOpacity(0.3)),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(6),
+            borderSide: BorderSide(color: color, width: 2),
+          ),
+        ),
+      ),
+    ],
   );
 }
 
@@ -3795,16 +4715,16 @@ Widget _buildCategoryView(Map<String, dynamic> category, int catId,
           'This will delete ALL matches for $categoryName. This action cannot be undone.',
           style: const TextStyle(color: Colors.white70),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('CLEAR', style: TextStyle(color: Colors.redAccent)),
-          ),
-        ],
+                  actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text('GENERATE', style: TextStyle(color: kAccentGold)),
+            ),
+          ],
       ),
     );
 

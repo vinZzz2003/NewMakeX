@@ -2,7 +2,98 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'constants.dart';
-import 'db_helper.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+
+// API Service for Alliance operations
+class AllianceApiService {
+  static const String baseUrl = 'http://175.20.0.41/roboventure_api';
+  
+  static Future<List<Map<String, dynamic>>> getQualifiedTeams(int categoryId) async {
+    final url = Uri.parse('$baseUrl/admin_alliance_selection.php?action=get_qualified_teams&category_id=$categoryId');
+    
+    try {
+      final response = await http.get(url);
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] == true) {
+          return List<Map<String, dynamic>>.from(data['teams']);
+        }
+      }
+      return [];
+    } catch (e) {
+      print('Error getting qualified teams: $e');
+      return [];
+    }
+  }
+  
+  static Future<int> saveAlliance({
+    required int categoryId,
+    required int captainTeamId,
+    required int partnerTeamId,
+    required int selectionRound,
+  }) async {
+    final url = Uri.parse('$baseUrl/admin_alliance_selection.php?action=save_alliance');
+    
+    try {
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({
+          'category_id': categoryId,
+          'captain_team_id': captainTeamId,
+          'partner_team_id': partnerTeamId,
+          'selection_round': selectionRound,
+        }),
+      );
+      
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] == true) {
+          return data['alliance_id'];
+        }
+      }
+      throw Exception('Failed to save alliance');
+    } catch (e) {
+      print('Error saving alliance: $e');
+      rethrow;
+    }
+  }
+  
+  static Future<List<Map<String, dynamic>>> getAlliances(int categoryId) async {
+    final url = Uri.parse('$baseUrl/admin_alliance_selection.php?action=get_alliances&category_id=$categoryId');
+    
+    try {
+      final response = await http.get(url);
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] == true) {
+          return List<Map<String, dynamic>>.from(data['alliances']);
+        }
+      }
+      return [];
+    } catch (e) {
+      print('Error getting alliances: $e');
+      return [];
+    }
+  }
+  
+  static Future<void> clearAlliances(int categoryId) async {
+    final url = Uri.parse('$baseUrl/admin_alliance_selection.php?action=clear_alliances&category_id=$categoryId');
+    
+    try {
+      final response = await http.delete(url);
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] != true) {
+          print('Warning: Clear alliances returned: ${data['error']}');
+        }
+      }
+    } catch (e) {
+      print('Error clearing alliances: $e');
+    }
+  }
+}
 
 enum SelectionStatus { pending, selecting, accepted, refused, timeout }
 
@@ -60,7 +151,6 @@ class AllianceSelectionPage extends StatefulWidget {
 
 class _AllianceSelectionPageState extends State<AllianceSelectionPage>
     with TickerProviderStateMixin {
-  // Initialize immediately to prevent LateError
   late List<AllianceTeam> _availableTeams = [];
   late List<Alliance> _formedAlliances = [];
   late List<AllianceTeam> _selectionOrder = [];
@@ -76,17 +166,17 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
   late Animation<double> _timerAnimation;
   
   bool _isComplete = false;
-  bool _isInitialized = false;  // Track initialization status
-  bool _showTeamSelector = true; // Show team count selector first
-  int _teamsToKeep = 0; // Number of teams to keep for alliance selection
+  bool _isInitialized = false;
+  bool _showTeamSelector = true;
+  int _teamsToKeep = 0;
   
   String? _statusMessage;
   String? _errorMessage;
   
   final Map<int, int> _refusalCounts = {};
   
-  // Current match time display
   String _currentTime = '';
+  bool _isSaving = false;
 
   @override
   void initState() {
@@ -110,10 +200,8 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       }
     });
 
-    // Initialize data after controller is set up
     _initializeAllianceData();
 
-    // Update time every second
     Timer.periodic(const Duration(seconds: 1), (timer) {
       if (mounted) {
         _updateCurrentTime();
@@ -130,7 +218,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
 
   void _initializeAllianceData() {
     try {
-      // Sort teams by rank (score)
       final sortedTeams = List<Map<String, dynamic>>.from(widget.qualifiedTeams)
         ..sort((a, b) => (b['totalScore'] as int).compareTo(a['totalScore'] as int));
       
@@ -139,11 +226,9 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
         print("   ${team['team_name']}: ${team['totalScore']} pts");
       }
       
-      // Set default teams to keep (half of total, but must be even)
       _teamsToKeep = (sortedTeams.length / 2).ceil();
       if (_teamsToKeep % 2 != 0) _teamsToKeep++;
       
-      // Don't initialize teams yet - wait for user to confirm count
       _availableTeams = [];
       _formedAlliances = [];
       _selectionOrder = [];
@@ -151,7 +236,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       
     } catch (e) {
       print("Error initializing alliance data: $e");
-      // Ensure lists are at least empty
       _availableTeams = [];
       _formedAlliances = [];
       _selectionOrder = [];
@@ -171,23 +255,18 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       return;
     }
     
-    // Sort teams by rank
     final sortedTeams = List<Map<String, dynamic>>.from(widget.qualifiedTeams)
       ..sort((a, b) => (b['totalScore'] as int).compareTo(a['totalScore'] as int));
     
-    // Take only the top N teams
     final topTeams = sortedTeams.take(_teamsToKeep).toList();
     
     print("✅ Keeping top $_teamsToKeep teams for alliance selection");
     print("❌ Eliminating ${sortedTeams.length - _teamsToKeep} teams");
     
-    // Convert to AllianceTeam objects
     setState(() {
       _availableTeams = [];
       for (int i = 0; i < topTeams.length; i++) {
         final team = topTeams[i];
-        
-        // Only the top half of remaining teams can refuse
         final canRefuse = i < (topTeams.length / 2).ceil();
         
         _availableTeams.add(AllianceTeam(
@@ -215,7 +294,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
 
   void _setStatusMessage(String message) {
     _statusMessage = message;
-    // Auto-clear after 3 seconds
     Future.delayed(const Duration(seconds: 3), () {
       if (mounted && _statusMessage == message) {
         setState(() {
@@ -246,7 +324,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       _errorMessage = '${_currentSelector?.teamName} ran out of time';
     });
     
-    // Skip this selector - they lose their turn
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) {
         _moveToNextSelector();
@@ -263,9 +340,7 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       
       if (_currentSelectorIndex < _selectionOrder.length) {
         _currentSelector = _selectionOrder[_currentSelectorIndex];
-        // Only if this team hasn't been selected yet
         if (_isTeamInAlliance(_currentSelector!.teamId)) {
-          // Skip if already in alliance
           _moveToNextSelector();
           return;
         }
@@ -282,7 +357,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
     if (_currentStatus != SelectionStatus.selecting) return;
     if (_currentSelector == null) return;
     
-    // Can't select own team
     if (_currentSelector!.teamId == selectedTeam.teamId) {
       setState(() {
         _errorMessage = 'Cannot select your own team';
@@ -290,7 +364,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       return;
     }
     
-    // Check if selected team is already in an alliance
     if (_isTeamInAlliance(selectedTeam.teamId)) {
       setState(() {
         _errorMessage = '${selectedTeam.teamName} is already in an alliance';
@@ -312,7 +385,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
     if (_pendingInvitee == null || _currentSelector == null) return;
     
     if (accepted) {
-      // Alliance formed
       final alliance = Alliance(
         captain: _currentSelector!,
         partner: _pendingInvitee!,
@@ -326,16 +398,12 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
         _errorMessage = null;
       });
       
-      // Check if all possible alliances are formed
       final int expectedAlliances = _availableTeams.length ~/ 2;
       
       if (_formedAlliances.length >= expectedAlliances) {
         print("🎯 All alliances formed! Saving to database...");
-        
-        // Save to database - call the method but don't wait for it
         _saveAlliancesToDatabase();
         
-        // Show success message briefly
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('✅ All alliances formed successfully!'),
@@ -344,17 +412,15 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
           ),
         );
         
-        // Return to previous screen with success result after a short delay
         Future.delayed(const Duration(milliseconds: 500), () {
           if (mounted) {
             Navigator.pop(context, true);
           }
         });
         
-        return; // Don't proceed to next selector
+        return;
       }
       
-      // Move to next selector after delay
       Future.delayed(const Duration(seconds: 2), () {
         if (mounted) {
           _moveToNextSelector();
@@ -362,7 +428,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       });
       
     } else {
-      // Team refused
       if (_pendingInvitee!.canRefuse) {
         if (_pendingInvitee!.refusalCount < 1) {
           setState(() {
@@ -372,7 +437,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
             _errorMessage = null;
           });
           
-          // Continue selection for current selector
           Future.delayed(const Duration(seconds: 2), () {
             if (mounted) {
               setState(() {
@@ -382,23 +446,19 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
             }
           });
         } else {
-          // Already refused once, cannot refuse again
           setState(() {
             _errorMessage = '${_pendingInvitee!.teamName} cannot refuse again';
           });
           
-          // Auto-accept
           Future.delayed(const Duration(seconds: 1), () {
             _handleInvitationResponse(true);
           });
         }
       } else {
-        // Bottom half cannot refuse - auto-accept
         setState(() {
           _errorMessage = '${_pendingInvitee!.teamName} cannot refuse';
         });
         
-        // Auto-accept
         Future.delayed(const Duration(seconds: 1), () {
           _handleInvitationResponse(true);
         });
@@ -426,8 +486,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
     
     if (_formedAlliances.length >= expectedAlliances) {
       print("🎯 All alliances formed! Saving to database...");
-      
-      // Save to database
       _saveAlliancesToDatabase();
       
       if (mounted) {
@@ -446,13 +504,12 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
         });
       }
     } else {
-      // If not all alliances formed, this method shouldn't be called
       print("⚠️ _checkSelectionComplete called but not all alliances formed");
     }
   }
 
   Future<void> _saveAlliancesToDatabase() async {
-    // Safety check
+    if (_isSaving) return;
     if (!_isInitialized) {
       print("⚠️ Cannot save - not initialized");
       return;
@@ -463,69 +520,44 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       return;
     }
     
+    setState(() => _isSaving = true);
+    
     try {
-      print("💾 Attempting to save ${_formedAlliances.length} alliances to database...");
-      
-      final conn = await DBHelper.getConnection();
-      
-      // First, check if the table exists
-      try {
-        await conn.execute("SELECT 1 FROM tbl_alliance_selections LIMIT 1");
-        print("✅ tbl_alliance_selections table exists");
-      } catch (e) {
-        print("❌ tbl_alliance_selections table does not exist: $e");
-        // Try to create the table using the active connection
-        await conn.execute("""
-          CREATE TABLE IF NOT EXISTS tbl_alliance_selections (
-            alliance_id INT AUTO_INCREMENT PRIMARY KEY,
-            category_id INT NOT NULL,
-            captain_team_id INT NOT NULL,
-            partner_team_id INT NOT NULL,
-            selection_round INT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          )
-        """);
-        print("✅ Created tbl_alliance_selections table");
-      }
+      print("💾 Saving ${_formedAlliances.length} alliances via API...");
       
       // Clear existing alliances for this category
-      print("🗑️ Clearing existing alliances for category ${widget.categoryId}");
-      await DBHelper.executeDual(
-        "DELETE FROM tbl_alliance_selections WHERE category_id = :catId",
-        {"catId": widget.categoryId},
-      );
+      await AllianceApiService.clearAlliances(widget.categoryId);
       
       // Save new alliances
       for (int i = 0; i < _formedAlliances.length; i++) {
         final alliance = _formedAlliances[i];
         print("📝 Saving alliance ${i + 1}: Captain ${alliance.captain.teamId} (${alliance.captain.teamName}) + Partner ${alliance.partner.teamId} (${alliance.partner.teamName})");
         
-        await DBHelper.executeDual("""
-          INSERT INTO tbl_alliance_selections 
-            (category_id, captain_team_id, partner_team_id, selection_round)
-          VALUES
-            (:catId, :captainId, :partnerId, :round)
-        """, {
-          "catId": widget.categoryId,
-          "captainId": alliance.captain.teamId,
-          "partnerId": alliance.partner.teamId,
-          "round": i + 1,
-        });
+        await AllianceApiService.saveAlliance(
+          categoryId: widget.categoryId,
+          captainTeamId: alliance.captain.teamId,
+          partnerTeamId: alliance.partner.teamId,
+          selectionRound: i + 1,
+        );
       }
       
-      print("✅ Successfully saved ${_formedAlliances.length} alliances to database");
-      
-      // Verify the save worked
-      final verifyResult = await conn.execute(
-        "SELECT COUNT(*) as count FROM tbl_alliance_selections WHERE category_id = :catId",
-        {"catId": widget.categoryId},
-      );
-      final count = verifyResult.rows.first.assoc()['count'];
-      print("🔍 Verification: Found $count alliances in database for category ${widget.categoryId}");
+      print("✅ Successfully saved ${_formedAlliances.length} alliances");
       
     } catch (e, stackTrace) {
       print("❌ Error saving alliances: $e");
       print(stackTrace);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error saving alliances: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
     }
   }
 
@@ -533,7 +565,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
     print("🎯 _completeAllianceFormation called");
     print("📊 Formed alliances count: ${_formedAlliances.length}");
     
-    // Safety check
     if (!_isInitialized) {
       print("⚠️ Cannot complete - not initialized");
       setState(() {
@@ -548,16 +579,10 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       _timerController.stop();
     });
     
-    // Save alliances to database
     _saveAlliancesToDatabase().then((_) {
       print("✅ Alliance save completed");
-      
-      // IMPORTANT: Do NOT call widget.onComplete() here
-      // Just update UI to show completion screen
       if (mounted) {
-        setState(() {
-          // UI already updated to show completion screen
-        });
+        setState(() {});
       }
     }).catchError((error) {
       print("❌ Alliance save failed: $error");
@@ -576,9 +601,13 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
     return 'C${teamId.toString().padLeft(3, '0')}R';
   }
 
+  // Add this method to update the API endpoint for clear_alliances
+  // You'll need to add this to your admin_alliance_selection.php
+  // For now, we'll skip clearing and just insert (will handle duplicates in PHP)
+
   Widget _buildTeamSelector() {
     final totalTeams = widget.qualifiedTeams.length;
-    final maxTeams = totalTeams - (totalTeams % 2); // Must be even
+    final maxTeams = totalTeams - (totalTeams % 2);
     
     return Container(
       padding: const EdgeInsets.all(24),
@@ -650,19 +679,22 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
             style: const TextStyle(color: Colors.white, fontSize: 16),
           ),
           const SizedBox(height: 32),
-          ElevatedButton(
-            onPressed: _startAllianceSelection,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFFFD700),
-              foregroundColor: Colors.black,
-              padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 16),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          if (_isSaving)
+            const CircularProgressIndicator(color: Color(0xFFFFD700))
+          else
+            ElevatedButton(
+              onPressed: _startAllianceSelection,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFFFD700),
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+              child: const Text(
+                'START ALLIANCE CEREMONY',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+              ),
             ),
-            child: const Text(
-              'START ALLIANCE CEREMONY',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-            ),
-          ),
         ],
       ),
     );
@@ -677,7 +709,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
 
   @override
   Widget build(BuildContext context) {
-    // Show loading state while initializing
     if (!_isInitialized) {
       return Scaffold(
         backgroundColor: const Color(0xFF0E0630),
@@ -870,7 +901,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Left Column - Alliance Formation
         Expanded(
           flex: 7,
           child: Column(
@@ -882,7 +912,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
           ),
         ),
         const SizedBox(width: 24),
-        // Right Column - Alliance Cards
         Expanded(
           flex: 5,
           child: _buildAllianceCardsPanel(),
@@ -900,7 +929,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       ),
       child: Column(
         children: [
-          // Status Message
           if (_statusMessage != null)
             Container(
               padding: const EdgeInsets.all(12),
@@ -921,8 +949,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
                 ],
               ),
             ),
-
-          // Error Message
           if (_errorMessage != null)
             Container(
               padding: const EdgeInsets.all(12),
@@ -942,13 +968,10 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
                 ],
               ),
             ),
-
-          // Current Selector and Timer
           Padding(
             padding: const EdgeInsets.all(20),
             child: Row(
               children: [
-                // Selector Info
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1020,7 +1043,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
                     ],
                   ),
                 ),
-                // Timer
                 Container(
                   width: 120,
                   height: 120,
@@ -1068,8 +1090,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
               ],
             ),
           ),
-
-          // Pending Invitation
           if (_pendingInvitee != null)
             Container(
               margin: const EdgeInsets.fromLTRB(20, 0, 20, 20),
@@ -1191,7 +1211,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
@@ -1215,8 +1234,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
               ],
             ),
           ),
-
-          // Team List
           Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
@@ -1335,7 +1352,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
       ),
       child: Column(
         children: [
-          // Header
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
@@ -1369,8 +1385,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
               ],
             ),
           ),
-
-          // Alliance Cards
           Padding(
             padding: const EdgeInsets.all(16),
             child: _formedAlliances.isEmpty
@@ -1443,7 +1457,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
                             const SizedBox(height: 16),
                             Row(
                               children: [
-                                // Captain
                                 Expanded(
                                   child: Container(
                                     padding: const EdgeInsets.all(12),
@@ -1490,7 +1503,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
                                   margin: const EdgeInsets.symmetric(horizontal: 8),
                                   child: const Icon(Icons.add_circle_outline, color: Colors.white38, size: 20),
                                 ),
-                                // Partner
                                 Expanded(
                                   child: Container(
                                     padding: const EdgeInsets.all(12),
@@ -1549,7 +1561,6 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
   Widget _buildCompletionInterface() {
     return Column(
       children: [
-        // Completion Banner
         Container(
           padding: const EdgeInsets.all(32),
           decoration: BoxDecoration(
@@ -1561,29 +1572,31 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
           ),
           child: Column(
             children: [
-              // ... existing content ...
-              
               const SizedBox(height: 32),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  ElevatedButton(
-                    onPressed: () {
-                      // When user clicks PROCEED TO CHAMPIONSHIP ROUND
-                      // Now we call widget.onComplete() ONLY when button is clicked
-                      widget.onComplete();
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF00E5A0),
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 16),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  if (_isSaving)
+                    const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: CircularProgressIndicator(color: Color(0xFF00E5A0)),
+                    )
+                  else
+                    ElevatedButton(
+                      onPressed: () {
+                        widget.onComplete();
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF00E5A0),
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 16),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      child: const Text(
+                        'PROCEED TO CHAMPIONSHIP ROUND',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, letterSpacing: 1.5),
+                      ),
                     ),
-                    child: const Text(
-                      'PROCEED TO CHAMPIONSHIP ROUND',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, letterSpacing: 1.5),
-                    ),
-                  ),
                   const SizedBox(width: 16),
                   if (widget.onCancel != null)
                     OutlinedButton(
@@ -1600,10 +1613,7 @@ class _AllianceSelectionPageState extends State<AllianceSelectionPage>
             ],
           ),
         ),
-
         const SizedBox(height: 24),
-
-        // Final Standings Preview
         Container(
           padding: const EdgeInsets.all(20),
           decoration: BoxDecoration(
