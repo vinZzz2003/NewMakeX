@@ -4070,8 +4070,40 @@ static Future<List<Map<String, dynamic>>> getAllChampions() async {
   print("   Match ID: $matchId");
   print("   Team1 Score: $team1Score, Violation: $team1Violation");
   print("   Team2 Score: $team2Score, Violation: $team2Violation");
-  print("   Winner ID: $winnerId");
-  
+  print("   Winner ID (caller): $winnerId");
+
+  // Compute authoritative winner based on final scores (score - violation)
+  final team1Final = team1Score - team1Violation;
+  final team2Final = team2Score - team2Violation;
+  int winnerIdComputed = 0;
+  if (team1Final > team2Final) {
+    // need to fetch team1 id from DB for this match
+    try {
+      final res = await conn.execute("SELECT team1_id, team2_id FROM $tableName WHERE match_id = :matchId", {"matchId": matchId});
+      if (res.rows.isNotEmpty) {
+        winnerIdComputed = int.tryParse(res.rows.first.assoc()['team1_id']?.toString() ?? '0') ?? 0;
+      }
+    } catch (e) {
+      print("⚠️ Could not fetch team ids to compute winner: $e");
+    }
+  } else if (team2Final > team1Final) {
+    try {
+      final res = await conn.execute("SELECT team1_id, team2_id FROM $tableName WHERE match_id = :matchId", {"matchId": matchId});
+      if (res.rows.isNotEmpty) {
+        winnerIdComputed = int.tryParse(res.rows.first.assoc()['team2_id']?.toString() ?? '0') ?? 0;
+      }
+    } catch (e) {
+      print("⚠️ Could not fetch team ids to compute winner: $e");
+    }
+  } else {
+    // tie -> leave as 0 (no winner)
+    winnerIdComputed = 0;
+  }
+
+  if (winnerIdComputed != (winnerId ?? 0)) {
+    print("ℹ️ Overriding caller winner ($winnerId) with computed winner ($winnerIdComputed) based on final scores");
+  }
+
   await conn.execute("""
     UPDATE $tableName 
     SET 
@@ -4088,7 +4120,7 @@ static Future<List<Map<String, dynamic>>> getAllChampions() async {
     "t1Vio": team1Violation,
     "t2Score": team2Score,
     "t2Vio": team2Violation,
-    "winnerId": winnerId,
+    "winnerId": winnerIdComputed,
     "matchId": matchId,
   });
   

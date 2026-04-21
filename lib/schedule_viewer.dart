@@ -2192,7 +2192,19 @@ Widget _buildBattleOfChampionsSchedule(List<Map<String, dynamic>> matches, int c
             final team1Final = team1Score - team1Violation;
             final team2Final = team2Score - team2Violation;
             final winnerId = match['winner_team_id'];
-            final isWinner1 = winnerId != null && winnerId.toString() == match['team1_id'].toString();
+            bool isWinner1 = false;
+            if (isCompleted) {
+              if (team1Final > team2Final) {
+                isWinner1 = true;
+              } else if (team2Final > team1Final) {
+                isWinner1 = false;
+              } else {
+                // tie: fall back to stored winner id if available
+                isWinner1 = winnerId != null && winnerId.toString() == match['team1_id'].toString();
+              }
+            } else {
+              isWinner1 = false;
+            }
             
             return Container(
               margin: const EdgeInsets.only(bottom: 16),

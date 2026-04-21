@@ -7548,14 +7548,14 @@ Widget _buildBattleOfChampionsView(int categoryId) {
                                 onSaved: () => setState(() {}),
                               ),
                             ),
-                            // Total Score
+                            // Total Score (show final total as primary, raw total as badge)
                             Expanded(
                               flex: 1,
                               child: Center(
                                 child: Column(
                                   children: [
                                     Text(
-                                      '${player['total_score']}',
+                                      '${player['total_final']}',
                                       style: const TextStyle(color: Color(0xFFFFD700), fontSize: 16, fontWeight: FontWeight.bold),
                                     ),
                                     Container(
@@ -7565,7 +7565,7 @@ Widget _buildBattleOfChampionsView(int categoryId) {
                                         borderRadius: BorderRadius.circular(10),
                                       ),
                                       child: Text(
-                                        '${player['total_final']}',
+                                        '${player['total_score']}',
                                         style: const TextStyle(color: Color(0xFF00E5A0), fontSize: 10, fontWeight: FontWeight.bold),
                                       ),
                                     ),
@@ -7661,7 +7661,7 @@ Widget _buildBattleScoreCell({
   final score = player['match${matchNumber}_score'] as int;
   final violation = player['match${matchNumber}_violation'] as int;
   final finalScore = player['match${matchNumber}_final'] as int;
-  final hasScore = score > 0;
+  final hasScore = (finalScore > 0) || (score > 0);
   
   return Expanded(
     flex: 1,
@@ -7681,9 +7681,9 @@ Widget _buildBattleScoreCell({
         child: Column(
           children: [
             Text(
-              score > 0 ? '$score' : '—',
+              finalScore > 0 ? '$finalScore' : '—',
               style: TextStyle(
-                color: score > 0 ? const Color(0xFFFFD700) : Colors.white38,
+                color: finalScore > 0 ? const Color(0xFFFFD700) : Colors.white38,
                 fontWeight: FontWeight.bold,
                 fontSize: 14,
               ),
@@ -7692,9 +7692,9 @@ Widget _buildBattleScoreCell({
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Text(
-                  finalScore > 0 ? '$finalScore' : '0',
+                  score > 0 ? '$score' : '0',
                   style: TextStyle(
-                    color: finalScore > 0 ? const Color(0xFF00CFFF) : Colors.white38,
+                    color: score > 0 ? const Color(0xFF00CFFF) : Colors.white38,
                     fontSize: 9,
                   ),
                 ),
