@@ -112,78 +112,105 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
   }
 
   Future<void> _loadMatches() async {
-    try {
-      print("🏆 ChampionshipSchedule: Loading matches for category ${widget.categoryId}");
-      
-      final conn = await DBHelper.getConnection();
-      bool hasBracketData = false;
-
-      try {
-        final List<String> tablesToCheck = [
-          'tbl_double_elimination',
-          'tbl_explorer_double_elimination',
-        ];
-
-        try {
-          final cres = await conn.execute(
-            "SELECT category_type FROM tbl_category WHERE category_id = :id LIMIT 1",
-            {"id": widget.categoryId},
-          );
-          if (cres.rows.isNotEmpty) {
-            String? slug = cres.rows.first.assoc()['category_type']?.toString();
-            if (slug != null && slug.trim().isNotEmpty) {
-              slug = slug.replaceAll(RegExp(r"\(.*?\)"), '').toLowerCase();
-              slug = slug.replaceAll(RegExp(r"[^a-z0-9]+"), '_').replaceAll(RegExp(r"_+"), '_');
-              slug = slug.replaceAll(RegExp(r"^_+|_+"), '').trim();
-              if (slug.isNotEmpty) tablesToCheck.add('tbl_' + slug + '_double_elimination');
-            }
-          }
-        } catch (_) {}
-
-        for (final tbl in tablesToCheck) {
-          try {
-            final bracketCheck = await conn.execute(
-              "SELECT COUNT(*) as cnt FROM $tbl WHERE category_id = :catId",
-              {"catId": widget.categoryId},
-            );
-            if (bracketCheck.rows.isNotEmpty) {
-              if (int.parse(bracketCheck.rows.first.assoc()['cnt']?.toString() ?? '0') > 0) {
-                hasBracketData = true;
-                break;
-              }
-            }
-          } catch (_) {
-            // ignore missing table or errors for this candidate table
-          }
-        }
-      } catch (e) {
-        print("⚠️ No bracket table yet: $e");
-      }
-      
-      List<Map<String, dynamic>> matches;
-      
-      if (hasBracketData) {
-        matches = await _getMatchesFromBracket();
-      } else {
-        matches = await _getMatchesFromSchedule();
-      }
-      
+  try {
+    print("🏆 ChampionshipSchedule: Loading matches for category ${widget.categoryId}");
+    
+    final conn = await DBHelper.getConnection();
+    
+    // ============================================================
+    // CHECK CATEGORY TYPE - FORCE SCHEDULE TABLE FOR STARTER
+    // ============================================================
+    final categoryResult = await conn.execute(
+      "SELECT category_type FROM tbl_category WHERE category_id = :id LIMIT 1",
+      {"id": widget.categoryId},
+    );
+    final categoryType = categoryResult.rows.isNotEmpty 
+        ? categoryResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
+        : '';
+    final bool isStarter = categoryType.contains('starter');
+    
+    // FOR STARTER: Always use schedule table, NEVER use bracket table
+    if (isStarter) {
+      print("🎯 STARTER CATEGORY - Loading from championship_schedule table (not bracket)");
+      final matches = await _getMatchesFromSchedule();
       setState(() {
         _matches = matches;
         _isLoading = false;
       });
-      
-      print("🏆 ChampionshipSchedule: Loaded ${matches.length} matches");
-      
-    } catch (e, stackTrace) {
-      print("❌ ChampionshipSchedule error: $e");
-      print(stackTrace);
-      setState(() {
-        _error = e.toString();
-        _isLoading = false;
-      });
+      print("🏆 ChampionshipSchedule: Loaded ${matches.length} matches from schedule table");
+      return;
     }
+    
+    // For Explorer: Check bracket data as before
+    bool hasBracketData = false;
+    
+    try {
+      final List<String> tablesToCheck = [
+        'tbl_double_elimination',
+        'tbl_explorer_double_elimination',
+      ];
+
+      try {
+        final cres = await conn.execute(
+          "SELECT category_type FROM tbl_category WHERE category_id = :id LIMIT 1",
+          {"id": widget.categoryId},
+        );
+        if (cres.rows.isNotEmpty) {
+          String? slug = cres.rows.first.assoc()['category_type']?.toString();
+          if (slug != null && slug.trim().isNotEmpty) {
+            slug = slug.replaceAll(RegExp(r"\(.*?\)"), '').toLowerCase();
+            slug = slug.replaceAll(RegExp(r"[^a-z0-9]+"), '_').replaceAll(RegExp(r"_+"), '_');
+            slug = slug.replaceAll(RegExp(r"^_+|_+"), '').trim();
+            if (slug.isNotEmpty) tablesToCheck.add('tbl_' + slug + '_double_elimination');
+          }
+        }
+      } catch (_) {}
+
+      for (final tbl in tablesToCheck) {
+        try {
+          final bracketCheck = await conn.execute(
+            "SELECT COUNT(*) as cnt FROM $tbl WHERE category_id = :catId",
+            {"catId": widget.categoryId},
+          );
+          if (bracketCheck.rows.isNotEmpty) {
+            if (int.parse(bracketCheck.rows.first.assoc()['cnt']?.toString() ?? '0') > 0) {
+              hasBracketData = true;
+              break;
+            }
+          }
+        } catch (_) {
+          // ignore missing table or errors for this candidate table
+        }
+      }
+    } catch (e) {
+      print("⚠️ No bracket table yet: $e");
+    }
+    
+    List<Map<String, dynamic>> matches;
+    
+    if (hasBracketData) {
+      matches = await _getMatchesFromBracket();
+    } else {
+      matches = await _getMatchesFromSchedule();
+    }
+    
+    setState(() {
+      _matches = matches;
+      _isLoading = false;
+    });
+    
+    print("🏆 ChampionshipSchedule: Loaded ${matches.length} matches");
+    
+  } catch (e, stackTrace) {
+    print("❌ ChampionshipSchedule error: $e");
+    print(stackTrace);
+    setState(() {
+      _error = e.toString();
+      _isLoading = false;
+    });
   }
+}
+
 
   Future<List<Map<String, dynamic>>> _getMatchesFromBracket() async {
     final conn = await DBHelper.getConnection();
@@ -518,79 +545,94 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
   }
 
   Future<List<Map<String, dynamic>>> _getMatchesFromSchedule() async {
-    final conn = await DBHelper.getConnection();
+  final conn = await DBHelper.getConnection();
+  
+  try {
+    await conn.execute("SELECT 1 FROM tbl_championship_schedule LIMIT 1");
+  } catch (e) {
+    print("⚠️ tbl_championship_schedule doesn't exist yet");
+    return [];
+  }
+  
+  // Get category type to determine which table to use for alliance details
+  final categoryResult = await conn.execute(
+    "SELECT category_type FROM tbl_category WHERE category_id = :id LIMIT 1",
+    {"id": widget.categoryId},
+  );
+  final categoryType = categoryResult.rows.isNotEmpty 
+      ? categoryResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
+      : '';
+  final bool isStarter = categoryType.contains('starter');
+  
+  // Use appropriate alliance selections table
+  final String allianceTable = isStarter 
+      ? 'tbl_starter_alliance_selections' 
+      : 'tbl_alliance_selections';
+  
+  final result = await conn.execute("""
+    SELECT 
+      cs.match_id,
+      cs.category_id,
+      cs.match_round,
+      cs.match_position,
+      cs.match_number,  
+      cs.schedule_time,
+      cs.status,
+      cs.alliance1_id,
+      cs.alliance2_id,
+      cs.winner_alliance_id,  
+      a1.alliance_id as a1_id,
+      a2.alliance_id as a2_id,
+      t1.team_name as captain1_name,
+      t2.team_name as partner1_name,
+      t3.team_name as captain2_name,
+      t4.team_name as partner2_name,
+      a1.selection_round as alliance1_rank,
+      a2.selection_round as alliance2_rank
+    FROM tbl_championship_schedule cs
+    LEFT JOIN $allianceTable a1 ON cs.alliance1_id = a1.alliance_id
+    LEFT JOIN $allianceTable a2 ON cs.alliance2_id = a2.alliance_id
+    LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
+    LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
+    LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
+    LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
+    WHERE cs.category_id = :categoryId
+    ORDER BY cs.schedule_time, cs.match_round, cs.match_position, cs.match_number
+  """, {"categoryId": widget.categoryId});
+  
+  final rows = result.rows.map((r) {
+    final data = r.assoc();
     
-    try {
-      await conn.execute("SELECT 1 FROM tbl_championship_schedule LIMIT 1");
-    } catch (e) {
-      print("⚠️ tbl_championship_schedule doesn't exist yet");
-      return [];
+    if (data['alliance1_id'] != null && data['alliance1_id'] != '0') {
+      final captain = data['captain1_name'] ?? '???';
+      final partner = data['partner1_name'] ?? '???';
+      data['alliance1_name'] = '$captain + $partner';
+      data['alliance1_rank'] = data['alliance1_rank'] ?? '?';
+    } else {
+      data['alliance1_name'] = 'TBD';
+      data['alliance1_rank'] = '?';
     }
     
-    final result = await conn.execute("""
-      SELECT 
-        cs.match_id,
-        cs.category_id,
-        cs.match_round,
-        cs.match_position,
-        cs.match_number,  
-        cs.schedule_time,
-        cs.status,
-        cs.alliance1_id,
-        cs.alliance2_id,
-        cs.winner_alliance_id,  
-        a1.alliance_id as a1_id,
-        a2.alliance_id as a2_id,
-        t1.team_name as captain1_name,
-        t2.team_name as partner1_name,
-        t3.team_name as captain2_name,
-        t4.team_name as partner2_name,
-        a1.selection_round as alliance1_rank,
-        a2.selection_round as alliance2_rank
-      FROM tbl_championship_schedule cs
-      LEFT JOIN tbl_alliance_selections a1 ON cs.alliance1_id = a1.alliance_id
-      LEFT JOIN tbl_alliance_selections a2 ON cs.alliance2_id = a2.alliance_id
-      LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
-      LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
-      LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
-      LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
-      WHERE cs.category_id = :categoryId
-      ORDER BY cs.match_round, cs.match_position, cs.match_number
-    """, {"categoryId": widget.categoryId});
+    if (data['alliance2_id'] != null && data['alliance2_id'] != '0') {
+      final captain = data['captain2_name'] ?? '???';
+      final partner = data['partner2_name'] ?? '???';
+      data['alliance2_name'] = '$captain + $partner';
+      data['alliance2_rank'] = data['alliance2_rank'] ?? '?';
+    } else {
+      data['alliance2_name'] = 'TBD';
+      data['alliance2_rank'] = '?';
+    }
     
-    final rows = result.rows.map((r) {
-      final data = r.assoc();
-      
-      if (data['alliance1_id'] != null && data['alliance1_id'] != '0') {
-        final captain = data['captain1_name'] ?? '???';
-        final partner = data['partner1_name'] ?? '???';
-        data['alliance1_name'] = '$captain + $partner';
-        data['alliance1_rank'] = data['alliance1_rank'] ?? '?';
-      } else {
-        data['alliance1_name'] = 'TBD';
-        data['alliance1_rank'] = '?';
-      }
-      
-      if (data['alliance2_id'] != null && data['alliance2_id'] != '0') {
-        final captain = data['captain2_name'] ?? '???';
-        final partner = data['partner2_name'] ?? '???';
-        data['alliance2_name'] = '$captain + $partner';
-        data['alliance2_rank'] = data['alliance2_rank'] ?? '?';
-      } else {
-        data['alliance2_name'] = 'TBD';
-        data['alliance2_rank'] = '?';
-      }
-      
-      data['display_round'] = _getRoundName(
-        int.parse(data['match_round'].toString()), 
-        int.parse(data['match_position'].toString())
-      );
-      
-      return data;
-    }).toList();
+    data['display_round'] = _getRoundName(
+      int.parse(data['match_round'].toString()), 
+      int.parse(data['match_position'].toString())
+    );
     
-    return rows;
-  }
+    return data;
+  }).toList();
+  
+  return rows;
+}
 
   Future<Map<String, dynamic>?> _getAllianceById(int allianceId) async {
     try {
@@ -863,108 +905,93 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
                   child: Column(
                     children: [
                       // Time and Status Bar
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF0F0630).withOpacity(0.6),
-                          borderRadius: const BorderRadius.vertical(
-                            top: Radius.circular(14),
-                          ),
-                          border: Border(
-                            bottom: BorderSide(
-                              color: isCompleted ? Colors.green.withOpacity(0.3) : const Color(0xFFFFD700).withOpacity(0.2),
-                              width: 1,
-                            ),
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            // Time
-                            Row(
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.all(4),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFFFD700).withOpacity(0.15),
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: const Icon(
-                                    Icons.access_time,
-                                    color: Color(0xFFFFD700),
-                                    size: 14,
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  match['schedule_time'] ?? '--:--',
-                                  style: const TextStyle(
-                                    color: Colors.white70,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                                const SizedBox(width: 10),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFFFD700).withOpacity(0.15),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Text(
-                                    'MATCH $matchNumber',
-                                    style: const TextStyle(
-                                      color: Color(0xFFFFD700),
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 10,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            
-                            // Status Badge
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                              decoration: BoxDecoration(
-                                color: isBreak
-                                    ? Colors.grey.withOpacity(0.15)
-                                    : (isCompleted
-                                        ? Colors.green.withOpacity(0.15)
-                                        : Colors.orange.withOpacity(0.15)),
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(
-                                  color: isBreak
-                                      ? Colors.grey.withOpacity(0.5)
-                                      : (isCompleted
-                                          ? Colors.green.withOpacity(0.5)
-                                          : Colors.orange.withOpacity(0.5)),
-                                  width: 1,
-                                ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    isBreak ? Icons.free_breakfast : (isCompleted ? Icons.check_circle : Icons.schedule),
-                                    color: isBreak ? Colors.grey : (isCompleted ? Colors.green : Colors.orange),
-                                    size: 12,
-                                  ),
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    isBreak ? 'BREAK' : (isCompleted ? 'COMPLETED' : 'PENDING'),
-                                    style: TextStyle(
-                                      color: isBreak ? Colors.grey : (isCompleted ? Colors.green : Colors.orange),
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
+                      // Time and Status Bar
+Container(
+  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+  decoration: BoxDecoration(
+    color: const Color(0xFF0F0630).withOpacity(0.6),
+    borderRadius: const BorderRadius.vertical(
+      top: Radius.circular(14),
+    ),
+    border: Border(
+      bottom: BorderSide(
+        color: isCompleted ? Colors.green.withOpacity(0.3) : const Color(0xFFFFD700).withOpacity(0.2),
+        width: 1,
+      ),
+    ),
+  ),
+  child: Row(
+    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    children: [
+      // Time only (MATCH badge removed)
+      Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFD700).withOpacity(0.15),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Icon(
+              Icons.access_time,
+              color: Color(0xFFFFD700),
+              size: 14,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            match['schedule_time'] ?? '--:--',
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+      
+      // Status Badge
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        decoration: BoxDecoration(
+          color: isBreak
+              ? Colors.grey.withOpacity(0.15)
+              : (isCompleted
+                  ? Colors.green.withOpacity(0.15)
+                  : Colors.orange.withOpacity(0.15)),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isBreak
+                ? Colors.grey.withOpacity(0.5)
+                : (isCompleted
+                    ? Colors.green.withOpacity(0.5)
+                    : Colors.orange.withOpacity(0.5)),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              isBreak ? Icons.free_breakfast : (isCompleted ? Icons.check_circle : Icons.schedule),
+              color: isBreak ? Colors.grey : (isCompleted ? Colors.green : Colors.orange),
+              size: 12,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              isBreak ? 'BREAK' : (isCompleted ? 'COMPLETED' : 'PENDING'),
+              style: TextStyle(
+                color: isBreak ? Colors.grey : (isCompleted ? Colors.green : Colors.orange),
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ],
+  ),
+),
                       
                       // Match Content
                       Padding(
