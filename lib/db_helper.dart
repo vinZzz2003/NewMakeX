@@ -1104,7 +1104,12 @@ static Future<dynamic> executeDual(
       print('⚠️ Failed to generate ${targetPrefix}_ SQL: $e');
     }
   } else {
-    print('⚠️ executeDual: No valid category_id found in params, skipping mirror');
+    final sqlUpper = sql.trim().toUpperCase();
+    final nonMirrorPrefixes = ['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'SET', 'START', 'COMMIT', 'ROLLBACK', 'SELECT'];
+    final isNonMirror = nonMirrorPrefixes.any((p) => sqlUpper.startsWith(p));
+    if (!isNonMirror) {
+      print('⚠️ executeDual: No valid category_id found in params, skipping mirror');
+    }
   }
 
   return result;

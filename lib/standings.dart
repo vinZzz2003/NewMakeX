@@ -273,6 +273,7 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
   final Map<int, Map<int, int>> _allianceMatchesPlayed = {};
   final Map<int, Map<int, AllianceMatchPair>> _allianceMatchPairings = {};
   final Map<int, List<Map<String, dynamic>>> _battleStandingsByCategory = {};
+  final Map<int, Map<int, Map<String, dynamic>>> _starterOpponentsByCategory = {};
 
   bool _isLoading = true;
   bool _isInitializingScores = false;
@@ -457,6 +458,136 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
     print("❌ Error loading match pairings: $e");
   }
 }
+
+  // Resolve the appropriate championship schedule table for a category.
+  Future<String> _resolveScheduleTable(int categoryId) async {
+    try {
+      final conn = await DBHelper.getConnection();
+      // Default
+      String schedule = 'tbl_championship_schedule';
+
+      // Try category-specific type table first
+      try {
+        final catRes = await conn.execute(
+          "SELECT category_type FROM tbl_category WHERE category_id = :catId LIMIT 1",
+          {"catId": categoryId},
+        );
+        if (catRes.rows.isNotEmpty) {
+          var slug = catRes.rows.first.assoc()['category_type']?.toString();
+          if (slug != null && slug.trim().isNotEmpty) {
+            var ctype = slug.replaceAll(RegExp(r"\(.*?\)"), '').toLowerCase();
+            ctype = ctype
+                .replaceAll(RegExp(r"[^a-z0-9]+"), '_')
+                .replaceAll(RegExp(r"_+"), '_')
+                .replaceAll(RegExp(r"^_+|_+$"), '')
+                .trim();
+            if (ctype.isNotEmpty) {
+              final candidate = 'tbl_${ctype}_championship_schedule';
+              try {
+                await conn.execute('SELECT 1 FROM $candidate LIMIT 1');
+                return candidate;
+              } catch (_) {}
+            }
+          }
+        }
+      } catch (_) {}
+
+      // Prefer mirrored starter/explorer schedule tables if present
+      try {
+        await conn.execute('SELECT 1 FROM tbl_starter_championship_schedule LIMIT 1');
+        schedule = 'tbl_starter_championship_schedule';
+      } catch (_) {}
+      try {
+        await conn.execute('SELECT 1 FROM tbl_explorer_championship_schedule LIMIT 1');
+        // Only override if we don't already prefer starter
+        if (!schedule.startsWith('tbl_starter_')) schedule = 'tbl_explorer_championship_schedule';
+      } catch (_) {}
+
+      return schedule;
+    } catch (_) {
+      return 'tbl_championship_schedule';
+    }
+  }
+
+// Make sure this method exists and works correctly:
+Future<void> _loadStarterMatchPairings(int categoryId) async {
+  try {
+    final conn = await DBHelper.getConnection();
+    // Resolve which schedule table to use (may be mirrored per-category)
+    final scheduleTable = await _resolveScheduleTable(categoryId);
+
+    // Load all matches from the appropriate championship schedule table for this category
+    final result = await conn.execute("""
+      SELECT 
+        cs.match_id,
+        cs.alliance1_id,
+        cs.alliance2_id,
+        a1.selection_round as alliance1_rank,
+        a2.selection_round as alliance2_rank,
+        COALESCE(t1.team_name, 'Unknown') as captain1_name,
+        COALESCE(t2.team_name, 'Unknown') as partner1_name,
+        COALESCE(t3.team_name, 'Unknown') as captain2_name,
+        COALESCE(t4.team_name, 'Unknown') as partner2_name,
+        cs.status,
+        cs.winner_alliance_id
+      FROM $scheduleTable cs
+      LEFT JOIN tbl_alliance_selections a1 ON cs.alliance1_id = a1.alliance_id
+      LEFT JOIN tbl_alliance_selections a2 ON cs.alliance2_id = a2.alliance_id
+      LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
+      LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
+      LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
+      LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
+      WHERE cs.category_id = :catId
+        AND cs.alliance1_id > 0 
+        AND cs.alliance2_id > 0
+    """, {"catId": categoryId});
+    
+    final Map<int, AllianceMatchPair> pairings = {};
+    final Map<int, AllianceMatchPair> pairByMatch = {};
+    
+    for (final row in result.rows) {
+      final data = row.assoc();
+      final matchId = int.parse(data['match_id'].toString());
+      final alliance1Id = int.parse(data['alliance1_id'].toString());
+      final alliance2Id = int.parse(data['alliance2_id'].toString());
+      
+      final alliance1Rank = int.parse(data['alliance1_rank']?.toString() ?? '0');
+      final alliance2Rank = int.parse(data['alliance2_rank']?.toString() ?? '0');
+      final alliance1Name = '${data['captain1_name']} / ${data['partner1_name']}';
+      final alliance2Name = '${data['captain2_name']} / ${data['partner2_name']}';
+      
+      final pair = AllianceMatchPair(
+        matchId: matchId,
+        alliance1Id: alliance1Id,
+        alliance2Id: alliance2Id,
+        alliance1Rank: alliance1Rank,
+        alliance2Rank: alliance2Rank,
+        alliance1Name: alliance1Name,
+        alliance2Name: alliance2Name,
+        roundNumber: 1,
+        matchPosition: matchId,
+        bracketSide: 'grand',
+      );
+      
+      pairings[matchId] = pair;
+      pairByMatch[matchId] = pair;
+      
+      print("📊 Starter match: Alliance #$alliance1Rank vs Alliance #$alliance2Rank");
+    }
+    
+    if (mounted) {
+      setState(() {
+        _allianceMatchPairings[categoryId] = pairings;
+        _championshipPairingsByMatch[categoryId] = pairByMatch;
+      });
+    }
+    
+    print("✅ Loaded ${pairings.length} starter match pairings for category $categoryId (table: $scheduleTable)");
+  } catch (e) {
+    print("❌ Error loading starter match pairings: $e");
+  }
+}
+
 
   AllianceMatchPair? _findPairingForAlliance(int categoryId, int allianceId) {
     final Map<int, AllianceMatchPair> pairings =
@@ -2576,7 +2707,7 @@ allRoundsData.sort((a, b) {
     return 'Alliance $allianceId';
   }
 
-  Future<void> _loadChampionshipStandings(int categoryId) async {
+Future<void> _loadChampionshipStandings(int categoryId) async {
   if (mounted) {
     setState(() {
       _isLoadingAllianceByCategory[categoryId] = true;
@@ -2596,11 +2727,83 @@ allRoundsData.sort((a, b) {
     
     print("📊 Championship matches per alliance for category $categoryId: $matchesPerAlliance");
 
-    await _loadMatchPairings(categoryId);
+    final conn = await DBHelper.getConnection();
+    final categoryResult = await conn.execute(
+      "SELECT category_type FROM tbl_category WHERE category_id = :catId LIMIT 1",
+      {"catId": categoryId},
+    );
+    final categoryType = categoryResult.rows.isNotEmpty 
+        ? categoryResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
+        : '';
+    final bool isStarter = categoryType.contains('starter');
+    
+    if (isStarter) {
+      // Use the per-category schedule table when available
+      final scheduleTable = await _resolveScheduleTable(categoryId);
+      await _loadStarterMatchPairings(categoryId);
+
+      // CRITICAL: Load opponent information for Starter categories
+      final scheduleResult = await conn.execute("""
+        SELECT 
+          cs.alliance1_id,
+          cs.alliance2_id,
+          a1.selection_round as alliance1_rank,
+          a2.selection_round as alliance2_rank,
+          COALESCE(t1.team_name, 'Unknown') as captain1_name,
+          COALESCE(t2.team_name, 'Unknown') as partner1_name,
+          COALESCE(t3.team_name, 'Unknown') as captain2_name,
+          COALESCE(t4.team_name, 'Unknown') as partner2_name
+        FROM $scheduleTable cs
+        LEFT JOIN tbl_alliance_selections a1 ON cs.alliance1_id = a1.alliance_id
+        LEFT JOIN tbl_alliance_selections a2 ON cs.alliance2_id = a2.alliance_id
+        LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
+        LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
+        LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
+        LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
+        WHERE cs.category_id = :catId
+          AND cs.alliance1_id > 0 
+          AND cs.alliance2_id > 0
+      """, {"catId": categoryId});
+      
+      // Store opponent info
+      final Map<int, Map<String, dynamic>> starterOpponents = {};
+      
+      for (final row in scheduleResult.rows) {
+        final data = row.assoc();
+        final alliance1Id = int.parse(data['alliance1_id'].toString());
+        final alliance2Id = int.parse(data['alliance2_id'].toString());
+        
+        final alliance1Name = '${data['captain1_name']} / ${data['partner1_name']}';
+        final alliance2Name = '${data['captain2_name']} / ${data['partner2_name']}';
+        final alliance1Rank = int.parse(data['alliance1_rank']?.toString() ?? '0');
+        final alliance2Rank = int.parse(data['alliance2_rank']?.toString() ?? '0');
+        
+        // Store for alliance 1
+        starterOpponents[alliance1Id] = {
+          'opponentId': alliance2Id,
+          'opponentName': alliance2Name,
+          'opponentRank': alliance2Rank,
+        };
+        
+        // Store for alliance 2
+        starterOpponents[alliance2Id] = {
+          'opponentId': alliance1Id,
+          'opponentName': alliance1Name,
+          'opponentRank': alliance1Rank,
+        };
+        
+        print("📊 Starter opponent mapping: Alliance $alliance1Id -> $alliance2Name");
+        print("📊 Starter opponent mapping: Alliance $alliance2Id -> $alliance1Name");
+      }
+      
+      _starterOpponentsByCategory[categoryId] = starterOpponents;
+      print("✅ Loaded ${starterOpponents.length} starter opponent mappings for category $categoryId");
+    } else {
+      await _loadMatchPairings(categoryId);
+    }
+    
     await _loadBestOf3Results(categoryId);
 
-    final conn = await DBHelper.getConnection();
-    
     // Get all alliances for this category
     final alliancesResult = await conn.execute("""
       SELECT 
@@ -2640,27 +2843,17 @@ allRoundsData.sort((a, b) {
       WHERE category_id = :catId AND is_completed = 1
     """, {"catId": categoryId});
     
-    // Count wins per alliance (number of matches won, not sum of scores)
+    // Count wins per alliance
     final Map<int, int> winsCount = {};
-    // Also track total points (sum of alliance_score) if needed
-    final Map<int, int> totalPoints = {};
     
     for (final row in bestOf3Result.rows) {
       final data = row.assoc();
       final allianceId = int.parse(data['alliance_id'].toString());
-      final allianceScore = int.parse(data['alliance_score'].toString());
-      final opponentScore = int.parse(data['opponent_score'].toString());
       final winnerId = int.parse(data['winner_alliance_id'].toString());
       
-      // Count as win if this alliance won the match
       if (winnerId == allianceId) {
         winsCount[allianceId] = (winsCount[allianceId] ?? 0) + 1;
       }
-      
-      // Track total points (alliance_score)
-      totalPoints[allianceId] = (totalPoints[allianceId] ?? 0) + allianceScore;
-      
-      print("   Alliance $allianceId: Match ${data['match_number']} - Score: $allianceScore vs $opponentScore, Winner: ${winnerId == allianceId ? 'YES' : 'NO'}");
     }
 
     // Create standings list
@@ -2670,14 +2863,10 @@ allRoundsData.sort((a, b) {
       final allianceId = int.parse(alliance['alliance_id'].toString());
       final allianceRank = int.parse(alliance['alliance_rank'].toString());
       
-      // Get wins count (number of matches won)
       final wins = winsCount[allianceId] ?? 0;
-      // MAX SCORE = wins × 10
       final maxScore = wins * 10;
       
       final matchScores = <int, Map<String, int>>{};
-      
-      print("   Alliance #$allianceRank: $wins wins → MAX SCORE = $maxScore");
 
       standings.add(
         ChampionshipAllianceStanding(
@@ -2691,7 +2880,7 @@ allRoundsData.sort((a, b) {
       );
     }
 
-    // Sort by totalScore (highest first)
+    // Sort by totalScore
     standings.sort((a, b) {
       if (a.totalScore != b.totalScore) {
         return b.totalScore.compareTo(a.totalScore);
@@ -2707,10 +2896,6 @@ allRoundsData.sort((a, b) {
     }
     
     print("✅ Loaded ${standings.length} championship standings");
-    for (final s in standings) {
-      final wins = s.totalScore ~/ 10;
-      print("   Alliance #${s.allianceRank}: $wins wins → ${s.totalScore} points");
-    }
   } catch (e) {
     print("Error loading championship standings: $e");
     if (mounted) {
@@ -2847,6 +3032,302 @@ allRoundsData.sort((a, b) {
     );
   }
 
+Widget _buildStarterMatchCell({
+  required int categoryId,
+  required int allianceId,
+  required int opponentId,
+  required String allianceName,
+  required String opponentName,
+  required BestOf3MatchResult? result,
+  required VoidCallback onRefresh,
+}) {
+  final bool matchPlayed = result != null && result.isCompleted;
+  final bool matchWon = matchPlayed && result.winnerAllianceId == allianceId;
+  
+  // Get the actual opponent info from the stored map
+  String displayOpponentName = 'TBD';
+  int displayOpponentId = 0;
+  int displayOpponentRank = 0;
+  
+  // Debug print
+  print("🔍 Looking for opponent for Alliance $allianceId in category $categoryId");
+  print("   _starterOpponentsByCategory keys: ${_starterOpponentsByCategory.keys}");
+  
+  if (_starterOpponentsByCategory.containsKey(categoryId)) {
+    final categoryOpponents = _starterOpponentsByCategory[categoryId]!;
+    print("   Category $categoryId has opponents: ${categoryOpponents.keys}");
+    
+    if (categoryOpponents.containsKey(allianceId)) {
+      final opponentInfo = categoryOpponents[allianceId]!;
+      displayOpponentName = opponentInfo['opponentName'] as String? ?? 'TBD';
+      displayOpponentId = opponentInfo['opponentId'] as int? ?? 0;
+      displayOpponentRank = opponentInfo['opponentRank'] as int? ?? 0;
+      print("   ✅ Found opponent: $displayOpponentName (ID: $displayOpponentId, Rank: $displayOpponentRank)");
+    } else {
+      print("   ⚠️ No opponent found for alliance $allianceId");
+    }
+  } else {
+    print("   ⚠️ No opponent data for category $categoryId");
+  }
+  
+  return Expanded(
+    flex: 2,
+    child: GestureDetector(
+      onTap: () async {
+        // If mapping is not present, try a quick DB lookup to resolve opponent
+        if (displayOpponentId == 0) {
+          try {
+            final conn = await DBHelper.getConnection();
+            final scheduleTable = await _resolveScheduleTable(categoryId);
+            final sel = await conn.execute(
+              """
+              SELECT 
+                cs.alliance1_id, cs.alliance2_id,
+                COALESCE(t1.team_name, 'Unknown') as captain1_name,
+                COALESCE(t2.team_name, 'Unknown') as partner1_name,
+                COALESCE(t3.team_name, 'Unknown') as captain2_name,
+                COALESCE(t4.team_name, 'Unknown') as partner2_name
+              FROM $scheduleTable cs
+              LEFT JOIN tbl_alliance_selections a1 ON cs.alliance1_id = a1.alliance_id
+              LEFT JOIN tbl_alliance_selections a2 ON cs.alliance2_id = a2.alliance_id
+              LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
+              LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
+              LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
+              LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
+              WHERE cs.category_id = :catId
+                AND (cs.alliance1_id = :aid OR cs.alliance2_id = :aid)
+                AND cs.alliance1_id > 0 AND cs.alliance2_id > 0
+              LIMIT 1
+              """,
+              {"catId": categoryId, "aid": allianceId},
+            );
+
+            if (sel.rows.isNotEmpty) {
+              final d = sel.rows.first.assoc();
+              final a1 = int.tryParse(d['alliance1_id']?.toString() ?? '0') ?? 0;
+              final a2 = int.tryParse(d['alliance2_id']?.toString() ?? '0') ?? 0;
+              if (a1 == allianceId && a2 > 0) {
+                displayOpponentId = a2;
+                displayOpponentName = '${d['captain2_name']} / ${d['partner2_name']}';
+              } else if (a2 == allianceId && a1 > 0) {
+                displayOpponentId = a1;
+                displayOpponentName = '${d['captain1_name']} / ${d['partner1_name']}';
+              }
+
+              // Cache for future use
+              _starterOpponentsByCategory.putIfAbsent(categoryId, () => {});
+              _starterOpponentsByCategory[categoryId]![allianceId] = {
+                'opponentId': displayOpponentId,
+                'opponentName': displayOpponentName,
+                'opponentRank': displayOpponentRank,
+              };
+            } else {
+              // Fallback: sometimes the schedule stores pairings by alliance selection rank
+              // rather than the alliance_id. Try to resolve by the alliance's selection_round.
+              try {
+                final rankRes = await conn.execute(
+                  """
+                  SELECT selection_round FROM tbl_alliance_selections
+                  WHERE alliance_id = :aid LIMIT 1
+                  """,
+                  {"aid": allianceId},
+                );
+
+                if (rankRes.rows.isNotEmpty) {
+                  final rankRow = rankRes.rows.first.assoc();
+                  final selectionRank = int.tryParse(rankRow['selection_round']?.toString() ?? '0') ?? 0;
+                  if (selectionRank > 0) {
+                    final selByRank = await conn.execute(
+                      """
+                      SELECT 
+                        cs.alliance1_id, cs.alliance2_id,
+                        COALESCE(t1.team_name, 'Unknown') as captain1_name,
+                        COALESCE(t2.team_name, 'Unknown') as partner1_name,
+                        COALESCE(t3.team_name, 'Unknown') as captain2_name,
+                        COALESCE(t4.team_name, 'Unknown') as partner2_name
+                      FROM $scheduleTable cs
+                      LEFT JOIN tbl_alliance_selections a1 ON cs.alliance1_id = a1.alliance_id
+                      LEFT JOIN tbl_alliance_selections a2 ON cs.alliance2_id = a2.alliance_id
+                      LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
+                      LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
+                      LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
+                      LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
+                      WHERE cs.category_id = :catId
+                        AND (a1.selection_round = :rank OR a2.selection_round = :rank)
+                        AND cs.alliance1_id > 0 AND cs.alliance2_id > 0
+                      LIMIT 1
+                      """,
+                      {"catId": categoryId, "rank": selectionRank},
+                    );
+
+                    if (selByRank.rows.isNotEmpty) {
+                      final d = selByRank.rows.first.assoc();
+                      final a1 = int.tryParse(d['alliance1_id']?.toString() ?? '0') ?? 0;
+                      final a2 = int.tryParse(d['alliance2_id']?.toString() ?? '0') ?? 0;
+                      if (a1 == allianceId && a2 > 0) {
+                        displayOpponentId = a2;
+                        displayOpponentName = '${d['captain2_name']} / ${d['partner2_name']}';
+                      } else if (a2 == allianceId && a1 > 0) {
+                        displayOpponentId = a1;
+                        displayOpponentName = '${d['captain1_name']} / ${d['partner1_name']}';
+                      }
+
+                      // Cache for future use
+                      _starterOpponentsByCategory.putIfAbsent(categoryId, () => {});
+                      _starterOpponentsByCategory[categoryId]![allianceId] = {
+                        'opponentId': displayOpponentId,
+                        'opponentName': displayOpponentName,
+                        'opponentRank': displayOpponentRank,
+                      };
+                    }
+                  }
+                }
+              } catch (e) {
+                print('⚠️ Fallback rank lookup failed: $e');
+              }
+            }
+          } catch (e) {
+            print('⚠️ Could not resolve starter opponent via DB: $e');
+          }
+        }
+
+        if (displayOpponentId == 0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Opponent not yet determined. Please generate the championship schedule first.'),
+              backgroundColor: Colors.orange,
+              duration: Duration(seconds: 2),
+            ),
+          );
+          return;
+        }
+
+        // Show the championship score dialog with resolved opponent info
+        _showChampionshipScoreDialog(
+          categoryId: categoryId,
+          allianceId: allianceId,
+          allianceRank: 0,
+          allianceName: allianceName,
+          matchNumber: 1,
+          currentScore: matchPlayed ? {'score': result.alliance1Score, 'violation': result.alliance1Violation} : null,
+          opponentAllianceId: displayOpponentId,
+          opponentName: displayOpponentName,
+          opponentRank: displayOpponentRank,
+        );
+      },
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 8),
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+        decoration: BoxDecoration(
+          color: matchPlayed 
+              ? (matchWon ? Colors.green.withOpacity(0.15) : Colors.red.withOpacity(0.1))
+              : Colors.white.withOpacity(0.05),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: matchPlayed 
+                ? (matchWon ? Colors.green : Colors.red)
+                : (displayOpponentId != 0 ? const Color(0xFFFFD700) : Colors.white.withOpacity(0.2)),
+            width: matchPlayed ? 2 : 1.5,
+          ),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              displayOpponentName,
+              style: TextStyle(
+                color: matchPlayed ? (matchWon ? Colors.green : Colors.red) : Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+              ),
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            if (displayOpponentRank > 0) ...[
+              const SizedBox(height: 4),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFD700).withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  '#$displayOpponentRank',
+                  style: const TextStyle(
+                    color: Color(0xFFFFD700),
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 8),
+            if (matchPlayed) ...[
+              Text(
+                '${result!.alliance1Score} pts',
+                style: TextStyle(
+                  color: matchWon ? Colors.green : Colors.white70,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                'VIO: -${result.alliance1Violation}',
+                style: const TextStyle(
+                  color: Colors.redAccent,
+                  fontSize: 10,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: matchWon ? Colors.green.withOpacity(0.2) : Colors.grey.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  matchWon ? 'WINNER' : 'LOSER',
+                  style: TextStyle(
+                    color: matchWon ? Colors.green : Colors.grey,
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ] else if (displayOpponentId != 0) ...[
+              const Icon(
+                Icons.sports_esports_rounded,
+                color: Color(0xFFFFD700),
+                size: 20,
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'PENDING',
+                style: TextStyle(
+                  color: Color(0xFFFFD700),
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ] else ...[
+              const Text(
+                'TBD',
+                style: TextStyle(
+                  color: Colors.white38,
+                  fontSize: 12,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
   Widget _buildMatchCellContent({
     required int categoryId,
     required int allianceId,
@@ -2943,7 +3424,22 @@ final int seriesWinsB = seriesWins['winsB'] ?? 0;
       flex: 2,
       child: GestureDetector(
         onTap: () async {
-          if (opponentId == 0) {
+          int resolvedOpponentId = opponentId;
+          String resolvedOpponentName = opponentName;
+
+          if (resolvedOpponentId == 0) {
+            final starterMap = _starterOpponentsByCategory[categoryId];
+            if (starterMap != null && starterMap.containsKey(allianceId)) {
+              final byMatch = starterMap[allianceId]!;
+              final m = byMatch[matchNumber];
+              if (m != null) {
+                resolvedOpponentId = m['opponentId'] as int? ?? resolvedOpponentId;
+                resolvedOpponentName = m['opponentName'] as String? ?? resolvedOpponentName;
+              }
+            }
+          }
+
+          if (resolvedOpponentId == 0) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
                 content: Text('Opponent not yet determined'),
@@ -4293,7 +4789,7 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
   );
 }
 
-  Widget _buildChampionshipRow({
+Widget _buildChampionshipRow({
   required ChampionshipAllianceStanding standing,
   required int categoryId,
   required Map<int, List<BestOf3MatchResult>> results,
@@ -4303,118 +4799,46 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
 }) {
   final isEven = index % 2 == 0;
   final allianceResults = results[standing.allianceId] ?? [];
-  final allianceWins = wins[standing.allianceId] ?? 0;
-
-  // Get the alliance's loss count to determine if they're in Winners or Losers bracket
-  final losses = _getAllianceLossCount(categoryId, standing.allianceId);
   
-  // Get all results for this alliance
-  final allResultsForAlliance = _bestOf3Results[categoryId] ?? {};
-  final allianceCompletedResults = allResultsForAlliance[standing.allianceId] ?? [];
-
-  // Find ALL pairings for this alliance
-  final List<AllianceMatchPair> alliancePairings = [];
-  for (final pair in pairings.values) {
-    if (pair.alliance1Id == standing.allianceId ||
-        pair.alliance2Id == standing.allianceId) {
-      alliancePairings.add(pair);
-    }
-  }
-  
-  // Sort by round number (ascending for Loser's bracket)
-  alliancePairings.sort((a, b) => a.roundNumber.compareTo(b.roundNumber));
-  
+  // Find the pairing for this alliance from the pre-loaded pairings
   AllianceMatchPair? currentPair;
-  
-  if (losses >= 1) {
-    // For Loser's Bracket, find the NEXT match that is NOT yet completed
-    for (final pair in alliancePairings) {
-      if (pair.bracketSide == 'losers') {
-        final matchResults = allianceCompletedResults.where((r) => 
-            r.matchRound == pair.roundNumber && 
-            r.matchPosition == pair.matchPosition &&
-            r.bracketSide == pair.bracketSide).toList();
-        
-        int wins = 0;
-        for (final r in matchResults) {
-          if (r.winnerAllianceId == standing.allianceId) {
-            wins++;
-          }
-        }
-        
-        final bool seriesComplete = (wins >= 2) || (matchResults.length >= 3);
-        
-        if (!seriesComplete) {
-          currentPair = pair;
-          break;
-        }
-      }
-    }
-    
-    if (currentPair == null && alliancePairings.isNotEmpty) {
-      for (final pair in alliancePairings.reversed) {
-        if (pair.bracketSide == 'losers') {
-          currentPair = pair;
-          break;
-        }
-      }
-    }
-  } else {
-    // For Winner's Bracket, find the next incomplete match
-    for (final pair in alliancePairings) {
-      if (pair.bracketSide == 'winners') {
-        final matchResults = allianceCompletedResults.where((r) => 
-            r.matchRound == pair.roundNumber && 
-            r.matchPosition == pair.matchPosition &&
-            r.bracketSide == pair.bracketSide).toList();
-        
-        int wins = 0;
-        for (final r in matchResults) {
-          if (r.winnerAllianceId == standing.allianceId) {
-            wins++;
-          }
-        }
-        
-        final bool seriesComplete = (wins >= 2) || (matchResults.length >= 3);
-        
-        if (!seriesComplete) {
-          currentPair = pair;
-          break;
-        }
-      }
-    }
-    
-    if (currentPair == null && alliancePairings.isNotEmpty) {
-      currentPair = alliancePairings.last;
+  for (final pair in pairings.values) {
+    if (pair.alliance1Id == standing.allianceId || pair.alliance2Id == standing.allianceId) {
+      currentPair = pair;
+      break;
     }
   }
   
-  if (currentPair == null && alliancePairings.isNotEmpty) {
-    currentPair = alliancePairings.last;
+  // If no pairing found, show loading state
+  if (currentPair == null) {
+    return Container(
+      color: isEven ? const Color(0xFF1E0E5A) : const Color(0xFF160A42),
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+      child: const Row(
+        children: [
+          Expanded(flex: 1, child: SizedBox()),
+          Expanded(flex: 1, child: SizedBox()),
+          Expanded(flex: 4, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
+          Expanded(flex: 2, child: SizedBox()),
+          Expanded(flex: 2, child: SizedBox()),
+          Expanded(flex: 2, child: SizedBox()),
+          Expanded(flex: 2, child: SizedBox()),
+        ],
+      ),
+    );
   }
 
-  final opponentId = currentPair != null
-      ? (currentPair.alliance1Id == standing.allianceId
-            ? currentPair.alliance2Id
-            : currentPair.alliance1Id)
-      : 0;
-
-  final opponentName = currentPair != null
-      ? (currentPair.alliance1Id == standing.allianceId
-            ? currentPair.alliance2Name
-            : currentPair.alliance1Name)
-      : 'TBD';
-
-  final opponentRank = currentPair != null
-      ? (currentPair.alliance1Id == standing.allianceId
-            ? currentPair.alliance2Rank
-            : currentPair.alliance1Rank)
-      : 0;
-
-  final roundNumber = currentPair?.roundNumber ?? 1;
-  final matchPosition = currentPair?.matchPosition ?? 1;
-  final bracketSide =
-      currentPair?.bracketSide ?? (losses >= 1 ? 'losers' : 'winners');
+  final opponentId = (currentPair.alliance1Id == standing.allianceId) 
+      ? currentPair.alliance2Id 
+      : currentPair.alliance1Id;
+      
+  final opponentName = (currentPair.alliance1Id == standing.allianceId) 
+      ? currentPair.alliance2Name 
+      : currentPair.alliance1Name;
+      
+  final roundNumber = currentPair.roundNumber;
+  final matchPosition = currentPair.matchPosition;
+  final bracketSide = currentPair.bracketSide;
 
   // Get match results for the current round
   final match1Result = allianceResults.firstWhere(
@@ -4464,6 +4888,11 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
       isCompleted: false,
     ),
   );
+
+  // ============================================================
+  // CHECK IF THIS IS A STARTER CATEGORY (only 1 match per pairing)
+  // ============================================================
+  final bool isStarterCategory = (_championshipMatchesPerAlliance[categoryId] ?? 3) == 1;
 
   return Container(
     color: isEven ? const Color(0xFF1E0E5A) : const Color(0xFF160A42),
@@ -4529,60 +4958,78 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
             ),
           ),
         ),
-        _buildBestOf3MatchCell(
-          categoryId: categoryId,
-          allianceId: standing.allianceId,
-          opponentId: opponentId,
-          matchNumber: 1,
-          roundNumber: roundNumber,
-          matchPosition: matchPosition,
-          allianceName: '${standing.captainName} / ${standing.partnerName}',
-          opponentName: opponentName,
-          bracketSide: bracketSide,
-          result: match1Result,
-          onRefresh: () async {
-            await _loadBestOf3Results(categoryId);
-            await _loadChampionshipStandings(categoryId);
-            await _reorderChampionshipStandings(categoryId);
-            if (mounted) setState(() {});
-          },
-        ),
-        _buildBestOf3MatchCell(
-          categoryId: categoryId,
-          allianceId: standing.allianceId,
-          opponentId: opponentId,
-          matchNumber: 2,
-          roundNumber: roundNumber,
-          matchPosition: matchPosition,
-          allianceName: '${standing.captainName} / ${standing.partnerName}',
-          opponentName: opponentName,
-          bracketSide: bracketSide,
-          result: match2Result,
-          onRefresh: () async {
-            await _loadBestOf3Results(categoryId);
-            await _loadChampionshipStandings(categoryId);
-            await _reorderChampionshipStandings(categoryId);
-            if (mounted) setState(() {});
-          },
-        ),
-        _buildBestOf3MatchCell(
-          categoryId: categoryId,
-          allianceId: standing.allianceId,
-          opponentId: opponentId,
-          matchNumber: 3,
-          roundNumber: roundNumber,
-          matchPosition: matchPosition,
-          allianceName: '${standing.captainName} / ${standing.partnerName}',
-          opponentName: opponentName,
-          bracketSide: bracketSide,
-          result: match3Result,
-          onRefresh: () async {
-            await _loadBestOf3Results(categoryId);
-            await _loadChampionshipStandings(categoryId);
-            await _reorderChampionshipStandings(categoryId);
-            if (mounted) setState(() {});
-          },
-        ),
+        // CRITICAL FIX: Use Starter match cell for Starter categories
+        if (isStarterCategory)
+          _buildStarterMatchCell(
+            categoryId: categoryId,
+            allianceId: standing.allianceId,
+            opponentId: opponentId,
+            allianceName: '${standing.captainName} / ${standing.partnerName}',
+            opponentName: opponentName,
+            result: match1Result,
+            onRefresh: () async {
+              await _loadBestOf3Results(categoryId);
+              await _loadChampionshipStandings(categoryId);
+              if (mounted) setState(() {});
+            },
+          )
+        else ...[
+          // For Explorer categories, show Best of 3 matches
+          _buildBestOf3MatchCell(
+            categoryId: categoryId,
+            allianceId: standing.allianceId,
+            opponentId: opponentId,
+            matchNumber: 1,
+            roundNumber: roundNumber,
+            matchPosition: matchPosition,
+            allianceName: '${standing.captainName} / ${standing.partnerName}',
+            opponentName: opponentName,
+            bracketSide: bracketSide,
+            result: match1Result,
+            onRefresh: () async {
+              await _loadBestOf3Results(categoryId);
+              await _loadChampionshipStandings(categoryId);
+              await _reorderChampionshipStandings(categoryId);
+              if (mounted) setState(() {});
+            },
+          ),
+          _buildBestOf3MatchCell(
+            categoryId: categoryId,
+            allianceId: standing.allianceId,
+            opponentId: opponentId,
+            matchNumber: 2,
+            roundNumber: roundNumber,
+            matchPosition: matchPosition,
+            allianceName: '${standing.captainName} / ${standing.partnerName}',
+            opponentName: opponentName,
+            bracketSide: bracketSide,
+            result: match2Result,
+            onRefresh: () async {
+              await _loadBestOf3Results(categoryId);
+              await _loadChampionshipStandings(categoryId);
+              await _reorderChampionshipStandings(categoryId);
+              if (mounted) setState(() {});
+            },
+          ),
+          _buildBestOf3MatchCell(
+            categoryId: categoryId,
+            allianceId: standing.allianceId,
+            opponentId: opponentId,
+            matchNumber: 3,
+            roundNumber: roundNumber,
+            matchPosition: matchPosition,
+            allianceName: '${standing.captainName} / ${standing.partnerName}',
+            opponentName: opponentName,
+            bracketSide: bracketSide,
+            result: match3Result,
+            onRefresh: () async {
+              await _loadBestOf3Results(categoryId);
+              await _loadChampionshipStandings(categoryId);
+              await _reorderChampionshipStandings(categoryId);
+              if (mounted) setState(() {});
+            },
+          ),
+        ],
         Expanded(
           flex: 2,
           child: Center(
@@ -4678,7 +5125,9 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
   // Load schedule to get opponent information
   Future<void> loadOpponentInfo() async {
     try {
+      opponentInfo.clear();
       final conn = await DBHelper.getConnection();
+      final scheduleTable = await _resolveScheduleTable(categoryId);
       final result = await conn.execute("""
         SELECT 
           alliance1_id, 
@@ -4690,7 +5139,7 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
           COALESCE(t2.team_name, 'Unknown') as partner1_name,
           COALESCE(t3.team_name, 'Unknown') as captain2_name,
           COALESCE(t4.team_name, 'Unknown') as partner2_name
-        FROM tbl_championship_schedule cs
+        FROM $scheduleTable cs
         LEFT JOIN tbl_alliance_selections a1 ON cs.alliance1_id = a1.alliance_id
         LEFT JOIN tbl_alliance_selections a2 ON cs.alliance2_id = a2.alliance_id
         LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
@@ -4699,36 +5148,41 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
         LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
         WHERE cs.category_id = :catId
       """, {"catId": categoryId});
-      
+
       for (final row in result.rows) {
         final data = row.assoc();
-        final a1Id = int.parse(data['alliance1_id'].toString());
-        final a2Id = int.parse(data['alliance2_id'].toString());
-        final matchNum = int.parse(data['match_number'].toString());
-        
-        final a1Rank = int.parse(data['alliance1_rank']?.toString() ?? '0');
-        final a2Rank = int.parse(data['alliance2_rank']?.toString() ?? '0');
-        final a1Name = '${data['captain1_name']} / ${data['partner1_name']}';
-        final a2Name = '${data['captain2_name']} / ${data['partner2_name']}';
-        
-        if (!opponentInfo.containsKey(a1Id)) {
-          opponentInfo[a1Id] = {};
+        final a1Id = int.tryParse((data['alliance1_id'] ?? '0').toString()) ?? 0;
+        final a2Id = int.tryParse((data['alliance2_id'] ?? '0').toString()) ?? 0;
+        final matchNum = int.tryParse((data['match_number'] ?? '0').toString()) ?? 0;
+
+        if (matchNum == 0) continue; // skip invalid entries
+
+        final a1Rank = int.tryParse((data['alliance1_rank'] ?? '0').toString()) ?? 0;
+        final a2Rank = int.tryParse((data['alliance2_rank'] ?? '0').toString()) ?? 0;
+        final a1Name = '${data['captain1_name'] ?? 'Unknown'} / ${data['partner1_name'] ?? 'Unknown'}';
+        final a2Name = '${data['captain2_name'] ?? 'Unknown'} / ${data['partner2_name'] ?? 'Unknown'}';
+
+        if (a1Id > 0) {
+          opponentInfo.putIfAbsent(a1Id, () => {});
+          opponentInfo[a1Id]![matchNum] = {
+            'id': a2Id,
+            'rank': a2Rank,
+            'name': a2Name,
+          };
         }
-        opponentInfo[a1Id]![matchNum] = {
-          'id': a2Id,
-          'rank': a2Rank,
-          'name': a2Name,
-        };
-        
-        if (!opponentInfo.containsKey(a2Id)) {
-          opponentInfo[a2Id] = {};
+
+        if (a2Id > 0) {
+          opponentInfo.putIfAbsent(a2Id, () => {});
+          opponentInfo[a2Id]![matchNum] = {
+            'id': a1Id,
+            'rank': a1Rank,
+            'name': a1Name,
+          };
         }
-        opponentInfo[a2Id]![matchNum] = {
-          'id': a1Id,
-          'rank': a1Rank,
-          'name': a1Name,
-        };
       }
+
+      print("✅ Loaded ${opponentInfo.length} opponent entries for category $categoryId");
+      if (mounted) setState(() {});
     } catch (e) {
       print("Error loading opponent info: $e");
     }
@@ -4905,17 +5359,44 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
                         Expanded(
                           flex: 1,
                           child: GestureDetector(
-                            onTap: () => _showChampionshipScoreDialog(
-                              categoryId: categoryId,
-                              allianceId: standing.allianceId,
-                              allianceRank: standing.allianceRank,
-                              allianceName: '${standing.captainName} / ${standing.partnerName}',
-                              matchNumber: matchNumber,
-                              currentScore: matchScore,
-                              opponentAllianceId: opponentId,
-                              opponentName: opponentName,
-                              opponentRank: opponentRank,
-                            ),
+                            onTap: () {
+                              int resolvedOpponentId = (opponentId ?? 0) as int;
+                              String resolvedOpponentName = opponentName ?? 'TBD';
+                              int resolvedOpponentRank = opponentRank ?? 0;
+
+                              if (resolvedOpponentId == 0) {
+                                final starterMap = _starterOpponentsByCategory[categoryId];
+                                if (starterMap != null && starterMap.containsKey(standing.allianceId)) {
+                                  final m = starterMap[standing.allianceId]!;
+                                  resolvedOpponentId = m['opponentId'] as int? ?? 0;
+                                  resolvedOpponentName = m['opponentName'] as String? ?? resolvedOpponentName;
+                                  resolvedOpponentRank = m['opponentRank'] as int? ?? resolvedOpponentRank;
+                                }
+                              }
+
+                              if (resolvedOpponentId == 0) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Opponent not yet determined. Please generate the championship schedule first.'),
+                                    backgroundColor: Colors.orange,
+                                    duration: Duration(seconds: 2),
+                                  ),
+                                );
+                                return;
+                              }
+
+                              _showChampionshipScoreDialog(
+                                categoryId: categoryId,
+                                allianceId: standing.allianceId,
+                                allianceRank: standing.allianceRank,
+                                allianceName: '${standing.captainName} / ${standing.partnerName}',
+                                matchNumber: matchNumber,
+                                currentScore: matchScore,
+                                opponentAllianceId: resolvedOpponentId,
+                                opponentName: resolvedOpponentName,
+                                opponentRank: resolvedOpponentRank,
+                              );
+                            },
                             child: Container(
                               margin: const EdgeInsets.symmetric(horizontal: 1),
                               padding: const EdgeInsets.symmetric(vertical: 8),
@@ -4943,17 +5424,44 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
                         Expanded(
                           flex: 1,
                           child: GestureDetector(
-                            onTap: () => _showChampionshipScoreDialog(
-                              categoryId: categoryId,
-                              allianceId: standing.allianceId,
-                              allianceRank: standing.allianceRank,
-                              allianceName: '${standing.captainName} / ${standing.partnerName}',
-                              matchNumber: matchNumber,
-                              currentScore: matchScore,
-                              opponentAllianceId: opponentId,
-                              opponentName: opponentName,
-                              opponentRank: opponentRank,
-                            ),
+                            onTap: () {
+                              int resolvedOpponentId = (opponentId ?? 0) as int;
+                              String resolvedOpponentName = opponentName ?? 'TBD';
+                              int resolvedOpponentRank = opponentRank ?? 0;
+
+                              if (resolvedOpponentId == 0) {
+                                final starterMap = _starterOpponentsByCategory[categoryId];
+                                if (starterMap != null && starterMap.containsKey(standing.allianceId)) {
+                                  final m = starterMap[standing.allianceId]!;
+                                  resolvedOpponentId = m['opponentId'] as int? ?? 0;
+                                  resolvedOpponentName = m['opponentName'] as String? ?? resolvedOpponentName;
+                                  resolvedOpponentRank = m['opponentRank'] as int? ?? resolvedOpponentRank;
+                                }
+                              }
+
+                              if (resolvedOpponentId == 0) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Opponent not yet determined. Please generate the championship schedule first.'),
+                                    backgroundColor: Colors.orange,
+                                    duration: Duration(seconds: 2),
+                                  ),
+                                );
+                                return;
+                              }
+
+                              _showChampionshipScoreDialog(
+                                categoryId: categoryId,
+                                allianceId: standing.allianceId,
+                                allianceRank: standing.allianceRank,
+                                allianceName: '${standing.captainName} / ${standing.partnerName}',
+                                matchNumber: matchNumber,
+                                currentScore: matchScore,
+                                opponentAllianceId: resolvedOpponentId,
+                                opponentName: resolvedOpponentName,
+                                opponentRank: resolvedOpponentRank,
+                              );
+                            },
                             child: Container(
                               margin: const EdgeInsets.symmetric(horizontal: 1),
                               padding: const EdgeInsets.symmetric(vertical: 8),
@@ -6489,24 +6997,26 @@ try {
                     size: 24,
                   ),
                   onChanged: (StandingType? newValue) {
-                    if (newValue != null) {
-                      setState(() {
-                        _selectedTypeByCategory[categoryId] = newValue;
-                      });
+  if (newValue != null) {
+    setState(() {
+      _selectedTypeByCategory[categoryId] = newValue;
+    });
 
-                      if (newValue == StandingType.championship) {
-                        if (isExplorer) {
-                          _loadMatchPairings(categoryId);
-                          _loadBestOf3Results(categoryId);
-                          _loadChampionshipStandings(categoryId);
-                        } else {
-                          _loadChampionshipStandings(categoryId);
-                        }
-                      } else if (newValue == StandingType.battleOfChampions) {
-                        _loadChampionStandings(categoryId);
-                      }
-                    }
-                  },
+    if (newValue == StandingType.championship) {
+      if (isExplorer) {
+        _loadMatchPairings(categoryId);
+        _loadBestOf3Results(categoryId);
+        _loadChampionshipStandings(categoryId);
+      } else {
+        // For Starter, make sure we load fresh data
+        _loadStarterMatchPairings(categoryId);
+        _loadChampionshipStandings(categoryId);
+      }
+    } else if (newValue == StandingType.battleOfChampions) {
+      _loadChampionStandings(categoryId);
+    }
+  }
+},
                   items: StandingType.values.map((type) {
                     return DropdownMenuItem<StandingType>(
                       value: type,
@@ -8459,7 +8969,7 @@ void _showBattleScoreEditDialog({
     );
   }
   
-void _showChampionshipScoreDialog({
+Future<void> _showChampionshipScoreDialog({
   required int categoryId,
   required int allianceId,
   required int allianceRank,
@@ -8469,7 +8979,20 @@ void _showChampionshipScoreDialog({
   required int opponentAllianceId,
   required String opponentName,
   required int opponentRank,
-}) {
+}) async {
+  print('🔔 _showChampionshipScoreDialog called: cat=$categoryId, alliance=$allianceId, opponent=$opponentAllianceId, opponentName="$opponentName"');
+
+  // Resolve opponent display name if possible (do not modify parameter)
+  String displayOpponentName = opponentName;
+  if (opponentAllianceId > 0 && (opponentName.trim().isEmpty || opponentName == 'TBD')) {
+    try {
+      final resolved = await _getAllianceDisplayName(categoryId, opponentAllianceId);
+      if (resolved.trim().isNotEmpty) displayOpponentName = resolved;
+    } catch (e) {
+      print('⚠️ Could not auto-resolve opponent name: $e');
+    }
+  }
+
   // Load existing scores for both alliances
   Map<String, int>? allianceCurrentScore = currentScore;
   Map<String, int>? opponentCurrentScore;
@@ -8504,8 +9027,8 @@ void _showChampionshipScoreDialog({
         final opponentFinal = opponentScore - opponentViolation;
         
         final winnerName = allianceFinal > opponentFinal 
-            ? allianceName 
-            : (opponentFinal > allianceFinal ? opponentName : 'Draw');
+          ? allianceName 
+          : (opponentFinal > allianceFinal ? displayOpponentName : 'Draw');
         
         return Dialog(
           backgroundColor: Colors.transparent,
@@ -8671,9 +9194,9 @@ void _showChampionshipScoreDialog({
                             ),
                             const SizedBox(height: 8),
                             Text(
-                              opponentName.length > 25 
-                                  ? '${opponentName.substring(0, 25)}...' 
-                                  : opponentName,
+                              displayOpponentName.length > 25 
+                                  ? '${displayOpponentName.substring(0, 25)}...' 
+                                  : displayOpponentName,
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontWeight: FontWeight.bold,
@@ -8925,8 +9448,9 @@ void _showChampionshipScoreDialog({
                           );
                           
                           // Mark match as completed in schedule
+                          final scheduleTable = await _resolveScheduleTable(categoryId);
                           await DBHelper.executeDual("""
-                            UPDATE tbl_championship_schedule 
+                            UPDATE $scheduleTable 
                             SET status = 'completed'
                             WHERE category_id = :catId 
                               AND ((alliance1_id = :a1 AND alliance2_id = :a2) 
