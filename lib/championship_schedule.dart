@@ -1376,41 +1376,58 @@ Container(
     );
     
     if (confirm != true) return;
+  
+  setState(() => _isGenerating = true);
+  
+  try {
+    // Check if this is a Starter category
+    final conn = await DBHelper.getConnection();
+    final categoryResult = await conn.execute(
+      "SELECT category_type FROM tbl_category WHERE category_id = :catId LIMIT 1",
+      {"catId": widget.categoryId},
+    );
+    final categoryType = categoryResult.rows.isNotEmpty 
+        ? categoryResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
+        : '';
+    final bool isStarter = categoryType.contains('starter');
     
-    setState(() => _isGenerating = true);
-    
-    try {
-      await Future.delayed(const Duration(milliseconds: 100));
-      
+    if (isStarter) {
+      // Use round-robin scheduling for Starter
+      await DBHelper.generateRoundRobinChampionshipSchedule(
+        widget.categoryId,
+        _settings!,
+      );
+    } else {
+      // Use bracket scheduling for Explorer
       await DBHelper.generateChampionshipScheduleWithSettings(
         widget.categoryId,
         _settings!,
       );
-      
-      await _loadAllianceCount();
-      await _loadMatches();
-      
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('✅ Championship schedule generated for ${widget.categoryName}'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('❌ Error: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isGenerating = false);
     }
+    
+    await _loadMatches();
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Championship schedule generated for ${widget.categoryName}'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
+  } catch (e) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Error: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  } finally {
+    if (mounted) setState(() => _isGenerating = false);
   }
+}
 
   @override
   Widget build(BuildContext context) {
