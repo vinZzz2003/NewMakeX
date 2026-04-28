@@ -6,7 +6,7 @@ class Config {
     await dotenv.load(fileName: "assets/.env");
   }
   // Database Configuration
-  static String get dbHost => dotenv.env['DB_HOST'] ?? '127.0.0.1';
+  static String get dbHost => dotenv.env['DB_HOST'] ?? '192.168.1.13';
   static int get dbPort => int.tryParse(dotenv.env['DB_PORT'] ?? '3306') ?? 3306;
   static String get dbUser => dotenv.env['DB_USER'] ?? 'root';
   static String get dbPassword => dotenv.env['DB_PASSWORD'] ?? 'root';

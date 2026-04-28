@@ -7,7 +7,7 @@ import 'dart:convert';
 
 // API Service for Alliance operations
 class AllianceApiService {
-  static const String baseUrl = 'http://175.20.0.41/roboventure_api';
+  static const String baseUrl = 'http://192.168.1.13/roboventure_api';
   
   static Future<List<Map<String, dynamic>>> getQualifiedTeams(int categoryId) async {
     final url = Uri.parse('$baseUrl/admin_alliance_selection.php?action=get_qualified_teams&category_id=$categoryId');
