@@ -3925,6 +3925,167 @@ static Future<void> autoCompleteMatchIfBothScored({
   }
 }
 
+/// Check if a match should be marked as pending (when scores are missing)
+/// Call this after deleting scores
+static Future<void> checkAndRevertMatchStatusIfNeeded({
+  required int matchId,
+  required int roundId,
+}) async {
+  final conn = await getConnection();
+  
+  try {
+    print("🔍 Checking if match $matchId should be reverted from completed to pending");
+    
+    // Get category info first
+    final categoryResult = await conn.execute("""
+      SELECT t.category_id, t.team_id, c.category_type
+      FROM tbl_teamschedule ts
+      JOIN tbl_team t ON ts.team_id = t.team_id
+      JOIN tbl_category c ON t.category_id = c.category_id
+      WHERE ts.match_id = :matchId AND ts.round_id = :roundId
+      LIMIT 1
+    """, {
+      "matchId": matchId,
+      "roundId": roundId,
+    });
+    
+    if (categoryResult.rows.isEmpty) {
+      print("⚠️ Could not find match $matchId, round $roundId");
+      return;
+    }
+    
+    final categoryType = categoryResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? '';
+    final bool isStarter = categoryType.contains('starter');
+    final String teamScheduleTable = isStarter ? 'tbl_starter_teamschedule' : 'tbl_explorer_teamschedule';
+    final int requiredTeamCount = isStarter ? 2 : 4;
+    
+    // Get all teams in this match
+    final teamsResult = await conn.execute("""
+      SELECT team_id FROM $teamScheduleTable
+      WHERE match_id = :matchId AND round_id = :roundId
+    """, {
+      "matchId": matchId,
+      "roundId": roundId,
+    });
+    
+    final teamIds = teamsResult.rows.map((r) => 
+      int.parse(r.assoc()['team_id'].toString())
+    ).toList();
+    
+    if (teamIds.length < requiredTeamCount) {
+      print("⚠️ Match $matchId has ${teamIds.length} teams, need $requiredTeamCount");
+      return;
+    }
+    
+    // Check if ALL teams still have scores
+    bool allTeamsStillScored = true;
+    final List<int> teamsWithScores = [];
+    
+    for (final tid in teamIds) {
+      final scoreCheck = await conn.execute("""
+        SELECT COUNT(*) as cnt FROM tbl_score
+        WHERE match_id = :matchId AND round_id = :roundId AND team_id = :teamId
+      """, {
+        "matchId": matchId,
+        "roundId": roundId,
+        "teamId": tid,
+      });
+      
+      final count = int.parse(scoreCheck.rows.first.assoc()['cnt']?.toString() ?? '0');
+      if (count > 0) {
+        teamsWithScores.add(tid);
+      } else {
+        allTeamsStillScored = false;
+      }
+    }
+    
+    print("📊 Teams with scores: ${teamsWithScores.length}/$requiredTeamCount");
+    
+    // If NOT all teams have scores, revert status to pending
+    if (!allTeamsStillScored && teamsWithScores.length < requiredTeamCount) {
+      print("⚠️ Not all teams have scores - reverting match $matchId to pending");
+      
+      // Update the team schedule table
+      await executeDual("""
+        UPDATE $teamScheduleTable 
+        SET status = 'pending'
+        WHERE match_id = :matchId AND round_id = :roundId
+      """, {"matchId": matchId, "roundId": roundId});
+      
+      // Update the main match table
+      await executeDual("""
+        UPDATE tbl_match 
+        SET status = 'pending'
+        WHERE match_id = :matchId
+      """, {"matchId": matchId});
+      
+      // Update main teamschedule if it exists
+      try {
+        await executeDual("""
+          UPDATE tbl_teamschedule 
+          SET status = 'pending'
+          WHERE match_id = :matchId AND round_id = :roundId
+        """, {"matchId": matchId, "roundId": roundId});
+      } catch (e) {
+        // Table might not have status column
+      }
+      
+      print("✅ Match $matchId reverted to pending");
+      
+      // Get category ID to emit update
+      final catIdResult = await conn.execute("""
+        SELECT DISTINCT t.category_id
+        FROM tbl_teamschedule ts
+        JOIN tbl_team t ON ts.team_id = t.team_id
+        WHERE ts.match_id = :matchId
+        LIMIT 1
+      """, {"matchId": matchId});
+      
+      if (catIdResult.rows.isNotEmpty) {
+        final categoryId = int.parse(catIdResult.rows.first.assoc()['category_id'].toString());
+        try {
+          bracketUpdateController.add(categoryId);
+        } catch (_) {}
+      }
+    } else {
+      print("✅ All teams still have scores - match remains completed");
+    }
+    
+  } catch (e, stackTrace) {
+    print("❌ Error checking match status: $e");
+    print(stackTrace);
+  }
+}
+
+static Future<void> deleteScore({
+  required int teamId,
+  required int roundId,
+  required int matchId,
+}) async {
+  final conn = await getConnection();
+  
+  try {
+    print("🗑️ Deleting score for team $teamId, round $roundId, match $matchId");
+    
+    await executeDual("""
+      DELETE FROM tbl_score
+      WHERE team_id = :teamId AND round_id = :roundId
+    """, {"teamId": teamId, "roundId": roundId});
+    
+    print("✅ Score deleted");
+    
+    // Check if match should be reverted to pending
+    await checkAndRevertMatchStatusIfNeeded(
+      matchId: matchId,
+      roundId: roundId,
+    );
+    
+  } catch (e) {
+    print("❌ Error deleting score: $e");
+    rethrow;
+  }
+}
+
 static Future<void> propagateAllianceScoreForMatch({
   required int matchId,
   required int roundId,

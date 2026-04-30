@@ -252,6 +252,8 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
   List<Map<String, dynamic>> _categories = [];
   Map<int, List<Map<String, dynamic>>> _standingsByCategory = {};
 
+  List<Map<String, dynamic>> _alliances = [];  // <-- ADD THIS LINE
+
   // Store selected type per category
   final Map<int, StandingType> _selectedTypeByCategory = {};
 
@@ -320,6 +322,10 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
 
   Future<void> _loadMatchPairings(int categoryId) async {
   try {
+    setState(() {
+      _isLoadingAllianceByCategory[categoryId] = true;
+    });
+    
     final conn = await DBHelper.getConnection();
 
     // Try to prefer the double-elimination bracket table
@@ -349,6 +355,33 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
           doubleTable = candidate;
         } catch (_) {}
       }
+    }
+
+    // Check if the table exists and has data
+    bool hasData = false;
+    try {
+      final checkResult = await conn.execute(
+        "SELECT COUNT(*) as cnt FROM $doubleTable WHERE category_id = :catId",
+        {"catId": categoryId},
+      );
+      if (checkResult.rows.isNotEmpty) {
+        hasData = int.parse(checkResult.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
+      }
+    } catch (e) {
+      print("⚠️ Table $doubleTable may not exist: $e");
+      hasData = false;
+    }
+
+    if (!hasData) {
+      print("ℹ️ No bracket data found for category $categoryId");
+      if (mounted) {
+        setState(() {
+          _allianceMatchPairings[categoryId] = {};
+          _championshipPairingsByMatch[categoryId] = {};
+          _isLoadingAllianceByCategory[categoryId] = false;
+        });
+      }
+      return;
     }
 
     // Execute the query and store the result
@@ -388,7 +421,6 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
     // Track seen matches by (round, position, side) to deduplicate
     final Set<String> seenMatches = {};
 
-    // Use 'queryResult' instead of 'result'
     for (final row in queryResult.rows) {
       final data = row.assoc();
       final matchId = int.parse(data['match_id'].toString());
@@ -441,7 +473,7 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
         pairings[matchId] = pair;
         pairByMatch[matchId] = pair;
         
-        print("📊 Loaded match: Round $roundNumber, Pos $matchPosition, Side $bracketSide, A1: $alliance1Id, A2: $alliance2Id");
+        print("📊 Loaded match: Round $roundNumber, Pos $matchPosition, Side $bracketSide");
       }
     }
 
@@ -449,12 +481,21 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
       setState(() {
         _allianceMatchPairings[categoryId] = pairings;
         _championshipPairingsByMatch[categoryId] = pairByMatch;
+        _isLoadingAllianceByCategory[categoryId] = false;
       });
     }
 
-    print("✅ Loaded ${pairings.length} valid matches from double-elimination for category $categoryId (table: $doubleTable)");
+    print("✅ Loaded ${pairings.length} valid matches from double-elimination for category $categoryId");
+    
   } catch (e) {
     print("❌ Error loading match pairings: $e");
+    if (mounted) {
+      setState(() {
+        _allianceMatchPairings[categoryId] = {};
+        _championshipPairingsByMatch[categoryId] = {};
+        _isLoadingAllianceByCategory[categoryId] = false;
+      });
+    }
   }
 }
 
@@ -2528,6 +2569,7 @@ allRoundsData.sort((a, b) {
     return 'Alliance $allianceId';
   }
 
+
 Future<void> _loadChampionshipStandings(int categoryId) async {
   if (mounted) {
     setState(() {
@@ -2558,6 +2600,60 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
         : '';
     final bool isStarter = categoryType.contains('starter');
     final bool isExplorer = categoryType.contains('explorer');
+    
+    // ============================================================
+    // FIX: First check if alliances exist for this category
+    // ============================================================
+    final alliancesCheck = await conn.execute(
+      "SELECT COUNT(*) as cnt FROM tbl_alliance_selections WHERE category_id = :catId",
+      {"catId": categoryId},
+    );
+    final allianceCount = int.parse(alliancesCheck.rows.first.assoc()['cnt']?.toString() ?? '0');
+    
+    if (allianceCount == 0) {
+      print("ℹ️ No alliances found for category $categoryId");
+      if (mounted) {
+        setState(() {
+          _championshipStandingsByCategory[categoryId] = [];
+          _isLoadingAllianceByCategory[categoryId] = false;
+        });
+      }
+      return;
+    }
+    
+    // ============================================================
+    // FIX: For Explorer, check if bracket table has data before loading
+    // ============================================================
+    if (isExplorer) {
+      // Check if double elimination table has data for this category
+      try {
+        final bracketCheck = await conn.execute(
+          "SELECT COUNT(*) as cnt FROM tbl_double_elimination WHERE category_id = :catId",
+          {"catId": categoryId},
+        );
+        final hasBracketData = int.parse(bracketCheck.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
+        
+        if (!hasBracketData) {
+          print("ℹ️ No bracket data found for Explorer category $categoryId");
+          if (mounted) {
+            setState(() {
+              _championshipStandingsByCategory[categoryId] = [];
+              _isLoadingAllianceByCategory[categoryId] = false;
+            });
+          }
+          return;
+        }
+      } catch (e) {
+        print("⚠️ Could not check bracket table: $e");
+        if (mounted) {
+          setState(() {
+            _championshipStandingsByCategory[categoryId] = [];
+            _isLoadingAllianceByCategory[categoryId] = false;
+          });
+        }
+        return;
+      }
+    }
     
     if (isStarter) {
       // Use the per-category schedule table when available
@@ -2664,6 +2760,28 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
       // ============================================================
       print("📊 Loading Starter championship scores from tbl_starter_championship_scores");
       
+      // Check if table exists and has data
+      try {
+        final tableCheck = await conn.execute(
+          "SELECT COUNT(*) as cnt FROM tbl_starter_championship_scores WHERE category_id = :catId",
+          {"catId": categoryId},
+        );
+        final hasData = int.parse(tableCheck.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
+        
+        if (!hasData) {
+          print("ℹ️ No Starter championship scores found for category $categoryId");
+          if (mounted) {
+            setState(() {
+              _championshipStandingsByCategory[categoryId] = [];
+              _isLoadingAllianceByCategory[categoryId] = false;
+            });
+          }
+          return;
+        }
+      } catch (e) {
+        print("⚠️ Could not check starter championship scores table: $e");
+      }
+      
       final bestOf3Result = await conn.execute("""
         SELECT 
           alliance_id,
@@ -2704,6 +2822,28 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
       // EXPLORER CATEGORY - Read from tbl_championship_bestof3
       // ============================================================
       print("📊 Loading Explorer championship scores from tbl_championship_bestof3");
+      
+      // Check if table exists and has data
+      try {
+        final tableCheck = await conn.execute(
+          "SELECT COUNT(*) as cnt FROM tbl_championship_bestof3 WHERE category_id = :catId",
+          {"catId": categoryId},
+        );
+        final hasData = int.parse(tableCheck.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
+        
+        if (!hasData) {
+          print("ℹ️ No Explorer championship scores found for category $categoryId");
+          if (mounted) {
+            setState(() {
+              _championshipStandingsByCategory[categoryId] = [];
+              _isLoadingAllianceByCategory[categoryId] = false;
+            });
+          }
+          return;
+        }
+      } catch (e) {
+        print("⚠️ Could not check championship bestof3 table: $e");
+      }
       
       // Get wins per alliance from Best-of-3 results
       final winsQuery = await conn.execute("""
@@ -2872,6 +3012,7 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
     }
   }
 }
+
   // Build Best-of-3 match cell - shows win/loss counts
   Widget _buildBestOf3MatchCell({
     required int categoryId,
@@ -3437,348 +3578,716 @@ final int seriesWinsB = seriesWins['winsB'] ?? 0;
   }
 
   // Build championship table with Best-of-3 for Explorer categories
-  Widget _buildChampionshipTable(int categoryId) {
-    bool isLoading = _isLoadingAllianceByCategory[categoryId] ?? false;
-    List<ChampionshipAllianceStanding> standings =
-        _championshipStandingsByCategory[categoryId] ?? [];
-    Map<int, List<BestOf3MatchResult>> results =
-        _bestOf3Results[categoryId] ?? {};
-    Map<int, int> wins = _allianceWins[categoryId] ?? {};
-    Map<int, AllianceMatchPair> pairings =
-        _allianceMatchPairings[categoryId] ?? {};
+Widget _buildChampionshipTable(int categoryId) {
+  bool isLoading = _isLoadingAllianceByCategory[categoryId] ?? false;
+  List<ChampionshipAllianceStanding> standings =
+      _championshipStandingsByCategory[categoryId] ?? [];
+  Map<int, List<BestOf3MatchResult>> results =
+      _bestOf3Results[categoryId] ?? {};
+  Map<int, int> wins = _allianceWins[categoryId] ?? {};
+  Map<int, AllianceMatchPair> pairings =
+      _allianceMatchPairings[categoryId] ?? {};
 
-    if (pairings.isEmpty) {
-      _loadMatchPairings(categoryId);
-      return const Expanded(
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              CircularProgressIndicator(color: Color(0xFFFFD700)),
-              SizedBox(height: 12),
-              Text(
-                'Loading championship schedule...',
-                style: TextStyle(color: Colors.white54),
+  // ============================================================
+  // FIX: Check if we have alliances first
+  // ============================================================
+  final bool hasAlliances = _alliances.isNotEmpty;
+  
+  // If no alliances exist yet, show appropriate message
+  if (!hasAlliances && !isLoading) {
+    return Expanded(
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.group_off,
+              size: 64,
+              color: Colors.white.withOpacity(0.2),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'No Alliances Formed Yet',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
               ),
-            ],
-          ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Complete alliance selection first in the Schedule tab',
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.5),
+                fontSize: 14,
+              ),
+            ),
+          ],
         ),
-      );
-    }
-
-    if (isLoading) {
-      return const Expanded(
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              CircularProgressIndicator(color: Color(0xFFFFD700)),
-              SizedBox(height: 16),
-              Text(
-                'Loading championship standings...',
-                style: TextStyle(color: Colors.white54, fontSize: 14),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    // Debug: print per-alliance cumulative match counts
-    if (_debugCumulative) {
-      for (final standing in standings) {
-        final aId = standing.allianceId;
-        final opp = _findPairingForAlliance(categoryId, aId);
-        final pos = opp?.matchPosition ?? 1;
-        final m1 = _countWinsForMatchNumberAcrossRounds(
-          categoryId,
-          aId,
-          opp?.alliance1Id == aId
-              ? (opp?.alliance2Id ?? 0)
-              : (opp?.alliance1Id ?? 0),
-          pos,
-          1,
-        );
-        final m2 = _countWinsForMatchNumberAcrossRounds(
-          categoryId,
-          aId,
-          opp?.alliance1Id == aId
-              ? (opp?.alliance2Id ?? 0)
-              : (opp?.alliance1Id ?? 0),
-          pos,
-          2,
-        );
-        final m3 = _countWinsForMatchNumberAcrossRounds(
-          categoryId,
-          aId,
-          opp?.alliance1Id == aId
-              ? (opp?.alliance2Id ?? 0)
-              : (opp?.alliance1Id ?? 0),
-          pos,
-          3,
-        );
-        print(
-          'DEBUG cumulative for alliance $aId -> M1:${m1['winsA']}-${m1['winsB']}, M2:${m2['winsA']}-${m2['winsB']}, M3:${m3['winsA']}-${m3['winsB']}',
-        );
-      }
-    }
-
-    if (standings.isEmpty) {
-      return Expanded(
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.emoji_events,
-                size: 64,
-                color: Colors.white.withOpacity(0.2),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'No Championship Data Yet',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Generate championship schedule first',
-                style: TextStyle(
-                  color: Colors.white.withOpacity(0.5),
-                  fontSize: 14,
-                ),
-              ),
-              const SizedBox(height: 16),
-              ElevatedButton.icon(
-                onPressed: () {
-                  _loadMatchPairings(categoryId);
-                  _loadBestOf3Results(categoryId);
-                },
-                icon: const Icon(Icons.refresh, size: 16),
-                label: const Text('Load Match Data'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFFFFD700),
-                  foregroundColor: Colors.black,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    // Deduplicate pairings by using a Set with a unique key
-    final Set<String> processedSeries = {};
-    final List<AllianceMatchPair> uniquePairings = [];
-
-    for (final pair in pairings.values) {
-      final key =
-          '${pair.roundNumber}_${pair.matchPosition}_${pair.bracketSide}';
-      if (!processedSeries.contains(key)) {
-        processedSeries.add(key);
-        uniquePairings.add(pair);
-      }
-    }
-
-    print(
-      "📊 Unique pairings: ${uniquePairings.length} (should be 15 for 8-team bracket)",
+      ),
     );
+  }
 
-// CORRECTED BRACKET LOGIC - Proper categorization for double-elimination
-final Map<int, int> allianceLosses = Map<int, int>.from(_allianceLossesByCategory[categoryId] ?? {});
+  // ============================================================
+  // FIX: Only load pairings if we have alliances and pairings are empty
+  // ============================================================
+  if (pairings.isEmpty && hasAlliances && !isLoading) {
+    // Trigger loading pairings
+    _loadMatchPairings(categoryId);
+    return const Expanded(
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(color: Color(0xFFFFD700)),
+            SizedBox(height: 12),
+            Text(
+              'Loading championship schedule...',
+              style: TextStyle(color: Colors.white54),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
-// If we don't have precomputed losses yet, fall back to deriving from Best-of-3 results
-if (allianceLosses.isEmpty) {
+  // ============================================================
+  // FIX: Show proper message when no championship data exists
+  // ============================================================
+  if (standings.isEmpty && pairings.isEmpty && !isLoading) {
+    return Expanded(
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.emoji_events,
+              size: 64,
+              color: Colors.white.withOpacity(0.2),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'No Championship Data Yet',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Generate championship schedule first in the Schedule tab',
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.5),
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: () {
+                _loadMatchPairings(categoryId);
+                _loadBestOf3Results(categoryId);
+                _loadChampionshipStandings(categoryId);
+              },
+              icon: const Icon(Icons.refresh, size: 16),
+              label: const Text('Load Match Data'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFFFD700),
+                foregroundColor: Colors.black,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  if (isLoading) {
+    return const Expanded(
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(color: Color(0xFFFFD700)),
+            SizedBox(height: 16),
+            Text(
+              'Loading championship standings...',
+              style: TextStyle(color: Colors.white54, fontSize: 14),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  if (standings.isEmpty) {
+    return Expanded(
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.emoji_events,
+              size: 64,
+              color: Colors.white.withOpacity(0.2),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'No Championship Data Yet',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Generate championship schedule first in the Schedule tab',
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.5),
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: () {
+                _loadMatchPairings(categoryId);
+                _loadBestOf3Results(categoryId);
+              },
+              icon: const Icon(Icons.refresh, size: 16),
+              label: const Text('Load Match Data'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFFFD700),
+                foregroundColor: Colors.black,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Debug: print per-alliance cumulative match counts
+  if (_debugCumulative) {
+    for (final standing in standings) {
+      final aId = standing.allianceId;
+      final opp = _findPairingForAlliance(categoryId, aId);
+      final pos = opp?.matchPosition ?? 1;
+      final m1 = _countWinsForMatchNumberAcrossRounds(
+        categoryId,
+        aId,
+        opp?.alliance1Id == aId
+            ? (opp?.alliance2Id ?? 0)
+            : (opp?.alliance1Id ?? 0),
+        pos,
+        1,
+      );
+      final m2 = _countWinsForMatchNumberAcrossRounds(
+        categoryId,
+        aId,
+        opp?.alliance1Id == aId
+            ? (opp?.alliance2Id ?? 0)
+            : (opp?.alliance1Id ?? 0),
+        pos,
+        2,
+      );
+      final m3 = _countWinsForMatchNumberAcrossRounds(
+        categoryId,
+        aId,
+        opp?.alliance1Id == aId
+            ? (opp?.alliance2Id ?? 0)
+            : (opp?.alliance1Id ?? 0),
+        pos,
+        3,
+      );
+      print(
+        'DEBUG cumulative for alliance $aId -> M1:${m1['winsA']}-${m1['winsB']}, M2:${m2['winsA']}-${m2['winsB']}, M3:${m3['winsA']}-${m3['winsB']}',
+      );
+    }
+  }
+
+  // Deduplicate pairings by using a Set with a unique key
+  final Set<String> processedSeries = {};
+  final List<AllianceMatchPair> uniquePairings = [];
+
+  for (final pair in pairings.values) {
+    final key = '${pair.roundNumber}_${pair.matchPosition}_${pair.bracketSide}';
+    if (!processedSeries.contains(key)) {
+      processedSeries.add(key);
+      uniquePairings.add(pair);
+    }
+  }
+
+  print(
+    "📊 Unique pairings: ${uniquePairings.length} (should be for bracket)",
+  );
+
+  // CORRECTED BRACKET LOGIC - Proper categorization for double-elimination
+  final Map<int, int> allianceLosses = Map<int, int>.from(_allianceLossesByCategory[categoryId] ?? {});
+
+  // If we don't have precomputed losses yet, fall back to deriving from Best-of-3 results
+  if (allianceLosses.isEmpty) {
+    for (final standing in standings) {
+      allianceLosses[standing.allianceId] = _getAllianceLossCount(categoryId, standing.allianceId);
+    }
+  }
+
+  // Create a map of allianceId -> standing for quick lookup
+  final Map<int, ChampionshipAllianceStanding> allianceIdToStanding = {
+    for (final s in standings) s.allianceId: s
+  };
+
+  // STEP 1: Get Grand Finals series results FIRST
+  final grandFinalsResults = _getGrandFinalsSeriesResults(categoryId);
+  final bool needReset = grandFinalsResults['needReset'] ?? false;
+  final bool resetComplete = grandFinalsResults['resetComplete'] ?? false;
+  final bool seriesComplete = grandFinalsResults['seriesComplete'] ?? false;
+  final int winsA = grandFinalsResults['winsA'] ?? 0;
+  final int winsB = grandFinalsResults['winsB'] ?? 0;
+
+  // STEP 2: Determine the champion BEFORE categorizing
+  int? championId;
+  if (resetComplete) {
+    // Reset series completed - winner of GF2 is champion
+    championId = grandFinalsResults['gf2WinsA'] >= 2 
+        ? grandFinalsResults['winnerBracketId'] 
+        : grandFinalsResults['loserBracketId'];
+  } else if (seriesComplete && !needReset) {
+    // First series completed with Winner's bracket champion winning
+    championId = grandFinalsResults['winnerBracketId'];
+  }
+
+  // STEP 3: Create lists for categorization
+  final List<ChampionshipAllianceStanding> winnersStandings = [];
+  final List<ChampionshipAllianceStanding> losersStandings = [];
+  final List<ChampionshipAllianceStanding> eliminatedStandings = [];
+  final List<ChampionshipAllianceStanding> grandFinalStandings = [];
+  final List<ChampionshipAllianceStanding> championStandings = [];
+
+  // STEP 4: Categorize by loss count AND championship status
   for (final standing in standings) {
-    allianceLosses[standing.allianceId] = _getAllianceLossCount(categoryId, standing.allianceId);
+    final int allianceId = standing.allianceId;
+    final int losses = allianceLosses[allianceId] ?? 0;
+    
+    // Check if this alliance is the champion
+    if (championId != null && allianceId == championId) {
+      championStandings.add(standing);
+      continue;
+    }
+    
+    // For alliances that are not the champion
+    if (losses == 0) {
+      winnersStandings.add(standing);
+    } else if (losses == 1) {
+      losersStandings.add(standing);
+    } else {
+      eliminatedStandings.add(standing);
+    }
   }
-}
 
-// Create a map of allianceId -> standing for quick lookup
-final Map<int, ChampionshipAllianceStanding> allianceIdToStanding = {
-  for (final s in standings) s.allianceId: s
-};
+  // Sort by totalScore (points) within each bracket - highest first
+  winnersStandings.sort((a, b) {
+    if (a.totalScore != b.totalScore) {
+      return b.totalScore.compareTo(a.totalScore);
+    }
+    return a.allianceRank.compareTo(b.allianceRank);
+  });
+  losersStandings.sort((a, b) {
+    if (a.totalScore != b.totalScore) {
+      return b.totalScore.compareTo(a.totalScore);
+    }
+    return a.allianceRank.compareTo(b.allianceRank);
+  });
+  eliminatedStandings.sort((a, b) {
+    if (a.totalScore != b.totalScore) {
+      return b.totalScore.compareTo(a.totalScore);
+    }
+    return a.allianceRank.compareTo(b.allianceRank);
+  });
 
-// STEP 1: Get Grand Finals series results FIRST
-final grandFinalsResults = _getGrandFinalsSeriesResults(categoryId);
-final bool needReset = grandFinalsResults['needReset'] ?? false;
-final bool resetComplete = grandFinalsResults['resetComplete'] ?? false;
-final bool seriesComplete = grandFinalsResults['seriesComplete'] ?? false;
-final int winsA = grandFinalsResults['winsA'] ?? 0;
-final int winsB = grandFinalsResults['winsB'] ?? 0;
+  // Check if Winner's Bracket final is complete (only 1 undefeated alliance left)
+  final bool winnersFinalComplete = winnersStandings.length == 1;
 
-// STEP 2: Determine the champion BEFORE categorizing
-int? championId;
-if (resetComplete) {
-  // Reset series completed - winner of GF2 is champion
-  championId = grandFinalsResults['gf2WinsA'] >= 2 
-      ? grandFinalsResults['winnerBracketId'] 
-      : grandFinalsResults['loserBracketId'];
-} else if (seriesComplete && !needReset) {
-  // First series completed with Winner's bracket champion winning
-  championId = grandFinalsResults['winnerBracketId'];
-}
+  // Check if Loser's Bracket final is complete (only 1 alliance with 1 loss left)
+  final bool losersFinalComplete = losersStandings.length == 1;
 
-// STEP 3: Create lists for categorization (ONLY DECLARE ONCE)
-final List<ChampionshipAllianceStanding> winnersStandings = [];
-final List<ChampionshipAllianceStanding> losersStandings = [];
-final List<ChampionshipAllianceStanding> eliminatedStandings = [];
-final List<ChampionshipAllianceStanding> grandFinalStandings = [];
-final List<ChampionshipAllianceStanding> championStandings = [];
-
-// STEP 4: Categorize by loss count AND championship status
-for (final standing in standings) {
-  final int allianceId = standing.allianceId;
-  final int losses = allianceLosses[allianceId] ?? 0;
-  
-  // Check if this alliance is the champion
-  if (championId != null && allianceId == championId) {
-    championStandings.add(standing);
-    continue;
+  // STEP 5: Apply bracket logic
+  // Case: Need bracket reset (Loser's bracket champion won first series)
+  if (needReset && !resetComplete) {
+    // Move both finalists to Grand Finals for the reset series
+    if (winnersStandings.isNotEmpty && losersStandings.isNotEmpty) {
+      grandFinalStandings.addAll(winnersStandings);
+      grandFinalStandings.addAll(losersStandings);
+      winnersStandings.clear();
+      losersStandings.clear();
+    } else {
+      // If winnersStandings/losersStandings are empty, find the finalists from standings
+      final List<ChampionshipAllianceStanding> finalists = [];
+      for (final standing in standings) {
+        final int losses = allianceLosses[standing.allianceId] ?? 0;
+        if (losses <= 1 && !finalists.contains(standing)) {
+          finalists.add(standing);
+        }
+      }
+      if (finalists.length >= 2) {
+        grandFinalStandings.addAll(finalists.take(2));
+        losersStandings.removeWhere((s) => finalists.contains(s));
+        winnersStandings.removeWhere((s) => finalists.contains(s));
+      }
+    }
   }
-  
-  // For alliances that are not the champion
-  if (losses == 0) {
-    winnersStandings.add(standing);
-  } else if (losses == 1) {
-    losersStandings.add(standing);
-  } else {
-    eliminatedStandings.add(standing);
+  // Case 2: Reset is complete - tournament over, champion crowned
+  else if (resetComplete) {
+    // Champion is already in championStandings
+    // Move everyone else to eliminated
+    eliminatedStandings.addAll(winnersStandings);
+    eliminatedStandings.addAll(losersStandings);
+    eliminatedStandings.addAll(grandFinalStandings);
+    winnersStandings.clear();
+    losersStandings.clear();
+    grandFinalStandings.clear();
   }
-}
-
-// Sort by totalScore (points) within each bracket - highest first
-winnersStandings.sort((a, b) {
-  if (a.totalScore != b.totalScore) {
-    return b.totalScore.compareTo(a.totalScore);
+  // Case 3: First series is complete (Winner's bracket champion won)
+  else if (seriesComplete && !needReset) {
+    // Winner's bracket champion is champion
+    // Move everyone else to eliminated
+    eliminatedStandings.addAll(winnersStandings);
+    eliminatedStandings.addAll(losersStandings);
+    eliminatedStandings.addAll(grandFinalStandings);
+    winnersStandings.clear();
+    losersStandings.clear();
+    grandFinalStandings.clear();
   }
-  return a.allianceRank.compareTo(b.allianceRank);
-});
-losersStandings.sort((a, b) {
-  if (a.totalScore != b.totalScore) {
-    return b.totalScore.compareTo(a.totalScore);
-  }
-  return a.allianceRank.compareTo(b.allianceRank);
-});
-eliminatedStandings.sort((a, b) {
-  if (a.totalScore != b.totalScore) {
-    return b.totalScore.compareTo(a.totalScore);
-  }
-  return a.allianceRank.compareTo(b.allianceRank);
-});
-
-// Check if Winner's Bracket final is complete (only 1 undefeated alliance left)
-final bool winnersFinalComplete = winnersStandings.length == 1;
-
-// Check if Loser's Bracket final is complete (only 1 alliance with 1 loss left)
-final bool losersFinalComplete = losersStandings.length == 1;
-
-// STEP 5: Apply bracket logic
-// Case: Need bracket reset (Loser's bracket champion won first series)
-if (needReset && !resetComplete) {
-  // Move both finalists to Grand Finals for the reset series
-  if (winnersStandings.isNotEmpty && losersStandings.isNotEmpty) {
+  // Case 4: Both brackets have champions - start Grand Finals
+  else if (winnersFinalComplete && losersFinalComplete) {
     grandFinalStandings.addAll(winnersStandings);
     grandFinalStandings.addAll(losersStandings);
     winnersStandings.clear();
     losersStandings.clear();
-  } else {
-    // If winnersStandings/losersStandings are empty, find the finalists from standings
-    final List<ChampionshipAllianceStanding> finalists = [];
-    for (final standing in standings) {
-      final int losses = allianceLosses[standing.allianceId] ?? 0;
-      if (losses <= 1 && !finalists.contains(standing)) {
-        finalists.add(standing);
-      }
-    }
-    if (finalists.length >= 2) {
-      grandFinalStandings.addAll(finalists.take(2));
-      losersStandings.removeWhere((s) => finalists.contains(s));
-      winnersStandings.removeWhere((s) => finalists.contains(s));
-    }
   }
-}
-// Case 2: Reset is complete - tournament over, champion crowned
-else if (resetComplete) {
-  // Champion is already in championStandings
-  // Move everyone else to eliminated
-  eliminatedStandings.addAll(winnersStandings);
-  eliminatedStandings.addAll(losersStandings);
-  eliminatedStandings.addAll(grandFinalStandings);
-  winnersStandings.clear();
-  losersStandings.clear();
-  grandFinalStandings.clear();
-}
-// Case 3: First series is complete (Winner's bracket champion won)
-else if (seriesComplete && !needReset) {
-  // Winner's bracket champion is champion
-  // Move everyone else to eliminated
-  eliminatedStandings.addAll(winnersStandings);
-  eliminatedStandings.addAll(losersStandings);
-  eliminatedStandings.addAll(grandFinalStandings);
-  winnersStandings.clear();
-  losersStandings.clear();
-  grandFinalStandings.clear();
-}
-// Case 4: Both brackets have champions - start Grand Finals
-else if (winnersFinalComplete && losersFinalComplete) {
-  grandFinalStandings.addAll(winnersStandings);
-  grandFinalStandings.addAll(losersStandings);
-  winnersStandings.clear();
-  losersStandings.clear();
-}
 
-// Debug output - show alliance IDs and ranks
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-print("🏆 FINAL BRACKET STANDINGS (CORRECTED):");
-print("Winner's Bracket Active (${winnersStandings.length}): ${winnersStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
-print("Loser's Bracket Active (${losersStandings.length}): ${losersStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
-print("Grand Finals (${grandFinalStandings.length}): ${grandFinalStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
-print("Eliminated (${eliminatedStandings.length}): ${eliminatedStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
-print("Champion (${championStandings.length}): ${championStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  // Debug output - show alliance IDs and ranks
+  print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  print("🏆 FINAL BRACKET STANDINGS (CORRECTED):");
+  print("Winner's Bracket Active (${winnersStandings.length}): ${winnersStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
+  print("Loser's Bracket Active (${losersStandings.length}): ${losersStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
+  print("Grand Finals (${grandFinalStandings.length}): ${grandFinalStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
+  print("Eliminated (${eliminatedStandings.length}): ${eliminatedStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
+  print("Champion (${championStandings.length}): ${championStandings.map((s) => '#${s.allianceRank} (ID:${s.allianceId})').join(', ')}");
+  print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
+  return Expanded(
+    child: SingleChildScrollView(
+      scrollDirection: Axis.vertical,
+      child: Column(
+        key: ValueKey('championship_${DateTime.now().millisecondsSinceEpoch}_${standings.length}'),
+        children: [
+          // Main header
+          Container(
+            color: const Color(0xFF5C2ECC),
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+            child: Row(
+              children: [
+                _headerCell('RANK', flex: 1),
+                _headerCell('ALLIANCE', flex: 1),
+                _headerCell('TEAMS', flex: 4),
+                _headerCell('MATCH 1', flex: 2, center: true),
+                _headerCell('MATCH 2', flex: 2, center: true),
+                _headerCell('MATCH 3', flex: 2, center: true),
+                _headerCell('MAX SCORE', flex: 2, center: true),
+              ],
+            ),
+          ),
 
-    return Expanded(
-  child: SingleChildScrollView(
-    scrollDirection: Axis.vertical,
-    child: Column(
-      key: ValueKey('championship_${DateTime.now().millisecondsSinceEpoch}_${standings.length}'),
-      children: [
-            // Main header
+          // Champion Section Header
+          if (championStandings.isNotEmpty)
             Container(
-              color: const Color(0xFF5C2ECC),
-              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    const Color(0xFF00E5A0).withOpacity(0.3),
+                    const Color(0xFF00E5A0).withOpacity(0.1),
+                  ],
+                ),
+                border: const Border(
+                  bottom: BorderSide(color: Color(0xFF00E5A0), width: 1),
+                  top: BorderSide(color: Color(0xFF00E5A0), width: 1),
+                ),
+              ),
               child: Row(
                 children: [
-                  _headerCell('RANK', flex: 1),
-                  _headerCell('ALLIANCE', flex: 1),
-                  _headerCell('TEAMS', flex: 4),
-                  _headerCell('MATCH 1', flex: 2, center: true),
-                  _headerCell('MATCH 2', flex: 2, center: true),
-                  _headerCell('MATCH 3', flex: 2, center: true),
-                  _headerCell('MAX SCORE', flex: 2, center: true),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF00E5A0).withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.emoji_events,
+                          color: Color(0xFF00E5A0),
+                          size: 16,
+                        ),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'CHAMPION',
+                          style: TextStyle(
+                            color: Color(0xFF00E5A0),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                            letterSpacing: 1.5,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '${championStandings.length} ALLIANCE',
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
 
-            // Champion Section Header
-            if (championStandings.isNotEmpty)
-              Container(
+          // Champion Rows
+          ...championStandings.asMap().entries.map((entry) {
+            final index = entry.key;
+            final standing = entry.value;
+            return _buildChampionRow(
+              standing: standing,
+              categoryId: categoryId,
+              results: results,
+              wins: wins,
+              pairings: pairings,
+              index: index,
+            );
+          }),
+
+          // Winners Bracket Section Header
+          if (winnersStandings.isNotEmpty)
+            Container(
+              padding: const EdgeInsets.symmetric(
+                vertical: 8,
+                horizontal: 16,
+              ),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    const Color(0xFF00CFFF).withOpacity(0.3),
+                    const Color(0xFF00CFFF).withOpacity(0.1),
+                  ],
+                ),
+                border: const Border(
+                  bottom: BorderSide(color: Color(0xFF00CFFF), width: 1),
+                  top: BorderSide(color: Color(0xFF00CFFF), width: 1),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF00CFFF).withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.emoji_events,
+                          color: Color(0xFF00CFFF),
+                          size: 16,
+                        ),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'WINNER\'S BRACKET',
+                          style: TextStyle(
+                            color: Color(0xFF00CFFF),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                            letterSpacing: 1.5,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '${winnersStandings.length} ALLIANCES',
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+          // Winners Bracket Rows
+          ...winnersStandings.asMap().entries.map((entry) {
+            final index = entry.key;
+            final standing = entry.value;
+            return _buildChampionshipRow(
+              standing: standing,
+              categoryId: categoryId,
+              results: results,
+              wins: wins,
+              pairings: pairings,
+              index: index,
+            );
+          }),
+
+          // Divider between brackets
+          if (winnersStandings.isNotEmpty && losersStandings.isNotEmpty)
+            Container(
+              height: 2,
+              margin: const EdgeInsets.symmetric(vertical: 8),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    Colors.transparent,
+                    Colors.white.withOpacity(0.2),
+                    Colors.transparent,
+                  ],
+                ),
+              ),
+            ),
+
+          // Losers Bracket Section Header
+          if (losersStandings.isNotEmpty)
+            Container(
+              padding: const EdgeInsets.symmetric(
+                vertical: 8,
+                horizontal: 16,
+              ),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    const Color(0xFFFF6B6B).withOpacity(0.3),
+                    const Color(0xFFFF6B6B).withOpacity(0.1),
+                  ],
+                ),
+                border: const Border(
+                  bottom: BorderSide(color: Color(0xFFFF6B6B), width: 1),
+                  top: BorderSide(color: Color(0xFFFF6B6B), width: 1),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFF6B6B).withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.arrow_downward,
+                          color: Color(0xFFFF6B6B),
+                          size: 16,
+                        ),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'LOSER\'S BRACKET',
+                          style: TextStyle(
+                            color: Color(0xFFFF6B6B),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                            letterSpacing: 1.5,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '${losersStandings.length} ALLIANCES',
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+          // Losers Bracket Rows
+          ...losersStandings.asMap().entries.map((entry) {
+            final index = entry.key;
+            final standing = entry.value;
+            return _buildChampionshipRow(
+              standing: standing,
+              categoryId: categoryId,
+              results: results,
+              wins: wins,
+              pairings: pairings,
+              index: index,
+            );
+          }),
+          
+          // Grand Finals Section Header
+          if (grandFinalStandings.isNotEmpty) ...[
+            () {
+              final grandResults = _getGrandFinalsSeriesResults(categoryId);
+              final bool needReset = grandResults['needReset'] ?? false;
+              
+              return Container(
                 padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
                     colors: [
-                      const Color(0xFF00E5A0).withOpacity(0.3),
-                      const Color(0xFF00E5A0).withOpacity(0.1),
+                      const Color(0xFFFFD700).withOpacity(0.3),
+                      const Color(0xFFFFD700).withOpacity(0.1),
                     ],
                   ),
                   border: const Border(
-                    bottom: BorderSide(color: Color(0xFF00E5A0), width: 1),
-                    top: BorderSide(color: Color(0xFF00E5A0), width: 1),
+                    bottom: BorderSide(color: Color(0xFFFFD700), width: 1),
+                    top: BorderSide(color: Color(0xFFFFD700), width: 1),
                   ),
                 ),
                 child: Row(
@@ -3786,22 +4295,22 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF00E5A0).withOpacity(0.2),
+                        color: const Color(0xFFFFD700).withOpacity(0.2),
                         borderRadius: BorderRadius.circular(20),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(
-                            Icons.emoji_events,
-                            color: Color(0xFF00E5A0),
+                          Icon(
+                            needReset ? Icons.refresh_rounded : Icons.emoji_events,
+                            color: needReset ? Colors.orange : const Color(0xFFFFD700),
                             size: 16,
                           ),
                           const SizedBox(width: 8),
-                          const Text(
-                            'CHAMPION',
+                          Text(
+                            needReset ? 'GRAND FINALS - RESET' : 'GRAND FINALS',
                             style: TextStyle(
-                              color: Color(0xFF00E5A0),
+                              color: needReset ? Colors.orange : const Color(0xFFFFD700),
                               fontWeight: FontWeight.bold,
                               fontSize: 14,
                               letterSpacing: 1.5,
@@ -3815,7 +4324,7 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Text(
-                              '${championStandings.length} ALLIANCE',
+                              '${grandFinalStandings.length} ALLIANCES',
                               style: const TextStyle(
                                 color: Colors.white70,
                                 fontSize: 10,
@@ -3823,413 +4332,138 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━�
                               ),
                             ),
                           ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-            // Champion Rows
-            ...championStandings.asMap().entries.map((entry) {
-              final index = entry.key;
-              final standing = entry.value;
-              return _buildChampionRow(
-                standing: standing,
-                categoryId: categoryId,
-                results: results,
-                wins: wins,
-                pairings: pairings,
-                index: index,
-              );
-            }),
-
-            // Winners Bracket Section Header
-            if (winnersStandings.isNotEmpty)
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 8,
-                  horizontal: 16,
-                ),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      const Color(0xFF00CFFF).withOpacity(0.3),
-                      const Color(0xFF00CFFF).withOpacity(0.1),
-                    ],
-                  ),
-                  border: const Border(
-                    bottom: BorderSide(color: Color(0xFF00CFFF), width: 1),
-                    top: BorderSide(color: Color(0xFF00CFFF), width: 1),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF00CFFF).withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(
-                            Icons.emoji_events,
-                            color: Color(0xFF00CFFF),
-                            size: 16,
-                          ),
-                          const SizedBox(width: 8),
-                          const Text(
-                            'WINNER\'S BRACKET',
-                            style: TextStyle(
-                              color: Color(0xFF00CFFF),
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14,
-                              letterSpacing: 1.5,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.2),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              '${winnersStandings.length} ALLIANCES',
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 10,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-            // Winners Bracket Rows
-            ...winnersStandings.asMap().entries.map((entry) {
-              final index = entry.key;
-              final standing = entry.value;
-              return _buildChampionshipRow(
-                standing: standing,
-                categoryId: categoryId,
-                results: results,
-                wins: wins,
-                pairings: pairings,
-                index: index,
-              );
-            }),
-
-            // Divider between brackets
-            if (winnersStandings.isNotEmpty && losersStandings.isNotEmpty)
-              Container(
-                height: 2,
-                margin: const EdgeInsets.symmetric(vertical: 8),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      Colors.transparent,
-                      Colors.white.withOpacity(0.2),
-                      Colors.transparent,
-                    ],
-                  ),
-                ),
-              ),
-
-            // Losers Bracket Section Header
-            if (losersStandings.isNotEmpty)
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 8,
-                  horizontal: 16,
-                ),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      const Color(0xFFFF6B6B).withOpacity(0.3),
-                      const Color(0xFFFF6B6B).withOpacity(0.1),
-                    ],
-                  ),
-                  border: const Border(
-                    bottom: BorderSide(color: Color(0xFFFF6B6B), width: 1),
-                    top: BorderSide(color: Color(0xFFFF6B6B), width: 1),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFF6B6B).withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(
-                            Icons.arrow_downward,
-                            color: Color(0xFFFF6B6B),
-                            size: 16,
-                          ),
-                          const SizedBox(width: 8),
-                          const Text(
-                            'LOSER\'S BRACKET',
-                            style: TextStyle(
-                              color: Color(0xFFFF6B6B),
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14,
-                              letterSpacing: 1.5,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.2),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              '${losersStandings.length} ALLIANCES',
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 10,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-            // Losers Bracket Rows
-            ...losersStandings.asMap().entries.map((entry) {
-              final index = entry.key;
-              final standing = entry.value;
-              return _buildChampionshipRow(
-                standing: standing,
-                categoryId: categoryId,
-                results: results,
-                wins: wins,
-                pairings: pairings,
-                index: index,
-              );
-            }),
-            // Grand Finals Section Header
-                        // Grand Finals Section Header
-            if (grandFinalStandings.isNotEmpty) ...[
-              // Get Grand Finals reset status BEFORE building the widget
-              () {
-                final grandResults = _getGrandFinalsSeriesResults(categoryId);
-                final bool needReset = grandResults['needReset'] ?? false;
-                
-                return Container(
-                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      colors: [
-                        const Color(0xFFFFD700).withOpacity(0.3),
-                        const Color(0xFFFFD700).withOpacity(0.1),
-                      ],
-                    ),
-                    border: const Border(
-                      bottom: BorderSide(color: Color(0xFFFFD700), width: 1),
-                      top: BorderSide(color: Color(0xFFFFD700), width: 1),
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFFFD700).withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              needReset ? Icons.refresh_rounded : Icons.emoji_events,
-                              color: needReset ? Colors.orange : const Color(0xFFFFD700),
-                              size: 16,
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              needReset ? 'GRAND FINALS - RESET' : 'GRAND FINALS',
-                              style: TextStyle(
-                                color: needReset ? Colors.orange : const Color(0xFFFFD700),
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
-                                letterSpacing: 1.5,
-                              ),
-                            ),
+                          if (needReset) ...[
                             const SizedBox(width: 8),
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                               decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.2),
+                                color: Colors.orange.withOpacity(0.2),
                                 borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.orange.withOpacity(0.5)),
                               ),
-                              child: Text(
-                                '${grandFinalStandings.length} ALLIANCES',
-                                style: const TextStyle(
-                                  color: Colors.white70,
-                                  fontSize: 10,
+                              child: const Text(
+                                'SERIES 2 OF 2',
+                                style: TextStyle(
+                                  color: Colors.orange,
+                                  fontSize: 9,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
                             ),
-                            if (needReset) ...[
-                              const SizedBox(width: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: Colors.orange.withOpacity(0.2),
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(color: Colors.orange.withOpacity(0.5)),
-                                ),
-                                child: const Text(
-                                  'SERIES 2 OF 2',
-                                  style: TextStyle(
-                                    color: Colors.orange,
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ],
                           ],
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }(),
-            ],
-
-            // Grand Finals Rows
-            ...grandFinalStandings.asMap().entries.map((entry) {
-              final idx = entry.key;
-              final standing = entry.value;
-              return _buildChampionshipRow(
-                standing: standing,
-                categoryId: categoryId,
-                results: results,
-                wins: wins,
-                pairings: pairings,
-                index: idx,
-              );
-            }),
-            // Eliminated Section Header
-            if (eliminatedStandings.isNotEmpty)
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 8,
-                  horizontal: 16,
-                ),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      Colors.grey.withOpacity(0.2),
-                      Colors.grey.withOpacity(0.08),
-                    ],
-                  ),
-                  border: const Border(
-                    bottom: BorderSide(color: Colors.grey, width: 1),
-                    top: BorderSide(color: Colors.grey, width: 1),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.grey.withOpacity(0.12),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.clear, color: Colors.grey, size: 16),
-                          const SizedBox(width: 8),
-                          const Text(
-                            'ELIMINATED',
-                            style: TextStyle(
-                              color: Colors.grey,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14,
-                              letterSpacing: 1.5,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.06),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              '${eliminatedStandings.length} ALLIANCES',
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 10,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
                         ],
                       ),
                     ),
                   ],
                 ),
-              ),
-
-            // Eliminated Rows
-            ...eliminatedStandings.asMap().entries.map((entry) {
-              final index = entry.key;
-              final standing = entry.value;
-              return _buildChampionshipRow(
-                standing: standing,
-                categoryId: categoryId,
-                results: results,
-                wins: wins,
-                pairings: pairings,
-                index: index,
               );
-            }),
-
-            const SizedBox(height: 20),
+            }(),
           ],
-        ),
+
+          // Grand Finals Rows
+          ...grandFinalStandings.asMap().entries.map((entry) {
+            final idx = entry.key;
+            final standing = entry.value;
+            return _buildChampionshipRow(
+              standing: standing,
+              categoryId: categoryId,
+              results: results,
+              wins: wins,
+              pairings: pairings,
+              index: idx,
+            );
+          }),
+          
+          // Eliminated Section Header
+          if (eliminatedStandings.isNotEmpty)
+            Container(
+              padding: const EdgeInsets.symmetric(
+                vertical: 8,
+                horizontal: 16,
+              ),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    Colors.grey.withOpacity(0.2),
+                    Colors.grey.withOpacity(0.08),
+                  ],
+                ),
+                border: const Border(
+                  bottom: BorderSide(color: Colors.grey, width: 1),
+                  top: BorderSide(color: Colors.grey, width: 1),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.clear, color: Colors.grey, size: 16),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'ELIMINATED',
+                          style: TextStyle(
+                            color: Colors.grey,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                            letterSpacing: 1.5,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.06),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '${eliminatedStandings.length} ALLIANCES',
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+          // Eliminated Rows
+          ...eliminatedStandings.asMap().entries.map((entry) {
+            final index = entry.key;
+            final standing = entry.value;
+            return _buildChampionshipRow(
+              standing: standing,
+              categoryId: categoryId,
+              results: results,
+              wins: wins,
+              pairings: pairings,
+              index: index,
+            );
+          }),
+
+          const SizedBox(height: 20),
+        ],
       ),
-    );
-  }
+    ),
+  );
+}
 
   Widget _buildChampionRow({
   required ChampionshipAllianceStanding standing,
@@ -5502,191 +5736,255 @@ Widget _buildChampionshipRow({
 }
 
   Future<void> _initializeDefaultScores(int categoryId) async {
-    setState(() => _isInitializingScores = true);
+  setState(() => _isInitializingScores = true);
 
-    try {
-      final conn = await DBHelper.getConnection();
-      final teams = await DBHelper.getTeamsByCategory(categoryId);
+  try {
+    final conn = await DBHelper.getConnection();
+    final teams = await DBHelper.getTeamsByCategory(categoryId);
 
-      if (teams.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('❌ No teams found in this category'),
-              backgroundColor: Colors.orange,
-            ),
-          );
-        }
-        setState(() => _isInitializingScores = false);
-        return;
-      }
-
-      final roundsResult = await conn.execute(
-        """
-        SELECT DISTINCT ts.round_id
-        FROM tbl_teamschedule ts
-        JOIN tbl_team t ON ts.team_id = t.team_id
-        WHERE t.category_id = :catId
-        ORDER BY ts.round_id
-      """,
-        {"catId": categoryId},
-      );
-
-      final rounds = roundsResult.rows
-          .map(
-            (r) => int.tryParse(r.assoc()['round_id']?.toString() ?? '0') ?? 0,
-          )
-          .where((r) => r > 0)
-          .toList();
-
-      if (rounds.isEmpty) {
-        final settingsResult = await conn.execute(
-          """
-          SELECT matches_per_team 
-          FROM tbl_category_settings 
-          WHERE category_id = :catId
-        """,
-          {"catId": categoryId},
-        );
-
-        if (settingsResult.rows.isNotEmpty) {
-          final matchesPerTeam =
-              int.tryParse(
-                settingsResult.rows.first
-                        .assoc()['matches_per_team']
-                        ?.toString() ??
-                    '0',
-              ) ??
-              0;
-
-          for (int i = 1; i <= matchesPerTeam; i++) {
-            rounds.add(i);
-          }
-        }
-      }
-
-      if (rounds.isEmpty) {
-        rounds.addAll([1, 2, 3, 4]);
-      }
-
-      int scoresInserted = 0;
-      int scoresSkipped = 0;
-
-      for (final team in teams) {
-        final teamId = int.tryParse(team['team_id'].toString()) ?? 0;
-        if (teamId == 0) continue;
-
-        for (final roundId in rounds) {
-          final checkResult = await conn.execute(
-            """
-            SELECT COUNT(*) as cnt 
-            FROM tbl_score 
-            WHERE team_id = :teamId AND round_id = :roundId
-          """,
-            {"teamId": teamId, "roundId": roundId},
-          );
-
-          final exists =
-              int.tryParse(
-                checkResult.rows.first.assoc()['cnt']?.toString() ?? '0',
-              ) ??
-              0;
-
-          if (exists == 0) {
-            await DBHelper.executeDual(
-              """
-              INSERT INTO tbl_score
-                (team_id, round_id, score_totalscore, score_individual, score_alliance, score_violation, score_totalduration)
-              VALUES
-                (:teamId, :roundId, 0, 0, 0, 0, '00:00')
-            """,
-              {"teamId": teamId, "roundId": roundId},
-            );
-            scoresInserted++;
-          } else {
-            scoresSkipped++;
-          }
-        }
-      }
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              '✅ Initialized $scoresInserted default scores (0)${scoresSkipped > 0 ? ', $scoresSkipped already existed' : ''}',
-            ),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-
-      await _loadData(initial: false);
-    } catch (e) {
-      print("Error initializing scores: $e");
-    } finally {
-      if (mounted) setState(() => _isInitializingScores = false);
-    }
-  }
-
-  Future<void> _clearScores(int categoryId) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF2D0E7A),
-        title: const Text(
-          'Clear Scores?',
-          style: TextStyle(color: Colors.white),
-        ),
-        content: const Text(
-          'This will delete all scores for this category. This action cannot be undone.',
-          style: TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text(
-              'CANCEL',
-              style: TextStyle(color: Colors.white54),
-            ),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text(
-              'CLEAR',
-              style: TextStyle(color: Colors.redAccent),
-            ),
-          ),
-        ],
-      ),
-    );
-
-    if (confirm != true) return;
-
-    try {
-      final conn = await DBHelper.getConnection();
-      await DBHelper.executeDual(
-        """
-        DELETE s FROM tbl_score s
-        JOIN tbl_team t ON s.team_id = t.team_id
-        WHERE t.category_id = :catId
-      """,
-        {"catId": categoryId},
-      );
-
+    if (teams.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('✅ Scores cleared'),
+            content: Text('❌ No teams found in this category'),
             backgroundColor: Colors.orange,
           ),
         );
       }
-
-      await _loadData(initial: false);
-    } catch (e) {
-      print("Error clearing scores: $e");
+      setState(() => _isInitializingScores = false);
+      return;
     }
+
+    // Get category type
+    final catResult = await conn.execute(
+      "SELECT category_type FROM tbl_category WHERE category_id = :catId",
+      {"catId": categoryId},
+    );
+    final categoryType = catResult.rows.isNotEmpty 
+        ? catResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
+        : '';
+    final bool isExplorer = categoryType.contains('explorer');
+    final String scoreTable = isExplorer ? 'tbl_explorer_score' : 'tbl_score';
+    
+    print("📊 Initializing scores in $scoreTable for category $categoryId");
+
+    // Get all rounds
+    final roundsResult = await conn.execute(
+      """
+      SELECT DISTINCT ts.round_id
+      FROM tbl_teamschedule ts
+      JOIN tbl_team t ON ts.team_id = t.team_id
+      WHERE t.category_id = :catId
+      ORDER BY ts.round_id
+    """,
+      {"catId": categoryId},
+    );
+
+    final rounds = roundsResult.rows
+        .map((r) => int.tryParse(r.assoc()['round_id']?.toString() ?? '0') ?? 0)
+        .where((r) => r > 0)
+        .toList();
+
+    // Get all matches that will be affected
+    final matchesResult = await conn.execute("""
+      SELECT DISTINCT ts.match_id, ts.round_id
+      FROM tbl_teamschedule ts
+      JOIN tbl_team t ON ts.team_id = t.team_id
+      WHERE t.category_id = :catId
+    """, {"catId": categoryId});
+
+    // First, delete existing scores from both tables
+    await DBHelper.executeDual(
+      """
+      DELETE s FROM $scoreTable s
+      JOIN tbl_team t ON s.team_id = t.team_id
+      WHERE t.category_id = :catId
+      """,
+      {"catId": categoryId},
+    );
+    
+    await DBHelper.executeDual(
+      """
+      DELETE s FROM tbl_score s
+      JOIN tbl_team t ON s.team_id = t.team_id
+      WHERE t.category_id = :catId
+      """,
+      {"catId": categoryId},
+    );
+
+    // Insert new zero scores into the appropriate table
+    int scoresInserted = 0;
+    for (final team in teams) {
+      final teamId = int.tryParse(team['team_id'].toString()) ?? 0;
+      if (teamId == 0) continue;
+
+      for (final roundId in rounds) {
+        await DBHelper.executeDual(
+          """
+          INSERT INTO $scoreTable
+            (team_id, round_id, score_totalscore, score_individual, score_alliance, score_violation, score_totalduration)
+          VALUES
+            (:teamId, :roundId, 0, 0, 0, 0, '00:00')
+        """,
+          {"teamId": teamId, "roundId": roundId},
+        );
+        scoresInserted++;
+      }
+    }
+
+    // Revert each match to pending status (since scores are now zero)
+    for (final row in matchesResult.rows) {
+      final matchId = int.parse(row.assoc()['match_id'].toString());
+      final roundId = int.parse(row.assoc()['round_id'].toString());
+      
+      await DBHelper.checkAndRevertMatchStatusIfNeeded(
+        matchId: matchId,
+        roundId: roundId,
+      );
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Initialized $scoresInserted default scores (0) in $scoreTable'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
+
+    await _loadData(initial: false);
+    
+  } catch (e) {
+    print("Error initializing scores: $e");
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Error initializing scores: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  } finally {
+    if (mounted) setState(() => _isInitializingScores = false);
   }
+}
+
+  Future<void> _clearScores(int categoryId) async {
+  final confirm = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: const Color(0xFF2D0E7A),
+      title: const Text(
+        'Clear Scores?',
+        style: TextStyle(color: Colors.white),
+      ),
+      content: const Text(
+        'This will delete all scores for this category. This action cannot be undone.',
+        style: TextStyle(color: Colors.white70),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text(
+            'CANCEL',
+            style: TextStyle(color: Colors.white54),
+          ),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text(
+            'CLEAR',
+            style: TextStyle(color: Colors.redAccent),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  if (confirm != true) return;
+
+  setState(() => _isInitializingScores = true);
+
+  try {
+    final conn = await DBHelper.getConnection();
+    
+    // Get category type to determine which table to clear
+    final catResult = await conn.execute(
+      "SELECT category_type FROM tbl_category WHERE category_id = :catId",
+      {"catId": categoryId},
+    );
+    final categoryType = catResult.rows.isNotEmpty 
+        ? catResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
+        : '';
+    final bool isExplorer = categoryType.contains('explorer');
+    final String scoreTable = isExplorer ? 'tbl_explorer_score' : 'tbl_score';
+    
+    print("🗑️ Clearing scores from $scoreTable for category $categoryId");
+    
+    // Get all matches that will be affected
+    final matchesResult = await conn.execute("""
+      SELECT DISTINCT ts.match_id, ts.round_id
+      FROM tbl_teamschedule ts
+      JOIN tbl_team t ON ts.team_id = t.team_id
+      WHERE t.category_id = :catId
+    """, {"catId": categoryId});
+    
+    // Delete scores from the appropriate table
+    await DBHelper.executeDual(
+      """
+      DELETE s FROM $scoreTable s
+      JOIN tbl_team t ON s.team_id = t.team_id
+      WHERE t.category_id = :catId
+      """,
+      {"catId": categoryId},
+    );
+    
+    // Also clear from the main tbl_score for safety
+    await DBHelper.executeDual(
+      """
+      DELETE s FROM tbl_score s
+      JOIN tbl_team t ON s.team_id = t.team_id
+      WHERE t.category_id = :catId
+      """,
+      {"catId": categoryId},
+    );
+    
+    // Revert each affected match to pending status
+    for (final row in matchesResult.rows) {
+      final matchId = int.parse(row.assoc()['match_id'].toString());
+      final roundId = int.parse(row.assoc()['round_id'].toString());
+      
+      await DBHelper.checkAndRevertMatchStatusIfNeeded(
+        matchId: matchId,
+        roundId: roundId,
+      );
+    }
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✅ Scores cleared, matches reverted to pending'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+    }
+    
+    await _loadData(initial: false);
+    
+  } catch (e) {
+    print("Error clearing scores: $e");
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Error clearing scores: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  } finally {
+    if (mounted) setState(() => _isInitializingScores = false);
+  }
+}
 
   Future<String> _getPartnerTeamName(
     int matchId,
@@ -6694,20 +6992,46 @@ Widget _buildDurationField({
   }
 
   Widget _buildStandingsView(
-    Map<String, dynamic> category,
-    int categoryId,
-    List<Map<String, dynamic>> rows,
-  ) {
-    final categoryName = (category['category_type'] ?? '')
-        .toString()
-        .toLowerCase();
-    final isExplorer = categoryName.contains('explorer');
+  Map<String, dynamic> category,
+  int categoryId,
+  List<Map<String, dynamic>> rows,
+) {
+  final categoryName = (category['category_type'] ?? '')
+      .toString()
+      .toLowerCase();
+  final isExplorer = categoryName.contains('explorer');
 
-    final maxRounds = rows.isNotEmpty
-        ? (rows.first['maxRounds'] as int? ?? 4)
-        : 4;
+  final maxRounds = rows.isNotEmpty
+      ? (rows.first['maxRounds'] as int? ?? 4)
+      : 4;
 
-    bool hasScores = false;
+  // ============================================================
+  // FIX: Check for scores based on category type
+  // ============================================================
+  bool hasScores = false;
+  
+  if (isExplorer) {
+    // For Explorer, check if ANY score in tbl_explorer_score is > 0
+    // Since rows data already contains scores from the correct table,
+    // we can just check the rows data
+    for (final row in rows) {
+      final totalScore = row['totalScore'] as int;
+      if (totalScore > 0) {
+        hasScores = true;
+        break;
+      }
+      // Also check individual round scores
+      final rounds = row['rounds'] as Map<int, RoundScore>;
+      for (final roundScore in rounds.values) {
+        if (roundScore.totalScore > 0) {
+          hasScores = true;
+          break;
+        }
+      }
+      if (hasScores) break;
+    }
+  } else {
+    // For Starter, check using the existing logic
     for (final row in rows) {
       final rounds = row['rounds'] as Map<int, RoundScore>;
       for (final roundScore in rounds.values) {
@@ -6718,253 +7042,252 @@ Widget _buildDurationField({
       }
       if (hasScores) break;
     }
-
-    StandingType selectedType =
-        _selectedTypeByCategory[categoryId] ?? StandingType.qualification;
-
-    return Column(
-      children: [
-        Container(
-          width: double.infinity,
-          color: const Color(0xFF2D0E7A),
-          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 32),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Container(
-                constraints: const BoxConstraints(minWidth: 250),
-                child: DropdownButton<StandingType>(
-                  value: selectedType,
-                  dropdownColor: const Color(0xFF2D0E7A),
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                  icon: Icon(
-                    Icons.keyboard_arrow_down_rounded,
-                    color: selectedType.color,
-                    size: 24,
-                  ),
-                  onChanged: (StandingType? newValue) {
-  if (newValue != null) {
-    setState(() {
-      _selectedTypeByCategory[categoryId] = newValue;
-    });
-
-    if (newValue == StandingType.championship) {
-      if (isExplorer) {
-        _loadMatchPairings(categoryId);
-        _loadBestOf3Results(categoryId);
-        _loadChampionshipStandings(categoryId);
-      } else {
-        // For Starter, make sure we load fresh data
-        _loadStarterMatchPairings(categoryId);
-        _loadChampionshipStandings(categoryId);
-      }
-    } else if (newValue == StandingType.battleOfChampions) {
-      _loadChampionStandings(categoryId);
-    }
   }
-},
-                  items: StandingType.values.map((type) {
-                    return DropdownMenuItem<StandingType>(
-                      value: type,
-                      child: Container(
-                        width: 220,
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 28,
-                              height: 28,
-                              decoration: BoxDecoration(
-                                color: type.color.withOpacity(0.15),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Icon(
-                                type.icon,
-                                color: type.color,
-                                size: 16,
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Text(
-                                type.displayName,
-                                style: TextStyle(
-                                  color: type == selectedType
-                                      ? type.color
-                                      : Colors.white70,
-                                  fontSize: 14,
-                                  fontWeight: type == selectedType
-                                      ? FontWeight.bold
-                                      : FontWeight.normal,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  }).toList(),
-                ),
-              ),
+  
+  print("📊 Category $categoryId (isExplorer: $isExplorer) - hasScores: $hasScores");
 
-              Text(
-                (category['category_type'] ?? '').toString().toUpperCase(),
+  StandingType selectedType =
+      _selectedTypeByCategory[categoryId] ?? StandingType.qualification;
+
+  return Column(
+    children: [
+      Container(
+        width: double.infinity,
+        color: const Color(0xFF2D0E7A),
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 32),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Container(
+              constraints: const BoxConstraints(minWidth: 250),
+              child: DropdownButton<StandingType>(
+                value: selectedType,
+                dropdownColor: const Color(0xFF2D0E7A),
                 style: const TextStyle(
                   color: Colors.white,
-                  fontSize: 26,
+                  fontSize: 16,
                   fontWeight: FontWeight.bold,
-                  letterSpacing: 2,
                 ),
-              ),
+                icon: Icon(
+                  Icons.keyboard_arrow_down_rounded,
+                  color: selectedType.color,
+                  size: 24,
+                ),
+                onChanged: (StandingType? newValue) {
+                  if (newValue != null) {
+                    setState(() {
+                      _selectedTypeByCategory[categoryId] = newValue;
+                    });
 
-              Row(
-                children: [
-                  if (selectedType == StandingType.qualification &&
-                      rows.isNotEmpty &&
-                      !hasScores)
-                    Container(
-                      margin: const EdgeInsets.only(right: 8),
-                      child: ElevatedButton.icon(
-                        onPressed: _isInitializingScores
-                            ? null
-                            : () => _initializeDefaultScores(categoryId),
-                        icon: _isInitializingScores
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : const Icon(Icons.auto_awesome_rounded, size: 16),
-                        label: Text(
-                          _isInitializingScores ? '...' : 'INIT SCORES',
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF00E5A0),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 6,
-                          ),
-                          textStyle: const TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                      ),
-                    ),
-
-                  if (selectedType == StandingType.qualification && hasScores)
-                    Container(
-                      margin: const EdgeInsets.only(right: 8),
-                      child: OutlinedButton.icon(
-                        onPressed: () => _clearScores(categoryId),
-                        icon: const Icon(Icons.delete_sweep_rounded, size: 14),
-                        label: const Text('CLEAR'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.redAccent,
-                          side: const BorderSide(color: Colors.redAccent),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 6,
-                          ),
-                          textStyle: const TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                      ),
-                    ),
-
-                  _buildLiveIndicator(),
-                  IconButton(
-                    tooltip: 'Teams & Players',
-                    icon: const Icon(
-                      Icons.groups_rounded,
-                      color: Color(0xFF00E5A0),
-                    ),
-                    onPressed: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => TeamsPlayers(
-                            onBack: () => Navigator.of(context).pop(),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                  IconButton(
-                    tooltip: 'Back to Homepage',
-                    icon: const Icon(
-                      Icons.arrow_back_ios_new,
-                      color: Color(0xFF00CFFF),
-                    ),
-                    onPressed: widget.onBack,
-                  ),
-                  const SizedBox(width: 8),
-                  if (selectedType == StandingType.qualification &&
-                      maxRounds > 0)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF00CFFF).withOpacity(0.15),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(
-                          color: const Color(0xFF00CFFF).withOpacity(0.3),
-                        ),
-                      ),
+                    if (newValue == StandingType.championship) {
+                      if (isExplorer) {
+                        _loadMatchPairings(categoryId);
+                        _loadBestOf3Results(categoryId);
+                        _loadChampionshipStandings(categoryId);
+                      } else {
+                        _loadStarterMatchPairings(categoryId);
+                        _loadChampionshipStandings(categoryId);
+                      }
+                    } else if (newValue == StandingType.battleOfChampions) {
+                      _loadChampionStandings(categoryId);
+                    }
+                  }
+                },
+                items: StandingType.values.map((type) {
+                  return DropdownMenuItem<StandingType>(
+                    value: type,
+                    child: Container(
+                      width: 220,
+                      padding: const EdgeInsets.symmetric(vertical: 4),
                       child: Row(
                         children: [
-                          const Icon(
-                            Icons.sports_esports_rounded,
-                            color: Color(0xFF00CFFF),
-                            size: 14,
+                          Container(
+                            width: 28,
+                            height: 28,
+                            decoration: BoxDecoration(
+                              color: type.color.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Icon(
+                              type.icon,
+                              color: type.color,
+                              size: 16,
+                            ),
                           ),
-                          const SizedBox(width: 6),
-                          Text(
-                            '$maxRounds MATCHES PER TEAM',
-                            style: const TextStyle(
-                              color: Color(0xFF00CFFF),
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 0.5,
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              type.displayName,
+                              style: TextStyle(
+                                color: type == selectedType
+                                    ? type.color
+                                    : Colors.white70,
+                                fontSize: 14,
+                                fontWeight: type == selectedType
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                              ),
                             ),
                           ),
                         ],
                       ),
                     ),
-                ],
+                  );
+                }).toList(),
               ),
-            ],
-          ),
-        ),
+            ),
 
-        if (selectedType == StandingType.qualification)
-          _buildQualificationTable(rows, maxRounds, isExplorer)
-        else if (selectedType == StandingType.championship)
-          isExplorer
-              ? _buildChampionshipTable(categoryId)
-              : _buildOriginalChampionshipTable(categoryId)
-        else
-          _buildBattleOfChampionsView(categoryId),
-      ],
-    );
-  }
+            Text(
+              (category['category_type'] ?? '').toString().toUpperCase(),
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 26,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 2,
+              ),
+            ),
+
+            Row(
+              children: [
+                // ============================================================
+                // FIX: Show CLEAR button when scores exist, INIT when no scores
+                // ============================================================
+                if (selectedType == StandingType.qualification && rows.isNotEmpty)
+                  Container(
+                    margin: const EdgeInsets.only(right: 8),
+                    child: hasScores
+                        ? OutlinedButton.icon(
+                            onPressed: () => _clearScores(categoryId),
+                            icon: const Icon(Icons.delete_sweep_rounded, size: 14),
+                            label: const Text('CLEAR'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.redAccent,
+                              side: const BorderSide(color: Colors.redAccent),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 6,
+                              ),
+                              textStyle: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                          )
+                        : ElevatedButton.icon(
+                            onPressed: _isInitializingScores
+                                ? null
+                                : () => _initializeDefaultScores(categoryId),
+                            icon: _isInitializingScores
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                : const Icon(Icons.auto_awesome_rounded, size: 16),
+                            label: Text(
+                              _isInitializingScores ? '...' : 'INIT SCORES',
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF00E5A0),
+                              foregroundColor: Colors.black,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 6,
+                              ),
+                              textStyle: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                          ),
+                  ),
+
+                _buildLiveIndicator(),
+                IconButton(
+                  tooltip: 'Teams & Players',
+                  icon: const Icon(
+                    Icons.groups_rounded,
+                    color: Color(0xFF00E5A0),
+                  ),
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => TeamsPlayers(
+                          onBack: () => Navigator.of(context).pop(),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+                IconButton(
+                  tooltip: 'Back to Homepage',
+                  icon: const Icon(
+                    Icons.arrow_back_ios_new,
+                    color: Color(0xFF00CFFF),
+                  ),
+                  onPressed: widget.onBack,
+                ),
+                const SizedBox(width: 8),
+                if (selectedType == StandingType.qualification &&
+                    maxRounds > 0)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF00CFFF).withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: const Color(0xFF00CFFF).withOpacity(0.3),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.sports_esports_rounded,
+                          color: Color(0xFF00CFFF),
+                          size: 14,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          '$maxRounds MATCHES PER TEAM',
+                          style: const TextStyle(
+                            color: Color(0xFF00CFFF),
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+
+      if (selectedType == StandingType.qualification)
+        _buildQualificationTable(rows, maxRounds, isExplorer)
+      else if (selectedType == StandingType.championship)
+        isExplorer
+            ? _buildChampionshipTable(categoryId)
+            : _buildOriginalChampionshipTable(categoryId)
+      else
+        _buildBattleOfChampionsView(categoryId),
+    ],
+  );
+}
 
   Widget _buildQualificationTable(
   List<Map<String, dynamic>> rows,
