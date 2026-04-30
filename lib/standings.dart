@@ -304,20 +304,19 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
   }
 
   Future<void> _silentRefresh() async {
-    try {
-      final conn = await DBHelper.getConnection();
-      final result = await conn.execute(
-        "SELECT score_id, team_id, round_id, score_totalscore, score_individual, score_alliance, score_violation FROM tbl_score ORDER BY score_id",
-      );
-      final rows = result.rows.map((r) => r.assoc()).toList();
-      final signature = _buildSignature(rows);
-
-      if (signature != _lastDataSignature) {
-        _lastDataSignature = signature;
-        await _loadData(initial: false);
-      }
-    } catch (_) {}
+  try {
+    // Just reload all data - this will fetch fresh Explorer scores
+    await _loadData(initial: false);
+    
+    if (mounted) {
+      setState(() {
+        _lastUpdated = DateTime.now();
+      });
+    }
+  } catch (e) {
+    print("Silent refresh error: $e");
   }
+}
 
   Future<void> _loadMatchPairings(int categoryId) async {
   try {
@@ -2558,6 +2557,7 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
         ? categoryResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
         : '';
     final bool isStarter = categoryType.contains('starter');
+    final bool isExplorer = categoryType.contains('explorer');
     
     if (isStarter) {
       // Use the per-category schedule table when available
@@ -2653,13 +2653,17 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // FIXED: Count wins using DISTINCT to prevent double-counting
+    // FIXED: Count wins using the correct table based on category type
     // ═══════════════════════════════════════════════════════════════════════════
     final Map<int, int> winsCount = {};
     final Map<int, Map<int, Map<String, int>>> matchScoresByAlliance = {};
 
     if (isStarter) {
-      // STARTER: Use existing method (Starter table doesn't have duplicate rows)
+      // ============================================================
+      // STARTER CATEGORY - Read from tbl_starter_championship_scores
+      // ============================================================
+      print("📊 Loading Starter championship scores from tbl_starter_championship_scores");
+      
       final bestOf3Result = await conn.execute("""
         SELECT 
           alliance_id,
@@ -2694,9 +2698,14 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
           'violation': allianceViolation,
         };
       }
-    } else {
-      // EXPLORER: Use DISTINCT query to count each unique match only once
-      // This prevents double-counting when both alliance rows exist
+    } 
+    else if (isExplorer) {
+      // ============================================================
+      // EXPLORER CATEGORY - Read from tbl_championship_bestof3
+      // ============================================================
+      print("📊 Loading Explorer championship scores from tbl_championship_bestof3");
+      
+      // Get wins per alliance from Best-of-3 results
       final winsQuery = await conn.execute("""
         SELECT 
           winner_alliance_id,
@@ -2714,9 +2723,10 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
         final winnerId = int.parse(data['winner_alliance_id'].toString());
         final winCount = int.parse(data['win_count'].toString());
         winsCount[winnerId] = winCount;
+        print("📊 Explorer win count: Alliance $winnerId has $winCount wins");
       }
 
-      // Also load match scores for display (these can still be loaded from both rows)
+      // Also load match scores for display
       final bestOf3Result = await conn.execute("""
         SELECT 
           alliance_id,
@@ -2727,6 +2737,7 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
           opponent_violation
         FROM tbl_championship_bestof3
         WHERE category_id = :catId
+        ORDER BY alliance_id, match_number
       """, {"catId": categoryId});
 
       for (final row in bestOf3Result.rows) {
@@ -2737,12 +2748,48 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
         final allianceViolation = int.parse((data['alliance_violation'] ?? '0').toString());
 
         matchScoresByAlliance.putIfAbsent(allianceId, () => {});
-        // Only store if not already stored or take the higher score
+        
+        // Only store if not already stored
         if (!matchScoresByAlliance[allianceId]!.containsKey(matchNum)) {
           matchScoresByAlliance[allianceId]![matchNum] = {
             'score': allianceScore,
             'violation': allianceViolation,
           };
+        }
+      }
+    }
+    else {
+      // ============================================================
+      // OTHER CATEGORIES - Read from tbl_score (fallback)
+      // ============================================================
+      print("📊 Loading other category scores from tbl_score");
+      
+      final scoreResult = await conn.execute("""
+        SELECT 
+          t.team_id,
+          s.round_id,
+          s.score_totalscore
+        FROM tbl_score s
+        JOIN tbl_team t ON s.team_id = t.team_id
+        WHERE t.category_id = :catId
+      """, {"catId": categoryId});
+      
+      // Process scores for other categories
+      for (final row in scoreResult.rows) {
+        final data = row.assoc();
+        final teamId = int.parse(data['team_id'].toString());
+        final score = int.parse(data['score_totalscore']?.toString() ?? '0');
+        
+        // Find alliance for this team
+        for (final alliance in alliances) {
+          final captainId = int.parse(alliance['captain_team_id']?.toString() ?? '0');
+          final partnerId = int.parse(alliance['partner_team_id']?.toString() ?? '0');
+          
+          if (captainId == teamId || partnerId == teamId) {
+            final allianceId = int.parse(alliance['alliance_id'].toString());
+            winsCount[allianceId] = (winsCount[allianceId] ?? 0) + score;
+            break;
+          }
         }
       }
     }
@@ -2753,23 +2800,29 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
     for (final alliance in alliances) {
       final allianceId = int.parse(alliance['alliance_id'].toString());
       final allianceRank = int.parse(alliance['alliance_rank'].toString());
+      final captainName = alliance['captain_name'].toString();
+      final partnerName = alliance['partner_name'].toString();
 
-      final wins = winsCount[allianceId] ?? 0;
-      int maxScore;
+      int totalScore = 0;
+      
       if (isStarter) {
-        // STARTER: Compute max final score across all matches (score - violation)
-        maxScore = 0;
+        // STARTER: Max final score from individual matches (score - violation)
         if (matchScoresByAlliance.containsKey(allianceId)) {
           for (final m in matchScoresByAlliance[allianceId]!.values) {
             final sc = m['score'] ?? 0;
             final vio = m['violation'] ?? 0;
             final finalScore = sc - vio;
-            if (finalScore > maxScore) maxScore = finalScore;
+            if (finalScore > totalScore) totalScore = finalScore;
           }
         }
-      } else {
-        // EXPLORER: maxScore = wins × 10 (now wins are correctly counted)
-        maxScore = wins * 10;
+      } 
+      else if (isExplorer) {
+        // EXPLORER: Score = wins × 10
+        totalScore = (winsCount[allianceId] ?? 0) * 10;
+      } 
+      else {
+        // OTHER: Total from scores
+        totalScore = winsCount[allianceId] ?? 0;
       }
 
       final matchScores = <int, Map<String, int>>{};
@@ -2781,12 +2834,14 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
         ChampionshipAllianceStanding(
           allianceId: allianceId,
           allianceRank: allianceRank,
-          captainName: alliance['captain_name'].toString(),
-          partnerName: alliance['partner_name'].toString(),
+          captainName: captainName,
+          partnerName: partnerName,
           matchScores: matchScores,
-          totalScore: maxScore,
+          totalScore: totalScore,
         ),
       );
+      
+      print("📊 Alliance #$allianceRank (ID: $allianceId): $totalScore pts");
     }
 
     // Sort by totalScore (highest first)
@@ -2804,12 +2859,11 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
       });
     }
     
-    print("✅ Loaded ${standings.length} championship standings");
-    for (final standing in standings) {
-      print("   Alliance #${standing.allianceRank}: ${standing.totalScore} pts (${standing.matchScores.length} matches)");
-    }
-  } catch (e) {
-    print("Error loading championship standings: $e");
+    print("✅ Loaded ${standings.length} championship standings for category $categoryId");
+    
+  } catch (e, stackTrace) {
+    print("❌ Error loading championship standings: $e");
+    print(stackTrace);
     if (mounted) {
       setState(() {
         _championshipStandingsByCategory[categoryId] = [];
@@ -2818,7 +2872,6 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
     }
   }
 }
-
   // Build Best-of-3 match cell - shows win/loss counts
   Widget _buildBestOf3MatchCell({
     required int categoryId,
@@ -6397,177 +6450,184 @@ Widget _buildDurationField({
 }
 
   Future<void> _loadData({bool initial = false}) async {
-    if (initial) setState(() => _isLoading = true);
+  if (initial) setState(() => _isLoading = true);
 
-    try {
-      print("🔄 Loading standings data...");
-      final categories = await DBHelper.getCategories();
-      final Map<int, List<Map<String, dynamic>>> standingsByCategory = {};
+  try {
+    print("🔄 Loading standings data...");
+    final categories = await DBHelper.getCategories();
+    final Map<int, List<Map<String, dynamic>>> standingsByCategory = {};
 
-      for (final cat in categories) {
-        final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
-        print("📊 Loading category $catId");
+    for (final cat in categories) {
+      final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
+      final categoryType = cat['category_type']?.toString().toLowerCase() ?? '';
+      final bool isExplorer = categoryType.contains('explorer');
+      
+      print("📊 Loading category $catId (isExplorer: $isExplorer)");
 
-        final conn = await DBHelper.getConnection();
-
-        final scoreResult = await conn.execute(
-          """
+      final conn = await DBHelper.getConnection();
+      
+      String sql;
+      if (isExplorer) {
+        sql = """
+          SELECT 
+            s.team_id, 
+            s.round_id,
+            s.score_independentscore as alliance_score,
+            s.score_violation as violation,
+            s.score_totalscore as total_score,
+            s.score_totalduration as duration
+          FROM tbl_explorer_score s
+          JOIN tbl_team t ON s.team_id = t.team_id
+          WHERE t.category_id = :catId
+          ORDER BY s.team_id, s.round_id
+        """;
+      } else {
+        sql = """
           SELECT 
             s.team_id, 
             s.round_id, 
-            s.score_totalscore,
-            s.score_individual,
-            s.score_alliance,
-            s.score_violation,
-            s.score_totalduration 
+            s.score_totalscore as total_score,
+            s.score_individual as individual_score,
+            s.score_alliance as alliance_score,
+            s.score_violation as violation,
+            s.score_totalduration as duration
           FROM tbl_score s
           JOIN tbl_team t ON s.team_id = t.team_id
           WHERE t.category_id = :catId
           ORDER BY s.team_id, s.round_id
-        """,
-          {"catId": catId},
-        );
+        """;
+      }
+      
+      final scoreResult = await conn.execute(sql, {"catId": catId});
+      final rows = scoreResult.rows.map((r) => r.assoc()).toList();
+      print("   Found ${rows.length} score rows");
 
-        final rows = scoreResult.rows.map((r) => r.assoc()).toList();
-        print("   Found ${rows.length} score rows");
+      final Map<int, Map<String, dynamic>> teamMap = {};
 
-        final Map<int, Map<String, dynamic>> teamMap = {};
+      final teams = await DBHelper.getTeamsByCategory(catId);
+      print("   Found ${teams.length} teams");
 
-        final teams = await DBHelper.getTeamsByCategory(catId);
-        print("   Found ${teams.length} teams");
+      for (final team in teams) {
+        final teamId = int.tryParse(team['team_id'].toString()) ?? 0;
+        teamMap[teamId] = {
+          'team_id': teamId,
+          'team_name': team['team_name'] ?? '',
+          'rounds': <int, RoundScore>{},
+          'totalScore': 0,
+        };
+      }
 
-        for (final team in teams) {
-          final teamId = int.tryParse(team['team_id'].toString()) ?? 0;
-          teamMap[teamId] = {
-            'team_id': teamId,
-            'team_name': team['team_name'] ?? '',
-            'rounds': <int, RoundScore>{},
-            'totalScore': 0,
-          };
+      int maxRoundFound = 0;
+
+      for (final row in rows) {
+        final teamId = int.tryParse(row['team_id'].toString()) ?? 0;
+        final roundId = int.tryParse(row['round_id']?.toString() ?? '0') ?? 0;
+        final duration = row['duration']?.toString() ?? '00:00';
+        final totalScore = int.tryParse(row['total_score']?.toString() ?? '0') ?? 0;
+        
+        int individualScore;
+        int allianceScore;
+        int violation;
+        
+        if (isExplorer) {
+          allianceScore = int.tryParse(row['alliance_score']?.toString() ?? '0') ?? 0;
+          violation = int.tryParse(row['violation']?.toString() ?? '0') ?? 0;
+          individualScore = allianceScore - violation;
+        } else {
+          individualScore = int.tryParse(row['individual_score']?.toString() ?? '0') ?? 0;
+          allianceScore = int.tryParse(row['alliance_score']?.toString() ?? '0') ?? 0;
+          violation = int.tryParse(row['violation']?.toString() ?? '0') ?? 0;
         }
 
-        int maxRoundFound = 0;
-
-        for (final row in rows) {
-          final teamId = int.tryParse(row['team_id'].toString()) ?? 0;
-          final roundId = int.tryParse(row['round_id']?.toString() ?? '0') ?? 0;
-          final totalScore =
-              int.tryParse(row['score_totalscore'].toString()) ?? 0;
-          final individualScore =
-              int.tryParse(row['score_individual']?.toString() ?? '0') ?? 0;
-          final allianceScore =
-              int.tryParse(row['score_alliance']?.toString() ?? '0') ?? 0;
-          final violation =
-              int.tryParse(row['score_violation']?.toString() ?? '0') ?? 0;
-          final duration = row['score_totalduration']?.toString() ?? '00:00';
-
-          if (teamMap.containsKey(teamId)) {
-            final roundScore = RoundScore(
-              individualScore: individualScore,
-              allianceScore: allianceScore,
-              violation: violation,
-              duration: duration,
-            );
-
-            teamMap[teamId]!['rounds'][roundId] = roundScore;
-            teamMap[teamId]!['totalScore'] =
-                (teamMap[teamId]!['totalScore'] as int) + totalScore;
-
-            if (roundId > maxRoundFound) maxRoundFound = roundId;
-          }
-        }
-
-        int maxRounds = 0;
-        try {
-          final settingsResult = await conn.execute(
-            """
-            SELECT matches_per_team 
-            FROM tbl_category_settings 
-            WHERE category_id = :catId
-          """,
-            {"catId": catId},
+        if (teamMap.containsKey(teamId)) {
+          final roundScore = RoundScore(
+            individualScore: individualScore,
+            allianceScore: allianceScore,
+            violation: violation,
+            duration: duration,
           );
 
-          if (settingsResult.rows.isNotEmpty) {
-            maxRounds =
-                int.tryParse(
-                  settingsResult.rows.first
-                          .assoc()['matches_per_team']
-                          ?.toString() ??
-                      '0',
-                ) ??
-                0;
-          }
-        } catch (e) {
-          print("⚠️ Could not load settings: $e");
-        }
+          teamMap[teamId]!['rounds'][roundId] = roundScore;
+          teamMap[teamId]!['totalScore'] = (teamMap[teamId]!['totalScore'] as int) + totalScore;
 
-        if (maxRounds == 0 && maxRoundFound > 0) maxRounds = maxRoundFound;
-        if (maxRounds == 0 && teams.isNotEmpty) maxRounds = 4;
-
-        final standings = teamMap.values.map((teamData) {
-          return {
-            'team_id': teamData['team_id'],
-            'team_name': teamData['team_name'],
-            'rounds': teamData['rounds'],
-            'totalScore': teamData['totalScore'],
-            'maxRounds': maxRounds,
-          };
-        }).toList();
-
-        standings.sort(
-          (a, b) => (b['totalScore'] as int).compareTo(a['totalScore'] as int),
-        );
-
-        for (int i = 0; i < standings.length; i++) {
-          standings[i]['rank'] = i + 1;
-        }
-
-        standingsByCategory[catId] = standings;
-        print("✅ Category $catId: ${standings.length} teams processed");
-
-        // ============================================================
-// ADD THIS BLOCK - Load Battle of Champions standings
-// ============================================================
-try {
-  final battleStandings = await DBHelper.getBattleOfChampionsStandings();
-  _battleStandingsByCategory[catId] = battleStandings.where((s) => 
-    s['category_id']?.toString() == catId.toString() || 
-    s['alliance1_id'] != null
-  ).toList();
-  print("✅ Loaded ${_battleStandingsByCategory[catId]?.length ?? 0} battle standings for category $catId");
-} catch (e) {
-  print("⚠️ Could not load battle standings for category $catId: $e");
-  _battleStandingsByCategory[catId] = [];
-}
-
-        if (!_selectedTypeByCategory.containsKey(catId)) {
-          _selectedTypeByCategory[catId] = StandingType.qualification;
+          if (roundId > maxRoundFound) maxRoundFound = roundId;
         }
       }
 
-      final previousTabIndex = _tabController?.index ?? 0;
+      int maxRounds = 0;
+      try {
+        final settingsResult = await conn.execute(
+          "SELECT matches_per_team FROM tbl_category_settings WHERE category_id = :catId",
+          {"catId": catId},
+        );
+        if (settingsResult.rows.isNotEmpty) {
+          maxRounds = int.tryParse(settingsResult.rows.first.assoc()['matches_per_team']?.toString() ?? '0') ?? 0;
+        }
+      } catch (e) {
+        print("⚠️ Could not load settings: $e");
+      }
 
-      _tabController?.dispose();
-      _tabController = TabController(
-        length: categories.length,
-        vsync: this,
-        initialIndex: previousTabIndex.clamp(0, categories.length - 1),
-      );
+      if (maxRounds == 0 && maxRoundFound > 0) maxRounds = maxRoundFound;
+      if (maxRounds == 0 && teams.isNotEmpty) maxRounds = 4;
 
-      print("✅ All data loaded, updating UI");
-      setState(() {
-        _categories = categories;
-        _standingsByCategory = standingsByCategory;
-        _isLoading = false;
-        _lastUpdated = DateTime.now();
-      });
-    } catch (e, stackTrace) {
-      print("❌ Error loading standings: $e");
-      print(stackTrace);
-      setState(() => _isLoading = false);
+      final standings = teamMap.values.map((teamData) {
+        return {
+          'team_id': teamData['team_id'],
+          'team_name': teamData['team_name'],
+          'rounds': teamData['rounds'],
+          'totalScore': teamData['totalScore'],
+          'maxRounds': maxRounds,
+        };
+      }).toList();
+
+      standings.sort((a, b) => (b['totalScore'] as int).compareTo(a['totalScore'] as int));
+
+      for (int i = 0; i < standings.length; i++) {
+        standings[i]['rank'] = i + 1;
+      }
+
+      standingsByCategory[catId] = standings;
+      print("✅ Category $catId: ${standings.length} teams processed");
+
+      try {
+        final battleStandings = await DBHelper.getBattleOfChampionsStandings();
+        _battleStandingsByCategory[catId] = battleStandings.where((s) => 
+          s['category_id']?.toString() == catId.toString() || 
+          s['alliance1_id'] != null
+        ).toList();
+        print("✅ Loaded ${_battleStandingsByCategory[catId]?.length ?? 0} battle standings for category $catId");
+      } catch (e) {
+        print("⚠️ Could not load battle standings for category $catId: $e");
+        _battleStandingsByCategory[catId] = [];
+      }
+
+      if (!_selectedTypeByCategory.containsKey(catId)) {
+        _selectedTypeByCategory[catId] = StandingType.qualification;
+      }
     }
+
+    final previousTabIndex = _tabController?.index ?? 0;
+
+    _tabController?.dispose();
+    _tabController = TabController(
+      length: categories.length,
+      vsync: this,
+      initialIndex: previousTabIndex.clamp(0, categories.length - 1),
+    );
+
+    print("✅ All data loaded, updating UI");
+    setState(() {
+      _categories = categories;
+      _standingsByCategory = standingsByCategory;
+      _isLoading = false;
+      _lastUpdated = DateTime.now();
+    });
+  } catch (e, stackTrace) {
+    print("❌ Error loading standings: $e");
+    print(stackTrace);
+    setState(() => _isLoading = false);
   }
+}
 
   @override
   Widget build(BuildContext context) {

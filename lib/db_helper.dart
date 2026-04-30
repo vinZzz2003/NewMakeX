@@ -542,15 +542,15 @@ static Future<void> _ensureCategoryScoreTableExists(MySQLConnection conn, String
     print("❌ Error mirroring category $categoryId data: $e");
   }
 }
-  // Mirror data for ALL categories
-  static Future<void> mirrorAllCategoriesData() async {
+  
+ /* static Future<void> mirrorAllCategoriesData() async {
     final categories = [1, 2]; // Starter and Explorer
     
     for (final categoryId in categories) {
       await mirrorAllCategoryData(categoryId);
     }
   }
-
+*/
   // Helper function to ensure category-specific table exists with correct structure
   static Future<void> _ensureCategoryTableStructure(
     MySQLConnection conn, 
@@ -1012,7 +1012,7 @@ static Future<void> _ensureCategoryScoreTableExists(MySQLConnection conn, String
   await addDatabaseIndexes();
   
   // After migrations, mirror all existing data
-  await mirrorAllCategoriesData();
+  // await mirrorAllCategoriesData();
   
 }
 
@@ -3499,24 +3499,36 @@ static Future<dynamic> executeDual(
   // ── SCORES ────────────────────────────────────────────────────────────────
 
   static Future<List<Map<String, dynamic>>> getScoresByCategory(
-    int categoryId,
-  ) async {
-    final conn = await getConnection();
-    final result = await conn.execute(
-      """
-      SELECT
-        t.team_id,
-        t.team_name,
-        COALESCE(s.round_id, 0) as round_id,
-        COALESCE(s.score_totalscore, 0) as score_totalscore,
-        COALESCE(s.score_totalduration, '00:00') as score_totalduration
-      FROM tbl_team t
-      LEFT JOIN tbl_score s ON s.team_id = t.team_id
-      WHERE t.category_id = :categoryId
-      ORDER BY t.team_id, s.round_id
-    """,
-      {"categoryId": categoryId},
-    );
+  int categoryId,
+) async {
+  final conn = await getConnection();
+  
+  // ✅ Check category type to use correct table
+  final catResult = await conn.execute(
+    "SELECT category_type FROM tbl_category WHERE category_id = :catId",
+    {"catId": categoryId},
+  );
+  
+  final isExplorer = catResult.rows.isNotEmpty && 
+      catResult.rows.first.assoc()['category_type']?.toString().toLowerCase().contains('explorer') == true;
+  
+  final scoreTable = isExplorer ? 'tbl_explorer_score' : 'tbl_score';
+  
+  final result = await conn.execute(
+    """
+    SELECT
+      t.team_id,
+      t.team_name,
+      COALESCE(s.round_id, 0) as round_id,
+      COALESCE(s.score_totalscore, 0) as score_totalscore,
+      COALESCE(s.score_totalduration, '00:00') as score_totalduration
+    FROM tbl_team t
+    LEFT JOIN $scoreTable s ON s.team_id = t.team_id
+    WHERE t.category_id = :categoryId
+    ORDER BY t.team_id, s.round_id
+  """,
+    {"categoryId": categoryId},
+  );
 
     final rows = result.rows.map((r) => r.assoc()).toList();
     print(
