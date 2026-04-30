@@ -1144,170 +1144,192 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
   // ── main data load ────────────────────────────────────────────────────────
   Future<void> _loadData({bool initial = false}) async {
-    if (initial) setState(() => _isLoading = true);
-    try {
-      final categories = await DBHelper.getCategories();
+  if (initial) setState(() => _isLoading = true);
+  
+  try {
+    print("🔄 Loading schedule data...");
+    final categories = await DBHelper.getCategories();
 
-      if (categories.isEmpty) {
-        setState(() {
-          _categories = [];
-          _scheduleByCategory = {};
-          _isLoading = false;
-          _lastUpdated = DateTime.now();
-        });
-        return;
-      }
-
-      final conn = await DBHelper.getConnection();
-
-      final result = await conn.execute("""
-        SELECT 
-          c.category_id, 
-          c.category_type,
-          ts.match_id, 
-          ts.round_id,
-          s.schedule_id,
-          s.schedule_start,
-          s.schedule_end,
-          ts.arena_number,
-          t.team_id,
-          t.team_name
-        FROM tbl_teamschedule ts
-        JOIN tbl_team t ON ts.team_id = t.team_id
-        JOIN tbl_category c ON t.category_id = c.category_id
-        JOIN tbl_match m ON ts.match_id = m.match_id
-        JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
-        ORDER BY c.category_id, s.schedule_start, ts.match_id, ts.arena_number
-      """);
-
-      final rows = result.rows.map((r) => r.assoc()).toList();
-      _lastDataSignature = _buildSignature(rows);
-
-      final Map<int, List<Map<String, dynamic>>> rowsByCategory = {};
-      for (final row in rows) {
-        final catId = int.tryParse(row['category_id'].toString()) ?? 0;
-        rowsByCategory.putIfAbsent(catId, () => []).add(row);
-      }
-
-      final Map<int, List<Map<String, dynamic>>> scheduleByCategory = {};
-
-      for (final cat in categories) {
-        final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
-        if (catId == 0) continue;
-
-        final catRows = rowsByCategory[catId] ?? [];
-
-        if (catRows.isEmpty) {
-          scheduleByCategory[catId] = [];
-          continue;
-        }
-
-        final Map<int, Map<String, dynamic>> matchesByMatchId = {};
-
-        for (final row in catRows) {
-          final matchId = int.tryParse(row['match_id'].toString()) ?? 0;
-          if (matchId == 0) continue;
-
-          final arenaNum =
-              int.tryParse(row['arena_number']?.toString() ?? '1') ?? 1;
-          final teamId = row['team_id']?.toString() ?? '';
-          final teamName = row['team_name']?.toString() ?? '';
-          final scheduleStart = row['schedule_start']?.toString() ?? '';
-          final scheduleEnd = row['schedule_end']?.toString() ?? '';
-          final roundId = int.tryParse(row['round_id'].toString()) ?? 0;
-          final scheduleId = int.tryParse(row['schedule_id'].toString()) ?? 0;
-
-          if (!matchesByMatchId.containsKey(matchId)) {
-            matchesByMatchId[matchId] = {
-              'match_id': matchId,
-              'schedule_id': scheduleId,
-              'round_id': roundId,
-              'schedule_start': scheduleStart,
-              'schedule_end': scheduleEnd,
-              'schedule': '${_fmt(scheduleStart)} - ${_fmt(scheduleEnd)}',
-              'arena1_teams': <Map<String, String>>[],
-              'arena2_teams': <Map<String, String>>[],
-            };
-          }
-
-          final match = matchesByMatchId[matchId]!;
-          final teamInfo = {
-            'team_id': teamId,
-            'team_name': teamName,
-          };
-
-          if (arenaNum == 1) {
-            (match['arena1_teams'] as List).add(teamInfo);
-          } else {
-            (match['arena2_teams'] as List).add(teamInfo);
-          }
-        }
-
-        var matchesList = matchesByMatchId.values.toList();
-
-        matchesList.sort((a, b) {
-          final aTime = a['schedule_start'] as String;
-          final bTime = b['schedule_start'] as String;
-          return aTime.compareTo(bTime);
-        });
-
-        for (int i = 0; i < matchesList.length; i++) {
-          matchesList[i]['matchNumber'] = i + 1;
-        }
-
-        scheduleByCategory[catId] = matchesList;
-      }
-
-      int? soccerCatId;
-      for (final cat in categories) {
-        final type = (cat['category_type'] ?? '').toString().toLowerCase();
-        if (type.contains('soccer')) {
-          soccerCatId = int.tryParse(cat['category_id'].toString());
-          break;
-        }
-      }
-
-      List<Map<String, dynamic>> soccerTeams = [];
-      String? lastSoccerEndTime;
-      if (soccerCatId != null) {
-        soccerTeams = await DBHelper.getTeamsByCategory(soccerCatId);
-        final soccerMatches = scheduleByCategory[soccerCatId] ?? [];
-        if (soccerMatches.isNotEmpty) {
-          final lastMatch = soccerMatches.last;
-          lastSoccerEndTime = lastMatch['schedule_end'] as String?;
-        }
-      }
-
-      final prevIdx = _tabController?.index ?? 0;
-      _tabController?.dispose();
-      _tabController = TabController(
-        length: categories.length,
-        vsync: this,
-        initialIndex: prevIdx.clamp(0, categories.length - 1),
-      );
-
+    if (categories.isEmpty) {
       setState(() {
-        _categories = categories;
-        _scheduleByCategory = scheduleByCategory;
-        _soccerCategoryId = soccerCatId;
-        _soccerTeams = soccerTeams;
-        _lastSoccerEndTime = lastSoccerEndTime;
+        _categories = [];
+        _scheduleByCategory = {};
         _isLoading = false;
         _lastUpdated = DateTime.now();
       });
-    } catch (e) {
-      print("Error loading schedule: $e");
-      setState(() => _isLoading = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('❌ Failed to load: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+      return;
+    }
+
+    final conn = await DBHelper.getConnection();
+
+    // Query that works for both Starter and Explorer
+    final result = await conn.execute("""
+      SELECT 
+        c.category_id, 
+        c.category_type,
+        ts.match_id, 
+        ts.round_id,
+        s.schedule_id,
+        s.schedule_start,
+        s.schedule_end,
+        ts.arena_number,
+        ts.status as match_status,
+        t.team_id,
+        t.team_name
+      FROM tbl_teamschedule ts
+      JOIN tbl_team t ON ts.team_id = t.team_id
+      JOIN tbl_category c ON t.category_id = c.category_id
+      JOIN tbl_match m ON ts.match_id = m.match_id
+      JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
+      ORDER BY c.category_id, s.schedule_start, ts.match_id, ts.arena_number
+    """);
+
+    final rows = result.rows.map((r) => r.assoc()).toList();
+    _lastDataSignature = _buildSignature(rows);
+
+    final Map<int, List<Map<String, dynamic>>> rowsByCategory = {};
+    for (final row in rows) {
+      final catId = int.tryParse(row['category_id'].toString()) ?? 0;
+      rowsByCategory.putIfAbsent(catId, () => []).add(row);
+    }
+
+    final Map<int, List<Map<String, dynamic>>> scheduleByCategory = {};
+
+    for (final cat in categories) {
+      final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
+      if (catId == 0) continue;
+
+      final catRows = rowsByCategory[catId] ?? [];
+
+      if (catRows.isEmpty) {
+        scheduleByCategory[catId] = [];
+        continue;
+      }
+
+      final Map<int, Map<String, dynamic>> matchesByMatchId = {};
+
+      for (final row in catRows) {
+        final matchId = int.tryParse(row['match_id'].toString()) ?? 0;
+        if (matchId == 0) continue;
+
+        final arenaNum = int.tryParse(row['arena_number']?.toString() ?? '1') ?? 1;
+        final teamId = row['team_id']?.toString() ?? '';
+        final teamName = row['team_name']?.toString() ?? '';
+        final scheduleStart = row['schedule_start']?.toString() ?? '';
+        final scheduleEnd = row['schedule_end']?.toString() ?? '';
+        final roundId = int.tryParse(row['round_id'].toString()) ?? 0;
+        final scheduleId = int.tryParse(row['schedule_id'].toString()) ?? 0;
+        final matchStatus = row['match_status']?.toString() ?? 'pending';
+
+        if (!matchesByMatchId.containsKey(matchId)) {
+          matchesByMatchId[matchId] = {
+            'match_id': matchId,
+            'schedule_id': scheduleId,
+            'round_id': roundId,
+            'schedule_start': scheduleStart,
+            'schedule_end': scheduleEnd,
+            'schedule': '${_fmt(scheduleStart)} - ${_fmt(scheduleEnd)}',
+            'arena1_teams': <Map<String, String>>[],
+            'arena2_teams': <Map<String, String>>[],
+            'status': matchStatus,
+          };
+        }
+
+        final match = matchesByMatchId[matchId]!;
+        final teamInfo = {
+          'team_id': teamId,
+          'team_name': teamName,
+        };
+
+        if (arenaNum == 1) {
+          (match['arena1_teams'] as List).add(teamInfo);
+        } else {
+          (match['arena2_teams'] as List).add(teamInfo);
+        }
+      }
+
+      var matchesList = matchesByMatchId.values.toList();
+
+      matchesList.sort((a, b) {
+        final aTime = a['schedule_start'] as String;
+        final bTime = b['schedule_start'] as String;
+        return aTime.compareTo(bTime);
+      });
+
+      for (int i = 0; i < matchesList.length; i++) {
+        matchesList[i]['matchNumber'] = i + 1;
+        
+        // Update status map from database
+        final matchStatus = matchesList[i]['status'] as String? ?? 'pending';
+        MatchStatus statusEnum;
+        if (matchStatus == 'completed') {
+          statusEnum = MatchStatus.done;
+        } else if (matchStatus == 'in_progress') {
+          statusEnum = MatchStatus.inProgress;
+        } else {
+          statusEnum = MatchStatus.pending;
+        }
+        _statusMap[_statusKey(catId, i + 1)] = statusEnum;
+      }
+
+      scheduleByCategory[catId] = matchesList;
+    }
+
+    // Check for Soccer category
+    int? soccerCatId;
+    for (final cat in categories) {
+      final type = (cat['category_type'] ?? '').toString().toLowerCase();
+      if (type.contains('soccer')) {
+        soccerCatId = int.tryParse(cat['category_id'].toString());
+        break;
       }
     }
+
+    List<Map<String, dynamic>> soccerTeams = [];
+    String? lastSoccerEndTime;
+    if (soccerCatId != null) {
+      soccerTeams = await DBHelper.getTeamsByCategory(soccerCatId);
+      final soccerMatches = scheduleByCategory[soccerCatId] ?? [];
+      if (soccerMatches.isNotEmpty) {
+        final lastMatch = soccerMatches.last;
+        lastSoccerEndTime = lastMatch['schedule_end'] as String?;
+      }
+    }
+
+    final prevIdx = _tabController?.index ?? 0;
+    _tabController?.dispose();
+    _tabController = TabController(
+      length: categories.length,
+      vsync: this,
+      initialIndex: prevIdx.clamp(0, categories.length - 1),
+    );
+
+    setState(() {
+      _categories = categories;
+      _scheduleByCategory = scheduleByCategory;
+      _soccerCategoryId = soccerCatId;
+      _soccerTeams = soccerTeams;
+      _lastSoccerEndTime = lastSoccerEndTime;
+      _isLoading = false;
+      _lastUpdated = DateTime.now();
+    });
+    
+    print("✅ Schedule data loaded successfully");
+    
+  } catch (e, stackTrace) {
+    print("❌ Error loading schedule: $e");
+    print(stackTrace);
+    setState(() => _isLoading = false);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Failed to load: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
   }
+}
 
   int _bracketSize(int teamCount) {
     if (teamCount >= 16) return 16;

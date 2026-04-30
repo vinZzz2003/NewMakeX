@@ -79,9 +79,30 @@ class DBHelper {
   }
 }
 
-// Mirror scores to category-specific table
 static Future<void> mirrorScoresToCategoryTable(int categoryId) async {
   final conn = await getConnection();
+  
+  // Get the category type to determine which source table to use
+  final catResult = await conn.execute(
+    "SELECT category_type FROM tbl_category WHERE category_id = :catId LIMIT 1",
+    {"catId": categoryId},
+  );
+  final categoryType = catResult.rows.isNotEmpty 
+      ? catResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
+      : '';
+  final bool isExplorer = categoryType.contains('explorer');
+  final bool isStarter = categoryType.contains('starter');
+  
+  // Determine the CORRECT source table based on category type
+  String sourceTable;
+  if (isExplorer) {
+    sourceTable = 'tbl_explorer_score';
+  } else if (isStarter) {
+    sourceTable = 'tbl_starter_score';
+  } else {
+    sourceTable = 'tbl_score';
+  }
+  
   final targetTable = _getCategorySpecificTable(categoryId, 'tbl_score');
   
   try {
@@ -105,7 +126,7 @@ static Future<void> mirrorScoresToCategoryTable(int categoryId) async {
       );
     }
     
-    // Copy scores from main table for each team
+    // Copy scores from the CORRECT source table
     for (final teamId in teamIds) {
       await conn.execute("""
         INSERT INTO $targetTable 
@@ -116,12 +137,12 @@ static Future<void> mirrorScoresToCategoryTable(int categoryId) async {
           score_id, score_independentscore, score_violation, score_totalscore,
           score_totalduration, score_isapproved, match_id, round_id, team_id,
           referee_id, score_individual, score_alliance, created_at, updated_at
-        FROM tbl_score
+        FROM $sourceTable
         WHERE team_id = :teamId
       """, {"teamId": teamId});
     }
     
-    print("✅ Mirrored scores to $targetTable for category $categoryId");
+    print("✅ Mirrored scores from $sourceTable to $targetTable for category $categoryId");
     
   } catch (e) {
     print("❌ Error mirroring scores: $e");
@@ -520,21 +541,36 @@ static Future<void> _ensureCategoryScoreTableExists(MySQLConnection conn, String
   print("🔄 Mirroring all data for category $categoryId...");
   
   try {
-    // CRITICAL: Mirror in correct order to satisfy foreign key constraints
     await mirrorCategorySettingsToCategoryTable(categoryId);
     await mirrorAllianceSelectionsToCategoryTable(categoryId);
     await mirrorChampionshipSettingsToCategoryTable(categoryId);
     await mirrorDoubleEliminationToCategoryTable(categoryId);
     await mirrorChampionshipScheduleToCategoryTable(categoryId);
     
-    // ✅ FIXED: For Starter category, skip mirroring Best-of-3 to avoid overwriting preserved starter scores
+    // SKIP mirroring Best-of-3 for Starter to preserve existing scores
     if (categoryId == 1) {
-      print("⚠️ Skipping Best-of-3 mirroring for Starter category $categoryId to preserve existing scores");
+      print("⚠️ Skipping Best-of-3 mirroring for Starter category $categoryId");
     } else {
       await mirrorBestOf3ToCategoryTable(categoryId);
     }
     
-    await mirrorScoresToCategoryTable(categoryId);
+    // IMPORTANT: Only mirror scores if they don't already exist in target
+    // Or better, don't mirror at all for Explorer since scores are already in the right place
+    final conn = await getConnection();
+    final catResult = await conn.execute(
+      "SELECT category_type FROM tbl_category WHERE category_id = :catId LIMIT 1",
+      {"catId": categoryId},
+    );
+    final categoryType = catResult.rows.isNotEmpty 
+        ? catResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
+        : '';
+    final bool isExplorer = categoryType.contains('explorer');
+    
+    if (!isExplorer) {
+      await mirrorScoresToCategoryTable(categoryId);
+    } else {
+      print("⚠️ Skipping score mirroring for Explorer category $categoryId to preserve existing scores");
+    }
     
     print("✅ Successfully mirrored all data for category $categoryId");
     
@@ -734,6 +770,86 @@ static Future<void> _ensureCategoryScoreTableExists(MySQLConnection conn, String
   } catch (_) {
     print("ℹ️  Migration: arena_number already present.");
   }
+
+
+// ============================================================
+// ADD STATUS COLUMN TO STARTER TEAMSCHEDULE TABLE
+// ============================================================
+try {
+  // Check if column exists first
+  final checkStarter = await conn.execute("""
+    SELECT COUNT(*) as cnt 
+    FROM information_schema.COLUMNS 
+    WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'tbl_starter_teamschedule' 
+      AND COLUMN_NAME = 'status'
+  """);
+  final hasStarterColumn = int.parse(checkStarter.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
+  
+  if (!hasStarterColumn) {
+    await conn.execute("""
+      ALTER TABLE tbl_starter_teamschedule 
+      ADD COLUMN status VARCHAR(20) DEFAULT 'pending'
+    """);
+    print("✅ Added status column to tbl_starter_teamschedule");
+  } else {
+    print("ℹ️ status column already exists in tbl_starter_teamschedule");
+  }
+} catch (e) {
+  print("⚠️ Could not add status to tbl_starter_teamschedule: $e");
+}
+
+// ============================================================
+// ADD STATUS COLUMN TO EXPLORER TEAMSCHEDULE TABLE
+// ============================================================
+try {
+  final checkExplorer = await conn.execute("""
+    SELECT COUNT(*) as cnt 
+    FROM information_schema.COLUMNS 
+    WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'tbl_explorer_teamschedule' 
+      AND COLUMN_NAME = 'status'
+  """);
+  final hasExplorerColumn = int.parse(checkExplorer.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
+  
+  if (!hasExplorerColumn) {
+    await conn.execute("""
+      ALTER TABLE tbl_explorer_teamschedule 
+      ADD COLUMN status VARCHAR(20) DEFAULT 'pending'
+    """);
+    print("✅ Added status column to tbl_explorer_teamschedule");
+  } else {
+    print("ℹ️ status column already exists in tbl_explorer_teamschedule");
+  }
+} catch (e) {
+  print("⚠️ Could not add status to tbl_explorer_teamschedule: $e");
+}
+
+// ============================================================
+// ADD STATUS COLUMN TO TBL_MATCH
+// ============================================================
+try {
+  final checkMatch = await conn.execute("""
+    SELECT COUNT(*) as cnt 
+    FROM information_schema.COLUMNS 
+    WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'tbl_match' 
+      AND COLUMN_NAME = 'status'
+  """);
+  final hasMatchColumn = int.parse(checkMatch.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
+  
+  if (!hasMatchColumn) {
+    await conn.execute("""
+      ALTER TABLE tbl_match 
+      ADD COLUMN status VARCHAR(20) DEFAULT 'pending'
+    """);
+    print("✅ Added status column to tbl_match");
+  } else {
+    print("ℹ️ status column already exists in tbl_match");
+  }
+} catch (e) {
+  print("⚠️ Could not add status to tbl_match: $e");
+}
 
   try {
     await conn.execute("""
@@ -3542,7 +3658,9 @@ static Future<dynamic> executeDual(
     return rows;
   }
 
-  static Future<void> upsertScore({
+  // In db_helper.dart, modify the upsertScore method (around line 1800-1900)
+
+static Future<void> upsertScore({
   required int teamId,
   required int roundId,
   required int matchId,
@@ -3560,10 +3678,6 @@ static Future<dynamic> executeDual(
   print("   teamId: $teamId");
   print("   roundId: $roundId");
   print("   matchId: $matchId");
-  print("   independentScore: $independentScore");
-  print("   allianceScore: $allianceScore");
-  print("   violation: $violation");
-  print("   totalScore: $totalScore");
 
   // Get category ID for this team
   int? categoryId;
@@ -3647,312 +3761,435 @@ static Future<dynamic> executeDual(
 
   print("✅ Score saved successfully for team $teamId, round $roundId");
   
+  // ============================================================
+  // ADD THIS: Auto-complete match if both teams have scores
+  // ============================================================
+  if (matchId > 0) {
+    await autoCompleteMatchIfBothScored(
+      matchId: matchId,
+      roundId: roundId,
+      teamId: teamId,
+    );
+  }
+  
   // AFTER saving to tbl_score, mirror to category-specific table
   if (categoryId != null) {
     await mirrorScoresToCategorySpecificTable(categoryId);
   }
 }
 
-  static Future<void> propagateAllianceScoreForMatch({
-    required int matchId,
-    required int roundId,
-    required int sourceTeamId,
-    required int allianceScore,
-  }) async {
-    print("\n🔍🔍🔍 PROPAGATE CALLED 🔍🔍🔍");
-    print("   matchId: $matchId");
-    print("   roundId: $roundId");
-    print("   sourceTeamId: $sourceTeamId");
-    print("   allianceScore: $allianceScore");
-
-    if (matchId <= 0) {
-      print("❌ Cannot propagate: matchId is $matchId (invalid)");
+static Future<void> autoCompleteMatchIfBothScored({
+  required int matchId,
+  required int roundId,
+  required int teamId,
+}) async {
+  final conn = await getConnection();
+  
+  try {
+    print("🔍🔍🔍 AUTO-COMPLETE CHECK: matchId=$matchId, roundId=$roundId, teamId=$teamId");
+    
+    // Get category for this match
+    final categoryResult = await conn.execute("""
+      SELECT c.category_id, c.category_type 
+      FROM tbl_team t
+      JOIN tbl_category c ON t.category_id = c.category_id
+      WHERE t.team_id = :teamId
+      LIMIT 1
+    """, {"teamId": teamId});
+    
+    if (categoryResult.rows.isEmpty) {
+      print("❌ Could not determine category for team $teamId");
       return;
     }
-
-    final conn = await getConnection();
-
-    try {
-      // First, let's check what teams are in this match
-      print("\n📋 STEP 1: Getting all teams in match $matchId, round $roundId");
-      final allTeamsRes = await conn.execute(
-        """
-      SELECT 
-        ts.team_id,
-        t.team_name,
-        ts.arena_number,
-        ts.round_id
-      FROM tbl_teamschedule ts
-      JOIN tbl_team t ON ts.team_id = t.team_id
-      WHERE ts.match_id = :matchId AND ts.round_id = :roundId
-      ORDER BY ts.arena_number, ts.team_id
-    """,
-        {"matchId": matchId, "roundId": roundId},
-      );
-
-      final allTeams = allTeamsRes.rows.map((r) => r.assoc()).toList();
-
-      if (allTeams.isEmpty) {
-        print("❌ No teams found in match $matchId, round $roundId");
-        return;
-      }
-
-      print("✅ Found ${allTeams.length} total teams in match:");
-      for (final team in allTeams) {
-        print(
-          "   - Team ${team['team_id']} (${team['team_name']}), Arena ${team['arena_number']}",
-        );
-      }
-
-      // Determine if this is a 1v1 or 2v2 match based on number of teams
-      final bool isOneVsOne = allTeams.length == 2;
-      print("\n📋 Match type: ${isOneVsOne ? '1v1' : '2v2'}");
-
-      // Group by arena
-      final Map<int, List<Map<String, dynamic>>> teamsByArena = {};
-      for (final team in allTeams) {
-        final arena = int.parse(team['arena_number'].toString());
-        teamsByArena.putIfAbsent(arena, () => []).add(team);
-      }
-
-      print("\n📋 Teams by arena:");
-      for (final entry in teamsByArena.entries) {
-        print("  Arena ${entry.key}:");
-        for (final team in entry.value) {
-          print("    - Team ${team['team_id']} (${team['team_name']})");
-        }
-      }
-
-      // Find which arena the source team is in
-      int? sourceArena;
-      Map<String, dynamic>? sourceTeam;
-      for (final arenaEntry in teamsByArena.entries) {
-        for (final team in arenaEntry.value) {
-          if (int.parse(team['team_id'].toString()) == sourceTeamId) {
-            sourceArena = arenaEntry.key;
-            sourceTeam = team;
-            break;
-          }
-        }
-        if (sourceArena != null) break;
-      }
-
-      if (sourceArena == null) {
-        print("❌ Could not find source team $sourceTeamId in any arena");
-        return;
-      }
-
-      print(
-        "\n✅ Source team found: ${sourceTeam!['team_name']} in Arena $sourceArena",
-      );
-
-      // IMPORTANT FIX: For 1v1 matches, the partner is in the OTHER arena
-      // For 2v2 matches, partners are in the SAME arena
-      List<int> targetTeamIds = [];
-
-      if (isOneVsOne) {
-        // 1v1 match: Partner is the opponent in the other arena
-        print("\n🔄 1v1 match detected - sharing with opponent");
-        final opponentArena = sourceArena == 1 ? 2 : 1;
-        final opponentTeams = teamsByArena[opponentArena] ?? [];
-
-        for (final opponent in opponentTeams) {
-          targetTeamIds.add(int.parse(opponent['team_id'].toString()));
-        }
-        print("   Target opponent teams: $targetTeamIds");
-      } else {
-        // 2v2 match: Partners are teammates in the same arena (excluding self)
-        print("\n🔄 2v2 match detected - sharing with teammates");
-        final partnerTeams =
-            teamsByArena[sourceArena]?.where((team) {
-              return int.parse(team['team_id'].toString()) != sourceTeamId;
-            }).toList() ??
-            [];
-
-        for (final partner in partnerTeams) {
-          targetTeamIds.add(int.parse(partner['team_id'].toString()));
-        }
-        print("   Target partner teams: $targetTeamIds");
-      }
-
-      // Propagate to all target teams using the SAME roundId
-      for (final targetTeamId in targetTeamIds) {
-        print("\n🔄 Propagating to team $targetTeamId for round $roundId");
-        await _updateTeamScore(
-          conn,
-          targetTeamId,
-          roundId,
-          matchId,
-          allianceScore,
-        );
-      }
-
-      // Verify the updates worked
-      print("\n📋 STEP 3: Verifying updates...");
-      for (final team in allTeams) {
-        final teamId = int.parse(team['team_id'].toString());
-        final verifyResult = await conn.execute(
-          """
-        SELECT score_alliance, score_totalscore
-        FROM tbl_score
-        WHERE team_id = :teamId AND round_id = :roundId
-      """,
-          {"teamId": teamId, "roundId": roundId},
-        );
-
-        if (verifyResult.rows.isNotEmpty) {
-          final data = verifyResult.rows.first.assoc();
-          print(
-            "   Team ${team['team_name']}: ALL=${data['score_alliance']}, TOTAL=${data['score_totalscore']}",
-          );
-        } else {
-          print("   Team ${team['team_name']}: No score record found!");
-        }
-      }
-
-      print("\n✅✅✅ Propagation complete for match $matchId ✅✅✅");
-    } catch (e, stackTrace) {
-      print('❌ Error in propagateAllianceScoreForMatch: $e');
-      print(stackTrace);
+    
+    final categoryId = int.parse(categoryResult.rows.first.assoc()['category_id'].toString());
+    final categoryType = categoryResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? '';
+    final bool isStarter = categoryType.contains('starter');
+    final String teamScheduleTable = isStarter ? 'tbl_starter_teamschedule' : 'tbl_explorer_teamschedule';
+    
+    print("📋 Category: ${isStarter ? 'STARTER' : 'EXPLORER'}, Table: $teamScheduleTable");
+    
+    // Get ALL teams in this match for this round
+    final teamsResult = await conn.execute("""
+      SELECT team_id FROM $teamScheduleTable
+      WHERE match_id = :matchId AND round_id = :roundId
+    """, {
+      "matchId": matchId,
+      "roundId": roundId,
+    });
+    
+    final teamIds = teamsResult.rows.map((r) => 
+      int.parse(r.assoc()['team_id'].toString())
+    ).toList();
+    
+    print("📋 Teams in match $matchId (from $teamScheduleTable): $teamIds");
+    
+    // For Explorer, we need 4 teams (2 in RED + 2 in BLUE)
+    // For Starter, we need 2 teams
+    final int requiredTeamCount = isStarter ? 2 : 4;
+    
+    if (teamIds.length < requiredTeamCount) {
+      print("⚠️ Match $matchId has only ${teamIds.length} teams, need $requiredTeamCount for ${isStarter ? 'Starter' : 'Explorer'}");
+      return;
     }
+    
+    // Check if each team has a score entry for this round
+    // IMPORTANT: Use the correct match_id and round_id
+    bool allTeamsScored = true;
+    final List<int> teamsWithScores = [];
+    final List<int> teamsWithoutScores = [];
+    
+    for (final tid in teamIds) {
+      final scoreCheck = await conn.execute("""
+        SELECT COUNT(*) as cnt, score_totalscore 
+        FROM tbl_score
+        WHERE match_id = :matchId AND round_id = :roundId AND team_id = :teamId
+      """, {
+        "matchId": matchId,
+        "roundId": roundId,
+        "teamId": tid,
+      });
+      
+      final count = int.parse(scoreCheck.rows.first.assoc()['cnt']?.toString() ?? '0');
+      final score = int.parse(scoreCheck.rows.first.assoc()['score_totalscore']?.toString() ?? '0');
+      
+      if (count == 0) {
+        allTeamsScored = false;
+        teamsWithoutScores.add(tid);
+        print("   ❌ Team $tid has NO score yet");
+      } else {
+        teamsWithScores.add(tid);
+        print("   ✅ Team $tid has score: $score");
+      }
+    }
+    
+    print("📊 Summary: ${teamsWithScores.length}/$requiredTeamCount teams have scores");
+    print("   Teams with scores: $teamsWithScores");
+    print("   Teams without scores: $teamsWithoutScores");
+    
+    // If all teams have scores, mark the match as completed
+    if (allTeamsScored) {
+      print("🎉 ALL $requiredTeamCount TEAMS HAVE SCORES! Auto-completing match $matchId");
+      
+      // Update the appropriate team schedule table
+      await executeDual("""
+        UPDATE $teamScheduleTable 
+        SET status = 'completed'
+        WHERE match_id = :matchId AND round_id = :roundId
+      """, {"matchId": matchId, "roundId": roundId});
+      
+      // Also update the main match table
+      await executeDual("""
+        UPDATE tbl_match 
+        SET status = 'completed'
+        WHERE match_id = :matchId
+      """, {"matchId": matchId});
+      
+      // Update the main teamschedule table if it exists
+      try {
+        await executeDual("""
+          UPDATE tbl_teamschedule 
+          SET status = 'completed'
+          WHERE match_id = :matchId AND round_id = :roundId
+        """, {"matchId": matchId, "roundId": roundId});
+      } catch (e) {
+        print("⚠️ Could not update tbl_teamschedule: $e");
+      }
+      
+      // Verify the update worked
+      final verifyResult = await conn.execute("""
+        SELECT status FROM $teamScheduleTable
+        WHERE match_id = :matchId AND round_id = :roundId
+        LIMIT 1
+      """, {"matchId": matchId, "roundId": roundId});
+      
+      if (verifyResult.rows.isNotEmpty) {
+        final newStatus = verifyResult.rows.first.assoc()['status']?.toString();
+        print("📋 VERIFICATION: Status after update = $newStatus");
+      }
+      
+      // Emit bracket update to refresh UI
+      try {
+        bracketUpdateController.add(categoryId);
+      } catch (_) {}
+      
+      print("✅✅✅ Match $matchId marked as completed in $teamScheduleTable");
+      
+    } else {
+      print("⏳ Waiting for ${teamsWithoutScores.length} more team(s) to enter scores: $teamsWithoutScores");
+    }
+    
+  } catch (e, stackTrace) {
+    print("❌ Error auto-completing match: $e");
+    print(stackTrace);
   }
+}
+
+static Future<void> propagateAllianceScoreForMatch({
+  required int matchId,
+  required int roundId,
+  required int sourceTeamId,
+  required int allianceScore,
+}) async {
+  print("\n🔍🔍🔍 PROPAGATE CALLED 🔍🔍🔍");
+  print("   matchId: $matchId");
+  print("   roundId: $roundId");
+  print("   sourceTeamId: $sourceTeamId");
+  print("   allianceScore: $allianceScore (delta to add)");
+
+  if (matchId <= 0) {
+    print("❌ Cannot propagate: matchId is $matchId (invalid)");
+    return;
+  }
+
+  final conn = await getConnection();
+
+  try {
+    // STEP 1: Get all teams in this match (there should be 2 for Starter)
+    final teamsResult = await conn.execute("""
+      SELECT team_id FROM tbl_teamschedule
+      WHERE match_id = :matchId AND round_id = :roundId
+    """, {
+      "matchId": matchId,
+      "roundId": roundId,
+    });
+    
+    final teamIds = teamsResult.rows.map((r) => 
+      int.parse(r.assoc()['team_id'].toString())
+    ).toList();
+    
+    print("📋 Teams in match $matchId: $teamIds");
+    
+    if (teamIds.length != 2) {
+      print("⚠️ Expected 2 teams, found ${teamIds.length}");
+      return;
+    }
+    
+    // STEP 2: Find the opponent (the team that is NOT the source)
+    final opponentId = teamIds.firstWhere(
+      (id) => id != sourceTeamId,
+      orElse: () => 0,
+    );
+    
+    if (opponentId == 0) {
+      print("❌ Could not find opponent for source team $sourceTeamId");
+      return;
+    }
+    
+    print("🎯 Found opponent: $opponentId");
+    
+    // STEP 3: Get opponent's current score for this round
+    final currentResult = await conn.execute("""
+      SELECT score_alliance, score_totalscore, score_individual, score_violation
+      FROM tbl_score
+      WHERE team_id = :teamId AND round_id = :roundId
+      LIMIT 1
+    """, {
+      "teamId": opponentId,
+      "roundId": roundId,
+    });
+    
+    int currentAlliance = 0;
+    int currentIndividual = 0;
+    int currentViolation = 0;
+    int currentTotal = 0;
+    
+    if (currentResult.rows.isNotEmpty) {
+      final data = currentResult.rows.first.assoc();
+      currentAlliance = int.tryParse(data['score_alliance']?.toString() ?? '0') ?? 0;
+      currentIndividual = int.tryParse(data['score_individual']?.toString() ?? '0') ?? 0;
+      currentViolation = int.tryParse(data['score_violation']?.toString() ?? '0') ?? 0;
+      currentTotal = int.tryParse(data['score_totalscore']?.toString() ?? '0') ?? 0;
+    }
+    
+    // Calculate new values
+    final newAlliance = currentAlliance + allianceScore;
+    // For Starter: Total = Individual + Alliance - Violation
+    final newTotal = currentIndividual + newAlliance - currentViolation;
+    
+    print("   Opponent current: ALL=$currentAlliance, TOTAL=$currentTotal");
+    print("   Opponent new: ALL=$newAlliance, TOTAL=$newTotal");
+    
+    // STEP 4: Update opponent's score
+    if (currentResult.rows.isEmpty) {
+      // Insert new score for opponent
+      await executeDual("""
+        INSERT INTO tbl_score 
+          (team_id, round_id, match_id, score_individual, score_alliance, 
+           score_violation, score_totalscore, score_totalduration)
+        VALUES
+          (:teamId, :roundId, :matchId, 0, :alliance, 0, :total, '00:00')
+      """, {
+        "teamId": opponentId,
+        "roundId": roundId,
+        "matchId": matchId,
+        "alliance": newAlliance,
+        "total": newTotal,
+      });
+      print("✅ Created new score for opponent $opponentId");
+    } else {
+      // Update existing score
+      await executeDual("""
+        UPDATE tbl_score 
+        SET score_alliance = :alliance,
+            score_totalscore = :total
+        WHERE team_id = :teamId AND round_id = :roundId
+      """, {
+        "alliance": newAlliance,
+        "total": newTotal,
+        "teamId": opponentId,
+        "roundId": roundId,
+      });
+      print("✅ Updated opponent $opponentId: ALL=$newAlliance, TOTAL=$newTotal");
+    }
+    
+    // STEP 5: Check if match is now complete (both teams have scores)
+    await autoCompleteMatchIfBothScored(
+      matchId: matchId,
+      roundId: roundId,
+      teamId: sourceTeamId,
+    );
+    
+  } catch (e, stackTrace) {
+    print('❌ Error in propagateAllianceScoreForMatch: $e');
+    print(stackTrace);
+  }
+}
 
   static Future<void> propagateExplorerScoreForMatch({
-    required int matchId,
-    required int roundId,
-    required int sourceTeamId,
-    required int allianceDelta,
-    required int violationDelta,
-  }) async {
-    final conn = await getConnection();
+  required int matchId,
+  required int roundId,
+  required int sourceTeamId,
+  required int allianceDelta,
+  required int violationDelta,
+}) async {
+  final conn = await getConnection();
     
-    try {
-      print("🔍 EXPLORER PROPAGATION: matchId=$matchId, roundId=$roundId, sourceTeam=$sourceTeamId");
-      print("   allianceDelta=$allianceDelta, violationDelta=$violationDelta");
-      
-      // First, get the source team's arena
-      final sourceArenaResult = await conn.execute(
-        """
-        SELECT arena_number FROM tbl_teamschedule
-        WHERE match_id = :matchId AND team_id = :sourceTeamId AND round_id = :roundId
-        LIMIT 1
-        """,
-        {"matchId": matchId, "sourceTeamId": sourceTeamId, "roundId": roundId},
-      );
-      
-      if (sourceArenaResult.rows.isEmpty) {
-        print("❌ Source team not found in match");
-        return;
-      }
-      
-      final sourceArena = int.parse(sourceArenaResult.rows.first.assoc()['arena_number'].toString());
-      print("   Source arena: $sourceArena");
-      
-      // Find partner in the same arena
-      final partnerResult = await conn.execute(
-        """
-        SELECT team_id FROM tbl_teamschedule
-        WHERE match_id = :matchId 
-          AND arena_number = :arenaNumber 
-          AND round_id = :roundId 
-          AND team_id != :sourceTeamId
-        LIMIT 1
-        """,
-        {
-          "matchId": matchId,
-          "arenaNumber": sourceArena,
-          "roundId": roundId,
-          "sourceTeamId": sourceTeamId,
-        },
-      );
-      
-      if (partnerResult.rows.isEmpty) {
-        print("❌ No partner found in arena $sourceArena");
-        return;
-      }
-      
-      final partnerTeamId = int.parse(partnerResult.rows.first.assoc()['team_id'].toString());
-      print("   Partner team: $partnerTeamId");
-      
-      // Get partner's current scores
-      final partnerScoreResult = await conn.execute(
-        """
-        SELECT score_alliance, score_violation, score_individual, score_totalscore
-        FROM tbl_score
-        WHERE team_id = :partnerTeamId AND round_id = :roundId
-        LIMIT 1
-        """,
-        {"partnerTeamId": partnerTeamId, "roundId": roundId},
-      );
-      
-      int currentAlliance = 0;
-      int currentViolation = 0;
-      int currentIndividual = 0;
-      int currentTotal = 0;
-      
-      if (partnerScoreResult.rows.isNotEmpty) {
-        final data = partnerScoreResult.rows.first.assoc();
-        currentAlliance = int.tryParse(data['score_alliance']?.toString() ?? '0') ?? 0;
-        currentViolation = int.tryParse(data['score_violation']?.toString() ?? '0') ?? 0;
-        currentIndividual = int.tryParse(data['score_individual']?.toString() ?? '0') ?? 0;
-        currentTotal = int.tryParse(data['score_totalscore']?.toString() ?? '0') ?? 0;
-      }
-      
-      // Calculate new values
-      final newAlliance = currentAlliance + allianceDelta;
-      final newViolation = currentViolation + violationDelta;
-      final newIndividual = newAlliance - newViolation;
-      final newTotal = newIndividual;
-      
-      print("   Partner current: ALL=$currentAlliance, VIO=$currentViolation, IND=$currentIndividual, TOTAL=$currentTotal");
-      print("   Partner new: ALL=$newAlliance, VIO=$newViolation, IND=$newIndividual, TOTAL=$newTotal");
-      
-      // Update partner's scores
-      if (partnerScoreResult.rows.isEmpty) {
-        await executeDual(
-          """
-          INSERT INTO tbl_score 
-            (team_id, round_id, score_alliance, score_violation, score_individual, score_totalscore, score_totalduration)
-          VALUES
-            (:teamId, :roundId, :alliance, :violation, :individual, :total, '00:00')
-          """,
-          {
-            "teamId": partnerTeamId,
-            "roundId": roundId,
-            "alliance": newAlliance,
-            "violation": newViolation,
-            "individual": newIndividual,
-            "total": newTotal,
-          },
-        );
-      } else {
-        await executeDual(
-          """
-          UPDATE tbl_score 
-          SET score_alliance = :alliance,
-              score_violation = :violation,
-              score_individual = :individual,
-              score_totalscore = :total
-          WHERE team_id = :teamId AND round_id = :roundId
-          """,
-          {
-            "alliance": newAlliance,
-            "violation": newViolation,
-            "individual": newIndividual,
-            "total": newTotal,
-            "teamId": partnerTeamId,
-            "roundId": roundId,
-          },
-        );
-      }
-      
-      print("✅ Propagated Explorer scores to partner $partnerTeamId");
-      
-    } catch (e) {
-      print("❌ Error in propagateExplorerScoreForMatch: $e");
-      rethrow;
+  try {
+    print("🔍 EXPLORER PROPAGATION (Partner Only): matchId=$matchId, roundId=$roundId, sourceTeam=$sourceTeamId");
+    print("   allianceDelta=$allianceDelta, violationDelta=$violationDelta");
+    
+    // First, get the source team's arena number from explorer table
+    final sourceArenaResult = await conn.execute("""
+      SELECT arena_number FROM tbl_explorer_teamschedule
+      WHERE match_id = :matchId AND team_id = :sourceTeamId AND round_id = :roundId
+      LIMIT 1
+    """, {"matchId": matchId, "sourceTeamId": sourceTeamId, "roundId": roundId});
+    
+    if (sourceArenaResult.rows.isEmpty) {
+      print("❌ Source team not found in explorer teamschedule");
+      return;
     }
+    
+    final sourceArena = int.parse(sourceArenaResult.rows.first.assoc()['arena_number'].toString());
+    print("   Source arena: $sourceArena");
+    
+    // Find PARTNER in the SAME arena (teammate, NOT opponent)
+    final partnerResult = await conn.execute("""
+      SELECT team_id FROM tbl_explorer_teamschedule
+      WHERE match_id = :matchId 
+        AND arena_number = :arenaNumber 
+        AND round_id = :roundId 
+        AND team_id != :sourceTeamId
+      LIMIT 1
+    """, {
+      "matchId": matchId,
+      "arenaNumber": sourceArena,
+      "roundId": roundId,
+      "sourceTeamId": sourceTeamId,
+    });
+    
+    if (partnerResult.rows.isEmpty) {
+      print("❌ No partner found in arena $sourceArena (this is correct for 1v1 but Explorer should have 2 per arena)");
+      return;
+    }
+    
+    final partnerTeamId = int.parse(partnerResult.rows.first.assoc()['team_id'].toString());
+    print("   Partner team (teammate): $partnerTeamId");
+    
+    // Get partner's current scores
+    final partnerScoreResult = await conn.execute("""
+      SELECT score_alliance, score_violation, score_individual, score_totalscore
+      FROM tbl_score
+      WHERE team_id = :partnerTeamId AND round_id = :roundId
+      LIMIT 1
+    """, {"partnerTeamId": partnerTeamId, "roundId": roundId});
+    
+    int currentAlliance = 0;
+    int currentViolation = 0;
+    int currentIndividual = 0;
+    int currentTotal = 0;
+    
+    if (partnerScoreResult.rows.isNotEmpty) {
+      final data = partnerScoreResult.rows.first.assoc();
+      currentAlliance = int.tryParse(data['score_alliance']?.toString() ?? '0') ?? 0;
+      currentViolation = int.tryParse(data['score_violation']?.toString() ?? '0') ?? 0;
+      currentIndividual = int.tryParse(data['score_individual']?.toString() ?? '0') ?? 0;
+      currentTotal = int.tryParse(data['score_totalscore']?.toString() ?? '0') ?? 0;
+    }
+    
+    // Calculate new values - ONLY update partner's alliance and violation
+    final newAlliance = currentAlliance + allianceDelta;
+    final newViolation = currentViolation + violationDelta;
+    final newIndividual = newAlliance - newViolation;
+    final newTotal = newIndividual;
+    
+    print("   Partner current: ALL=$currentAlliance, VIO=$currentViolation, IND=$currentIndividual, TOTAL=$currentTotal");
+    print("   Partner new: ALL=$newAlliance, VIO=$newViolation, IND=$newIndividual, TOTAL=$newTotal");
+    
+    // Update partner's scores (ONLY the partner, NOT the opponent)
+    if (partnerScoreResult.rows.isEmpty) {
+      await executeDual("""
+        INSERT INTO tbl_score 
+          (team_id, round_id, match_id, score_alliance, score_violation, score_individual, score_totalscore, score_totalduration)
+        VALUES
+          (:teamId, :roundId, :matchId, :alliance, :violation, :individual, :total, '00:00')
+      """, {
+        "teamId": partnerTeamId,
+        "roundId": roundId,
+        "matchId": matchId,
+        "alliance": newAlliance,
+        "violation": newViolation,
+        "individual": newIndividual,
+        "total": newTotal,
+      });
+      print("✅ Created new score for partner $partnerTeamId");
+    } else {
+      await executeDual("""
+        UPDATE tbl_score 
+        SET score_alliance = :alliance,
+            score_violation = :violation,
+            score_individual = :individual,
+            score_totalscore = :total
+        WHERE team_id = :teamId AND round_id = :roundId
+      """, {
+        "alliance": newAlliance,
+        "violation": newViolation,
+        "individual": newIndividual,
+        "total": newTotal,
+        "teamId": partnerTeamId,
+        "roundId": roundId,
+      });
+      print("✅ Updated partner $partnerTeamId: ALL=$newAlliance, VIO=$newViolation, IND=$newIndividual, TOTAL=$newTotal");
+    }
+    
+    // CRITICAL: DO NOT propagate to opponent
+    // Opponent's scores should only be updated when THEY enter their own scores
+    
+    // After updating partner, check if ALL 4 teams in this match now have scores
+    await autoCompleteMatchIfBothScored(
+      matchId: matchId,
+      roundId: roundId,
+      teamId: sourceTeamId,
+    );
+    
+    print("✅ Explorer propagation complete - only partner updated");
+    
+  } catch (e) {
+    print("❌ Error in propagateExplorerScoreForMatch: $e");
+    rethrow;
   }
+}
 
   // Helper method to update a team's score
   static Future<void> _updateTeamScore(

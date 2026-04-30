@@ -755,51 +755,77 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
   }
 
   Widget _buildLeftPanel() {
-    final hasRows    = _rows.isNotEmpty;
-    final readyCount = _rows.where((r) => r.isPending).length;
-    final hasErrors  = _rows.any((r) => r.hasError);
-    final canImport  = hasRows && readyCount > 0 && !_isImporting && !_importDone;
+  final hasRows    = _rows.isNotEmpty;
+  final readyCount = _rows.where((r) => r.isPending).length;
+  final hasErrors  = _rows.any((r) => r.hasError);
+  final canImport  = hasRows && readyCount > 0 && !_isImporting && !_importDone;
 
-    return Container(
-      width: 320,
-      decoration: BoxDecoration(
-        color: const Color(0xFF130840),
-        border: const Border(right: BorderSide(color: Color(0xFF1E1060), width: 1)),
-      ),
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(28),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // ── Title ──────────────────────────────────────────────────────
-            Row(children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                      colors: [Color(0xFF00CFFF), Color(0xFF0088CC)]),
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [BoxShadow(
-                      color: _accent.withOpacity(0.35), blurRadius: 14)],
-                ),
-                child: const Icon(Icons.upload_file_rounded,
-                    color: Colors.white, size: 22),
+  return Container(
+    width: 320,
+    decoration: BoxDecoration(
+      color: const Color(0xFF130840),
+      border: const Border(right: BorderSide(color: Color(0xFF1E1060), width: 1)),
+    ),
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.all(28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── BACK BUTTON ROW ──────────────────────────────────────────────
+          GestureDetector(
+            onTap: () => Navigator.of(context).pop(),
+            child: Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color(0xFF00CFFF).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.3)),
               ),
-              const SizedBox(width: 14),
-              const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('BULK IMPORT',
-                      style: TextStyle(color: Colors.white,
-                          fontSize: 16, fontWeight: FontWeight.w900,
-                          letterSpacing: 2)),
-                  Text('Excel Registration',
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: const [
+                  Icon(Icons.arrow_back_ios_new, 
+                      color: Color(0xFF00CFFF), size: 14),
+                  SizedBox(width: 6),
+                  Text('BACK',
                       style: TextStyle(color: Color(0xFF00CFFF),
-                          fontSize: 11, letterSpacing: 1)),
+                          fontSize: 12, fontWeight: FontWeight.bold)),
                 ],
               ),
-            ]),
-            const SizedBox(height: 28),
+            ),
+          ),
+          
+          // ── Title ──────────────────────────────────────────────────────
+          Row(children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                    colors: [Color(0xFF00CFFF), Color(0xFF0088CC)]),
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [BoxShadow(
+                    color: const Color(0xFF00CFFF).withOpacity(0.35), blurRadius: 14)],
+              ),
+              child: const Icon(Icons.upload_file_rounded,
+                  color: Colors.white, size: 22),
+            ),
+            const SizedBox(width: 14),
+            const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('BULK IMPORT',
+                    style: TextStyle(color: Colors.white,
+                        fontSize: 16, fontWeight: FontWeight.w900,
+                        letterSpacing: 2)),
+                Text('Excel Registration',
+                    style: TextStyle(color: Color(0xFF00CFFF),
+                        fontSize: 11, letterSpacing: 1)),
+              ],
+            ),
+          ]),
+          const SizedBox(height: 28),
+
 
             // ── Template hint ──────────────────────────────────────────────
             Container(

@@ -6242,18 +6242,18 @@ try {
   print("⚠️ Could not read previous scores: $e");
 }
 
-    await DBHelper.upsertScore(
-      teamId: teamId,
-      roundId: roundId,
-      matchId: matchId,
-      refereeId: refereeId,
-      independentScore: individual,
-      allianceScore: alliance,
-      violation: violation,
-      totalScore: total,
-      totalDuration: duration,
-    );
-
+    // In _showQualificationScoreDialog, after saving scores:
+await DBHelper.upsertScore(
+  teamId: teamId,
+  roundId: roundId,
+  matchId: matchId,
+  refereeId: refereeId,
+  independentScore: individual,
+  allianceScore: alliance,
+  violation: violation,
+  totalScore: total,
+  totalDuration: duration,
+);
 
 // Propagate to partner based on category type
 if (matchId > 0) {
@@ -6285,23 +6285,26 @@ if (matchId > 0) {
   }
 }
 
-    if (mounted) {
-      Navigator.pop(ctx);
+// The upsertScore method already calls autoCompleteMatchIfBothScored
+// So no additional code needed here
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ Score saved and propagated'),
-          backgroundColor: Colors.green,
-          duration: Duration(seconds: 2),
-        ),
-      );
-
-      await _loadData(initial: false);
-
-      if (mounted) {
-        setState(() {});
-      }
-    }
+if (mounted) {
+  Navigator.pop(ctx);
+  
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(
+      content: Text('✅ Score saved and match will auto-complete when both teams have scores'),
+      backgroundColor: Colors.green,
+      duration: Duration(seconds: 2),
+    ),
+  );
+  
+  await _loadData(initial: false);
+  
+  if (mounted) {
+    setState(() {});
+  }
+}
   } catch (e, stackTrace) {
     print("❌ Error saving score: $e");
     print(stackTrace);
