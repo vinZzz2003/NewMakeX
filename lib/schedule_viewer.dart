@@ -1256,21 +1256,22 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         return aTime.compareTo(bTime);
       });
 
-      for (int i = 0; i < matchesList.length; i++) {
-        matchesList[i]['matchNumber'] = i + 1;
-        
-        // Update status map from database
-        final matchStatus = matchesList[i]['status'] as String? ?? 'pending';
-        MatchStatus statusEnum;
-        if (matchStatus == 'completed') {
-          statusEnum = MatchStatus.done;
-        } else if (matchStatus == 'in_progress') {
-          statusEnum = MatchStatus.inProgress;
-        } else {
-          statusEnum = MatchStatus.pending;
-        }
-        _statusMap[_statusKey(catId, i + 1)] = statusEnum;
-      }
+      // In _loadData, when building matchesList
+for (int i = 0; i < matchesList.length; i++) {
+  matchesList[i]['matchNumber'] = i + 1;
+  
+  // Read status from database instead of local map
+  final matchStatus = matchesList[i]['status'] as String? ?? 'pending';
+  MatchStatus statusEnum;
+  if (matchStatus == 'completed') {
+    statusEnum = MatchStatus.done;
+  } else if (matchStatus == 'in_progress') {
+    statusEnum = MatchStatus.inProgress;
+  } else {
+    statusEnum = MatchStatus.pending;
+  }
+  _statusMap[_statusKey(catId, i + 1)] = statusEnum;
+}
 
       scheduleByCategory[catId] = matchesList;
     }
@@ -4813,6 +4814,59 @@ Widget _buildCategoryView(Map<String, dynamic> category, int catId,
     }
   }
 
+  // Add this method to _ScheduleViewerState
+Future<void> _autoCompleteMatchIfReady(int categoryId, int matchNumber, int matchId) async {
+  try {
+    print("🔍 Checking if match $matchNumber should be auto-completed...");
+    
+    final conn = await DBHelper.getConnection();
+    
+    // Get all teams in this match for the specific round
+    final teamsResult = await conn.execute("""
+      SELECT ts.team_id, ts.arena_number, s.score_totalscore, s.score_isapproved
+      FROM tbl_teamschedule ts
+      JOIN tbl_score s ON ts.team_id = s.team_id AND ts.round_id = s.round_id
+      WHERE ts.match_id = :matchId
+        AND ts.round_id = :roundId
+    """, {
+      "matchId": matchId,
+      "roundId": matchNumber,  // In Explorer, round_id = matchNumber
+    });
+    
+    if (teamsResult.rows.isEmpty) return;
+    
+    // Check if ALL teams in this match have scores > 0
+    bool allHaveScores = true;
+    for (final row in teamsResult.rows) {
+      final score = int.tryParse(row.assoc()['score_totalscore']?.toString() ?? '0') ?? 0;
+      if (score == 0) {
+        allHaveScores = false;
+        break;
+      }
+    }
+    
+    if (allHaveScores) {
+      print("✅ All teams in match $matchNumber have scores - auto-completing!");
+      
+      // Update match status to completed in database
+      await DBHelper.executeDual("""
+        UPDATE tbl_match m
+        JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
+        SET m.status = 'completed'
+        WHERE m.match_id = :matchId
+      """, {"matchId": matchId});
+      
+      // Also update the local status map
+      final statusKey = _statusKey(categoryId, matchNumber);
+      setState(() {
+        _statusMap[statusKey] = MatchStatus.done;
+      });
+    }
+  } catch (e) {
+    print("Error auto-completing match: $e");
+  }
+}
+
   Widget _buildCategoryTitleBar(Map<String, dynamic> category, String title,
       List<Map<String, dynamic>> matches) {
     return Container(
@@ -4888,14 +4942,19 @@ Widget _buildCategoryView(Map<String, dynamic> category, int catId,
                   }).toList();
 
               return _EnhancedMatchCard(
-                match: match,
-                matchNumber: matchNum,
-                schedule: schedule,
-                redTeam: redTeam,
-                blueTeam: blueTeam,
-                onStatusTap: () => _cycleStatus(catId, matchNum),
-                status: status,
-              );
+  match: match,
+  matchNumber: matchNum,
+  schedule: schedule,
+  redTeam: redTeam,
+  blueTeam: blueTeam,
+  onStatusTap: () {
+    // Only allow status change if match is not already completed
+    if (status != MatchStatus.done) {
+      _cycleStatus(catId, matchNum);
+    }
+  },
+  status: status,
+);
             },
           );
   }
