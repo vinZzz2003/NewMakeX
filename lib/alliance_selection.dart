@@ -4,10 +4,11 @@ import 'dart:async';
 import 'constants.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'db_helper.dart';
 
 // API Service for Alliance operations
 class AllianceApiService {
-  static const String baseUrl = 'http://192.168.1.13/roboventure_api';
+  static const String baseUrl = 'http://192.168.18.129/roboventure_api';
   
   static Future<List<Map<String, dynamic>>> getQualifiedTeams(int categoryId) async {
     final url = Uri.parse('$baseUrl/admin_alliance_selection.php?action=get_qualified_teams&category_id=$categoryId');
@@ -28,37 +29,90 @@ class AllianceApiService {
   }
   
   static Future<int> saveAlliance({
-    required int categoryId,
-    required int captainTeamId,
-    required int partnerTeamId,
-    required int selectionRound,
-  }) async {
-    final url = Uri.parse('$baseUrl/admin_alliance_selection.php?action=save_alliance');
+  required int categoryId,
+  required int captainTeamId,
+  required int partnerTeamId,
+  required int selectionRound,
+}) async {
+  try {
+    final conn = await DBHelper.getConnection();
     
-    try {
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({
-          'category_id': categoryId,
-          'captain_team_id': captainTeamId,
-          'partner_team_id': partnerTeamId,
-          'selection_round': selectionRound,
-        }),
-      );
-      
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        if (data['success'] == true) {
-          return data['alliance_id'];
-        }
-      }
-      throw Exception('Failed to save alliance');
-    } catch (e) {
-      print('Error saving alliance: $e');
-      rethrow;
+    // Determine which table to use based on category type
+    final categoryResult = await conn.execute(
+      "SELECT category_type FROM tbl_category WHERE category_id = :catId LIMIT 1",
+      {"catId": categoryId},
+    );
+    final categoryType = categoryResult.rows.isNotEmpty 
+        ? categoryResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
+        : '';
+    final bool isExplorer = categoryType.contains('explorer');
+    final bool isStarter = categoryType.contains('starter');
+    
+    String allianceTable = 'tbl_alliance_selections';
+    if (isExplorer) {
+      allianceTable = 'tbl_explorer_alliance_selections';
+    } else if (isStarter) {
+      allianceTable = 'tbl_starter_alliance_selections';
     }
+    
+    print("💾 Saving alliance to table: $allianceTable");
+    
+    // Check if this alliance already exists
+    final checkResult = await conn.execute("""
+      SELECT alliance_id FROM $allianceTable 
+      WHERE category_id = :catId 
+        AND ((captain_team_id = :captain AND partner_team_id = :partner)
+          OR (captain_team_id = :partner AND partner_team_id = :captain))
+    """, {
+      "catId": categoryId,
+      "captain": captainTeamId,
+      "partner": partnerTeamId,
+    });
+    
+    if (checkResult.rows.isNotEmpty) {
+      final existingId = int.parse(checkResult.rows.first.assoc()['alliance_id'].toString());
+      print("✅ Alliance already exists with ID: $existingId");
+      return existingId;
+    }
+    
+    // Insert into category-specific table
+    final result = await DBHelper.executeDual("""
+      INSERT INTO $allianceTable 
+        (category_id, captain_team_id, partner_team_id, selection_round)
+      VALUES
+        (:catId, :captain, :partner, :round)
+    """, {
+      "catId": categoryId,
+      "captain": captainTeamId,
+      "partner": partnerTeamId,
+      "round": selectionRound,
+    });
+    
+    final newId = result.lastInsertID.toInt();
+    print("✅ Saved alliance to $allianceTable with ID: $newId");
+    
+    // Also save to main table for compatibility
+    await DBHelper.executeDual("""
+      INSERT INTO tbl_alliance_selections 
+        (category_id, captain_team_id, partner_team_id, selection_round)
+      VALUES
+        (:catId, :captain, :partner, :round)
+      ON DUPLICATE KEY UPDATE
+        captain_team_id = VALUES(captain_team_id),
+        partner_team_id = VALUES(partner_team_id)
+    """, {
+      "catId": categoryId,
+      "captain": captainTeamId,
+      "partner": partnerTeamId,
+      "round": selectionRound,
+    });
+    
+    return newId;
+  } catch (e) {
+    print('❌ Error saving alliance: $e');
+    rethrow;
   }
+}
   
   static Future<List<Map<String, dynamic>>> getAlliances(int categoryId) async {
     final url = Uri.parse('$baseUrl/admin_alliance_selection.php?action=get_alliances&category_id=$categoryId');
@@ -79,20 +133,44 @@ class AllianceApiService {
   }
   
   static Future<void> clearAlliances(int categoryId) async {
-    final url = Uri.parse('$baseUrl/admin_alliance_selection.php?action=clear_alliances&category_id=$categoryId');
+  try {
+    final conn = await DBHelper.getConnection();
     
-    try {
-      final response = await http.delete(url);
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        if (data['success'] != true) {
-          print('Warning: Clear alliances returned: ${data['error']}');
-        }
-      }
-    } catch (e) {
-      print('Error clearing alliances: $e');
+    // Determine which tables to clear
+    final categoryResult = await conn.execute(
+      "SELECT category_type FROM tbl_category WHERE category_id = :catId LIMIT 1",
+      {"catId": categoryId},
+    );
+    final categoryType = categoryResult.rows.isNotEmpty 
+        ? categoryResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
+        : '';
+    final bool isExplorer = categoryType.contains('explorer');
+    final bool isStarter = categoryType.contains('starter');
+    
+    // Clear from category-specific table
+    if (isExplorer) {
+      await DBHelper.executeDual(
+        "DELETE FROM tbl_explorer_alliance_selections WHERE category_id = :catId",
+        {"catId": categoryId},
+      );
+    } else if (isStarter) {
+      await DBHelper.executeDual(
+        "DELETE FROM tbl_starter_alliance_selections WHERE category_id = :catId",
+        {"catId": categoryId},
+      );
     }
+    
+    // Also clear from main table
+    await DBHelper.executeDual(
+      "DELETE FROM tbl_alliance_selections WHERE category_id = :catId",
+      {"catId": categoryId},
+    );
+    
+    print("✅ Cleared alliances for category $categoryId");
+  } catch (e) {
+    print('Error clearing alliances: $e');
   }
+}
 }
 
 enum SelectionStatus { pending, selecting, accepted, refused, timeout }

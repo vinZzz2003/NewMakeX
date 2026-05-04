@@ -2578,19 +2578,9 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
   }
 
   try {
-    // Load championship settings
-    final settings = await DBHelper.loadChampionshipSettings(categoryId);
-    final matchesPerAlliance = settings?.matchesPerAlliance ?? 3;
-    
-    if (mounted) {
-      setState(() {
-        _championshipMatchesPerAlliance[categoryId] = matchesPerAlliance;
-      });
-    }
-    
-    print("📊 Championship matches per alliance for category $categoryId: $matchesPerAlliance");
-
     final conn = await DBHelper.getConnection();
+    
+    // Get category type
     final categoryResult = await conn.execute(
       "SELECT category_type FROM tbl_category WHERE category_id = :catId LIMIT 1",
       {"catId": categoryId},
@@ -2601,17 +2591,77 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
     final bool isStarter = categoryType.contains('starter');
     final bool isExplorer = categoryType.contains('explorer');
     
-    // ============================================================
-    // FIX: First check if alliances exist for this category
-    // ============================================================
-    final alliancesCheck = await conn.execute(
-      "SELECT COUNT(*) as cnt FROM tbl_alliance_selections WHERE category_id = :catId",
-      {"catId": categoryId},
-    );
-    final allianceCount = int.parse(alliancesCheck.rows.first.assoc()['cnt']?.toString() ?? '0');
+    // Try multiple tables to find alliances
+    List<Map<String, dynamic>> alliances = [];
     
-    if (allianceCount == 0) {
-      print("ℹ️ No alliances found for category $categoryId");
+    // First try explorer table if applicable
+    if (isExplorer) {
+      try {
+        final explorerResult = await conn.execute("""
+          SELECT 
+            a.alliance_id,
+            a.selection_round as alliance_rank,
+            COALESCE(t1.team_name, 'Unknown') as captain_name,
+            COALESCE(t2.team_name, 'Unknown') as partner_name
+          FROM tbl_explorer_alliance_selections a
+          LEFT JOIN tbl_team t1 ON a.captain_team_id = t1.team_id
+          LEFT JOIN tbl_team t2 ON a.partner_team_id = t2.team_id
+          WHERE a.category_id = :catId
+          ORDER BY a.selection_round
+        """, {"catId": categoryId});
+        alliances = explorerResult.rows.map((r) => r.assoc()).toList();
+        print("✅ Found ${alliances.length} alliances in tbl_explorer_alliance_selections");
+      } catch (e) {
+        print("⚠️ Error reading explorer alliances: $e");
+      }
+    }
+    
+    // If no alliances found, try starter table
+    if (alliances.isEmpty && isStarter) {
+      try {
+        final starterResult = await conn.execute("""
+          SELECT 
+            a.alliance_id,
+            a.selection_round as alliance_rank,
+            COALESCE(t1.team_name, 'Unknown') as captain_name,
+            COALESCE(t2.team_name, 'Unknown') as partner_name
+          FROM tbl_starter_alliance_selections a
+          LEFT JOIN tbl_team t1 ON a.captain_team_id = t1.team_id
+          LEFT JOIN tbl_team t2 ON a.partner_team_id = t2.team_id
+          WHERE a.category_id = :catId
+          ORDER BY a.selection_round
+        """, {"catId": categoryId});
+        alliances = starterResult.rows.map((r) => r.assoc()).toList();
+        print("✅ Found ${alliances.length} alliances in tbl_starter_alliance_selections");
+      } catch (e) {
+        print("⚠️ Error reading starter alliances: $e");
+      }
+    }
+    
+    // If still no alliances, try main table
+    if (alliances.isEmpty) {
+      try {
+        final mainResult = await conn.execute("""
+          SELECT 
+            a.alliance_id,
+            a.selection_round as alliance_rank,
+            COALESCE(t1.team_name, 'Unknown') as captain_name,
+            COALESCE(t2.team_name, 'Unknown') as partner_name
+          FROM tbl_alliance_selections a
+          LEFT JOIN tbl_team t1 ON a.captain_team_id = t1.team_id
+          LEFT JOIN tbl_team t2 ON a.partner_team_id = t2.team_id
+          WHERE a.category_id = :catId
+          ORDER BY a.selection_round
+        """, {"catId": categoryId});
+        alliances = mainResult.rows.map((r) => r.assoc()).toList();
+        print("✅ Found ${alliances.length} alliances in tbl_alliance_selections");
+      } catch (e) {
+        print("⚠️ Error reading main alliances: $e");
+      }
+    }
+    
+    if (alliances.isEmpty) {
+      print("❌ No alliances found for category $categoryId in any table");
       if (mounted) {
         setState(() {
           _championshipStandingsByCategory[categoryId] = [];
@@ -2621,369 +2671,78 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
       return;
     }
     
-    // ============================================================
-    // FIX: For Explorer, check if bracket table has data before loading
-    // ============================================================
-    if (isExplorer) {
-      // Check if double elimination table has data for this category
-      try {
-        final bracketCheck = await conn.execute(
-          "SELECT COUNT(*) as cnt FROM tbl_double_elimination WHERE category_id = :catId",
-          {"catId": categoryId},
-        );
-        final hasBracketData = int.parse(bracketCheck.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
-        
-        if (!hasBracketData) {
-          print("ℹ️ No bracket data found for Explorer category $categoryId");
-          if (mounted) {
-            setState(() {
-              _championshipStandingsByCategory[categoryId] = [];
-              _isLoadingAllianceByCategory[categoryId] = false;
-            });
-          }
-          return;
-        }
-      } catch (e) {
-        print("⚠️ Could not check bracket table: $e");
-        if (mounted) {
-          setState(() {
-            _championshipStandingsByCategory[categoryId] = [];
-            _isLoadingAllianceByCategory[categoryId] = false;
-          });
-        }
-        return;
-      }
+    // Load championship settings
+    final settings = await DBHelper.loadChampionshipSettings(categoryId);
+    final matchesPerAlliance = settings?.matchesPerAlliance ?? 3;
+    
+    if (mounted) {
+      setState(() {
+        _championshipMatchesPerAlliance[categoryId] = matchesPerAlliance;
+      });
     }
     
-    if (isStarter) {
-      // Use the per-category schedule table when available
-      final scheduleTable = await _resolveScheduleTable(categoryId);
-      await _loadStarterMatchPairings(categoryId);
-
-      // CRITICAL: Load opponent information for Starter categories
-      final scheduleResult = await conn.execute("""
-        SELECT 
-          cs.alliance1_id,
-          cs.alliance2_id,
-          a1.selection_round as alliance1_rank,
-          a2.selection_round as alliance2_rank,
-          COALESCE(t1.team_name, 'Unknown') as captain1_name,
-          COALESCE(t2.team_name, 'Unknown') as partner1_name,
-          COALESCE(t3.team_name, 'Unknown') as captain2_name,
-          COALESCE(t4.team_name, 'Unknown') as partner2_name
-        FROM $scheduleTable cs
-        LEFT JOIN tbl_alliance_selections a1 ON cs.alliance1_id = a1.alliance_id
-        LEFT JOIN tbl_alliance_selections a2 ON cs.alliance2_id = a2.alliance_id
-        LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
-        LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
-        LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
-        LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
-        WHERE cs.category_id = :catId
-          AND cs.alliance1_id > 0 
-          AND cs.alliance2_id > 0
-      """, {"catId": categoryId});
-      
-      // Store opponent info
-      final Map<int, Map<String, dynamic>> starterOpponents = {};
-      
-      for (final row in scheduleResult.rows) {
-        final data = row.assoc();
-        final alliance1Id = int.parse(data['alliance1_id'].toString());
-        final alliance2Id = int.parse(data['alliance2_id'].toString());
-        
-        final alliance1Name = '${data['captain1_name']} / ${data['partner1_name']}';
-        final alliance2Name = '${data['captain2_name']} / ${data['partner2_name']}';
-        final alliance1Rank = int.parse(data['alliance1_rank']?.toString() ?? '0');
-        final alliance2Rank = int.parse(data['alliance2_rank']?.toString() ?? '0');
-        
-        // Store for alliance 1
-        starterOpponents[alliance1Id] = {
-          'opponentId': alliance2Id,
-          'opponentName': alliance2Name,
-          'opponentRank': alliance2Rank,
-        };
-        
-        // Store for alliance 2
-        starterOpponents[alliance2Id] = {
-          'opponentId': alliance1Id,
-          'opponentName': alliance1Name,
-          'opponentRank': alliance1Rank,
-        };
-        
-        print("📊 Starter opponent mapping: Alliance $alliance1Id -> $alliance2Name");
-        print("📊 Starter opponent mapping: Alliance $alliance2Id -> $alliance1Name");
-      }
-      
-      _starterOpponentsByCategory[categoryId] = starterOpponents;
-      print("✅ Loaded ${starterOpponents.length} starter opponent mappings for category $categoryId");
-    } else {
+    print("📊 Found ${alliances.length} alliances for category $categoryId");
+    
+    // Load match pairings and best of 3 results
+    if (isExplorer) {
       await _loadMatchPairings(categoryId);
+    } else {
+      await _loadStarterMatchPairings(categoryId);
     }
     
     await _loadBestOf3Results(categoryId);
-
-    // Get all alliances for this category
-    final alliancesResult = await conn.execute("""
-      SELECT 
-        a.alliance_id,
-        a.selection_round as alliance_rank,
-        COALESCE(t1.team_name, 'Unknown') as captain_name,
-        COALESCE(t2.team_name, 'Unknown') as partner_name
-      FROM tbl_alliance_selections a
-      LEFT JOIN tbl_team t1 ON a.captain_team_id = t1.team_id
-      LEFT JOIN tbl_team t2 ON a.partner_team_id = t2.team_id
-      WHERE a.category_id = :catId
-      ORDER BY a.selection_round
-    """, {"catId": categoryId});
-
-    final alliances = alliancesResult.rows.map((r) => r.assoc()).toList();
-
-    if (alliances.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _championshipStandingsByCategory[categoryId] = [];
-          _isLoadingAllianceByCategory[categoryId] = false;
-        });
-      }
-      return;
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // FIXED: Count wins using the correct table based on category type
-    // ═══════════════════════════════════════════════════════════════════════════
-    final Map<int, int> winsCount = {};
-    final Map<int, Map<int, Map<String, int>>> matchScoresByAlliance = {};
-
-    if (isStarter) {
-      // ============================================================
-      // STARTER CATEGORY - Read from tbl_starter_championship_scores
-      // ============================================================
-      print("📊 Loading Starter championship scores from tbl_starter_championship_scores");
-      
-      // Check if table exists and has data
-      try {
-        final tableCheck = await conn.execute(
-          "SELECT COUNT(*) as cnt FROM tbl_starter_championship_scores WHERE category_id = :catId",
-          {"catId": categoryId},
-        );
-        final hasData = int.parse(tableCheck.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
-        
-        if (!hasData) {
-          print("ℹ️ No Starter championship scores found for category $categoryId");
-          if (mounted) {
-            setState(() {
-              _championshipStandingsByCategory[categoryId] = [];
-              _isLoadingAllianceByCategory[categoryId] = false;
-            });
-          }
-          return;
-        }
-      } catch (e) {
-        print("⚠️ Could not check starter championship scores table: $e");
-      }
-      
-      final bestOf3Result = await conn.execute("""
-        SELECT 
-          alliance_id,
-          match_number,
-          score as alliance_score,
-          opponent_score,
-          violation as alliance_violation,
-          opponent_violation,
-          winner_alliance_id,
-          is_completed
-        FROM tbl_starter_championship_scores
-        WHERE category_id = :catId
-      """, {"catId": categoryId});
-
-      for (final row in bestOf3Result.rows) {
-        final data = row.assoc();
-        final allianceId = int.parse(data['alliance_id'].toString());
-        final matchNum = int.parse(data['match_number']?.toString() ?? '1');
-        final winnerId = int.parse(data['winner_alliance_id']?.toString() ?? '0');
-        final isCompleted = (data['is_completed']?.toString() ?? '0') == '1';
-
-        if (isCompleted && winnerId > 0) {
-          winsCount[winnerId] = (winsCount[winnerId] ?? 0) + 1;
-        }
-
-        final allianceScore = int.parse((data['alliance_score'] ?? '0').toString());
-        final allianceViolation = int.parse((data['alliance_violation'] ?? '0').toString());
-
-        matchScoresByAlliance.putIfAbsent(allianceId, () => {});
-        matchScoresByAlliance[allianceId]![matchNum] = {
-          'score': allianceScore,
-          'violation': allianceViolation,
-        };
-      }
-    } 
-    else if (isExplorer) {
-      // ============================================================
-      // EXPLORER CATEGORY - Read from tbl_championship_bestof3
-      // ============================================================
-      print("📊 Loading Explorer championship scores from tbl_championship_bestof3");
-      
-      // Check if table exists and has data
-      try {
-        final tableCheck = await conn.execute(
-          "SELECT COUNT(*) as cnt FROM tbl_championship_bestof3 WHERE category_id = :catId",
-          {"catId": categoryId},
-        );
-        final hasData = int.parse(tableCheck.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
-        
-        if (!hasData) {
-          print("ℹ️ No Explorer championship scores found for category $categoryId");
-          if (mounted) {
-            setState(() {
-              _championshipStandingsByCategory[categoryId] = [];
-              _isLoadingAllianceByCategory[categoryId] = false;
-            });
-          }
-          return;
-        }
-      } catch (e) {
-        print("⚠️ Could not check championship bestof3 table: $e");
-      }
-      
-      // Get wins per alliance from Best-of-3 results
-      final winsQuery = await conn.execute("""
-        SELECT 
-          winner_alliance_id,
-          COUNT(DISTINCT CONCAT(match_round, ':', match_position, ':', bracket_side, ':', match_number)) as win_count
-        FROM tbl_championship_bestof3
-        WHERE category_id = :catId 
-          AND is_completed = 1 
-          AND winner_alliance_id != 0
-          AND alliance_id < opponent_alliance_id
-        GROUP BY winner_alliance_id
-      """, {"catId": categoryId});
-
-      for (final row in winsQuery.rows) {
-        final data = row.assoc();
-        final winnerId = int.parse(data['winner_alliance_id'].toString());
-        final winCount = int.parse(data['win_count'].toString());
-        winsCount[winnerId] = winCount;
-        print("📊 Explorer win count: Alliance $winnerId has $winCount wins");
-      }
-
-      // Also load match scores for display
-      final bestOf3Result = await conn.execute("""
-        SELECT 
-          alliance_id,
-          match_number,
-          alliance_score,
-          opponent_score,
-          alliance_violation,
-          opponent_violation
-        FROM tbl_championship_bestof3
-        WHERE category_id = :catId
-        ORDER BY alliance_id, match_number
-      """, {"catId": categoryId});
-
-      for (final row in bestOf3Result.rows) {
-        final data = row.assoc();
-        final allianceId = int.parse(data['alliance_id'].toString());
-        final matchNum = int.parse(data['match_number']?.toString() ?? '1');
-        final allianceScore = int.parse((data['alliance_score'] ?? '0').toString());
-        final allianceViolation = int.parse((data['alliance_violation'] ?? '0').toString());
-
-        matchScoresByAlliance.putIfAbsent(allianceId, () => {});
-        
-        // Only store if not already stored
-        if (!matchScoresByAlliance[allianceId]!.containsKey(matchNum)) {
-          matchScoresByAlliance[allianceId]![matchNum] = {
-            'score': allianceScore,
-            'violation': allianceViolation,
-          };
-        }
-      }
-    }
-    else {
-      // ============================================================
-      // OTHER CATEGORIES - Read from tbl_score (fallback)
-      // ============================================================
-      print("📊 Loading other category scores from tbl_score");
-      
-      final scoreResult = await conn.execute("""
-        SELECT 
-          t.team_id,
-          s.round_id,
-          s.score_totalscore
-        FROM tbl_score s
-        JOIN tbl_team t ON s.team_id = t.team_id
-        WHERE t.category_id = :catId
-      """, {"catId": categoryId});
-      
-      // Process scores for other categories
-      for (final row in scoreResult.rows) {
-        final data = row.assoc();
-        final teamId = int.parse(data['team_id'].toString());
-        final score = int.parse(data['score_totalscore']?.toString() ?? '0');
-        
-        // Find alliance for this team
-        for (final alliance in alliances) {
-          final captainId = int.parse(alliance['captain_team_id']?.toString() ?? '0');
-          final partnerId = int.parse(alliance['partner_team_id']?.toString() ?? '0');
-          
-          if (captainId == teamId || partnerId == teamId) {
-            final allianceId = int.parse(alliance['alliance_id'].toString());
-            winsCount[allianceId] = (winsCount[allianceId] ?? 0) + score;
-            break;
-          }
-        }
-      }
-    }
-
+    
     // Create standings list
     final List<ChampionshipAllianceStanding> standings = [];
-
+    
     for (final alliance in alliances) {
       final allianceId = int.parse(alliance['alliance_id'].toString());
       final allianceRank = int.parse(alliance['alliance_rank'].toString());
       final captainName = alliance['captain_name'].toString();
       final partnerName = alliance['partner_name'].toString();
-
-      int totalScore = 0;
       
-      if (isStarter) {
-        // STARTER: Max final score from individual matches (score - violation)
-        if (matchScoresByAlliance.containsKey(allianceId)) {
-          for (final m in matchScoresByAlliance[allianceId]!.values) {
-            final sc = m['score'] ?? 0;
-            final vio = m['violation'] ?? 0;
-            final finalScore = sc - vio;
-            if (finalScore > totalScore) totalScore = finalScore;
-          }
+      // Get wins for this alliance
+      int totalScore = 0;
+      if (isExplorer) {
+        // For Explorer, count wins from bestof3 results
+        final winsResult = await conn.execute("""
+          SELECT COUNT(*) as win_count
+          FROM tbl_championship_bestof3
+          WHERE category_id = :catId 
+            AND winner_alliance_id = :allianceId
+            AND is_completed = 1
+        """, {"catId": categoryId, "allianceId": allianceId});
+        
+        if (winsResult.rows.isNotEmpty) {
+          totalScore = int.parse(winsResult.rows.first.assoc()['win_count']?.toString() ?? '0') * 10;
         }
-      } 
-      else if (isExplorer) {
-        // EXPLORER: Score = wins × 10
-        totalScore = (winsCount[allianceId] ?? 0) * 10;
-      } 
-      else {
-        // OTHER: Total from scores
-        totalScore = winsCount[allianceId] ?? 0;
+      } else {
+        // For Starter, get max score from championship scores
+        final scoreResult = await conn.execute("""
+          SELECT MAX(score - violation) as max_score
+          FROM tbl_starter_championship_scores
+          WHERE category_id = :catId AND alliance_id = :allianceId
+        """, {"catId": categoryId, "allianceId": allianceId});
+        
+        if (scoreResult.rows.isNotEmpty && scoreResult.rows.first.assoc()['max_score'] != null) {
+          totalScore = int.parse(scoreResult.rows.first.assoc()['max_score']?.toString() ?? '0');
+        }
       }
-
-      final matchScores = <int, Map<String, int>>{};
-      if (matchScoresByAlliance.containsKey(allianceId)) {
-        matchScores.addAll(matchScoresByAlliance[allianceId]!);
-      }
-
+      
       standings.add(
         ChampionshipAllianceStanding(
           allianceId: allianceId,
           allianceRank: allianceRank,
           captainName: captainName,
           partnerName: partnerName,
-          matchScores: matchScores,
+          matchScores: {},
           totalScore: totalScore,
         ),
       );
       
       print("📊 Alliance #$allianceRank (ID: $allianceId): $totalScore pts");
     }
-
+    
     // Sort by totalScore (highest first)
     standings.sort((a, b) {
       if (a.totalScore != b.totalScore) {
@@ -2991,13 +2750,14 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
       }
       return a.allianceRank.compareTo(b.allianceRank);
     });
-
+    
     if (mounted) {
       setState(() {
         _championshipStandingsByCategory[categoryId] = standings;
         _isLoadingAllianceByCategory[categoryId] = false;
       });
     }
+    
     
     print("✅ Loaded ${standings.length} championship standings for category $categoryId");
     
@@ -3013,130 +2773,222 @@ Future<void> _loadChampionshipStandings(int categoryId) async {
   }
 }
 
-  // Build Best-of-3 match cell - shows win/loss counts
-  Widget _buildBestOf3MatchCell({
-    required int categoryId,
-    required int allianceId,
-    required int opponentId,
-    required int matchNumber,
-    required int roundNumber,
-    required int matchPosition,
-    required String allianceName,
-    required String opponentName,
-    required String bracketSide,
-    required BestOf3MatchResult? result,
-    required VoidCallback onRefresh,
-  }) {
-    final bool matchPlayed = result != null && result.isCompleted;
-    final bool matchWon = matchPlayed && result!.winnerAllianceId == allianceId;
-
-    final allResults = _bestOf3Results[categoryId] ?? {};
-    final seriesAllianceEntries = (allResults[allianceId] ?? [])
-        .where(
-          (r) =>
-              r.matchRound == roundNumber && r.matchPosition == matchPosition,
-        )
-        .toList();
-    final seriesOpponentEntries = (allResults[opponentId] ?? [])
-        .where(
-          (r) =>
-              r.matchRound == roundNumber && r.matchPosition == matchPosition,
-        )
-        .toList();
-
-    final Map<String, BestOf3MatchResult> uniqueResults = {};
-
-    for (final r in seriesAllianceEntries) {
-      if (r.isCompleted) {
-        final key = '${r.matchRound}:${r.matchPosition}:${r.matchNumber}';
-        uniqueResults[key] = r;
+ Widget _buildBestOf3MatchCell({
+  required int categoryId,
+  required int allianceId,
+  required int opponentId,
+  required int matchNumber,
+  required int roundNumber,
+  required int matchPosition,
+  required String allianceName,
+  required String opponentName,
+  required String bracketSide,
+  required BestOf3MatchResult? result,
+  required VoidCallback onRefresh,
+}) {
+  final allResults = _bestOf3Results[categoryId] ?? {};
+  
+  // Get series wins for determining display
+  int allianceWins = 0;
+  int opponentWins = 0;
+  
+  for (final r in allResults[allianceId] ?? []) {
+    if (r.matchRound == roundNumber &&
+        r.matchPosition == matchPosition &&
+        r.bracketSide == bracketSide &&
+        r.isCompleted) {
+      if (r.winnerAllianceId == allianceId) allianceWins++;
+      else if (r.winnerAllianceId == opponentId) opponentWins++;
+    }
+  }
+  
+  for (final r in allResults[opponentId] ?? []) {
+    if (r.matchRound == roundNumber &&
+        r.matchPosition == matchPosition &&
+        r.bracketSide == bracketSide &&
+        r.isCompleted) {
+      if (r.winnerAllianceId == allianceId) allianceWins++;
+      else if (r.winnerAllianceId == opponentId) opponentWins++;
+    }
+  }
+  
+  // Check if THIS SPECIFIC match is completed
+  bool thisMatchCompleted = false;
+  for (final r in allResults[allianceId] ?? []) {
+    if (r.matchNumber == matchNumber &&
+        r.matchRound == roundNumber &&
+        r.matchPosition == matchPosition &&
+        r.bracketSide == bracketSide &&
+        r.isCompleted) {
+      thisMatchCompleted = true;
+      break;
+    }
+  }
+  if (!thisMatchCompleted) {
+    for (final r in allResults[opponentId] ?? []) {
+      if (r.matchNumber == matchNumber &&
+          r.matchRound == roundNumber &&
+          r.matchPosition == matchPosition &&
+          r.bracketSide == bracketSide &&
+          r.isCompleted) {
+        thisMatchCompleted = true;
+        break;
       }
     }
-    for (final r in seriesOpponentEntries) {
-      if (r.isCompleted) {
-        final key = '${r.matchRound}:${r.matchPosition}:${r.matchNumber}';
-        if (!uniqueResults.containsKey(key)) uniqueResults[key] = r;
-      }
-    }
-
-    int winsA = 0;
-    int winsO = 0;
-    for (final r in uniqueResults.values) {
-      if (r.winnerAllianceId == allianceId) {
-        winsA++;
-      } else if (r.winnerAllianceId == opponentId) {
-        winsO++;
-      }
-    }
-
-    final int completedCount = uniqueResults.length;
-    final bool seriesCompleted =
-        (winsA >= 2) || (winsO >= 2) || (completedCount >= 3);
-    final bool seriesTied = (winsA == 1 && winsO == 1 && completedCount == 2);
-    final bool match3Available =
-        (matchNumber == 3) && seriesTied && !seriesCompleted;
-    final bool match3NotNeeded =
-        (matchNumber == 3) && (winsA >= 2 || winsO >= 2);
-
-    try {
-      print("   UNIQUE RESULTS for R\$roundNumberP\$matchPosition \\$bracketSide: \\${uniqueResults.length} results");
-      for (final entry in uniqueResults.entries) {
-        try {
-          print("      \\${entry.key}: winner=\\${entry.value.winnerAllianceId}");
-        } catch (_) {}
-      }
-      print("   winsA=\$winsA, winsO=\$winsO, completedCount=\$completedCount, seriesCompleted=\$seriesCompleted");
-    } catch (_) {}
-
-    // If the match is already played, show read-only
-    if (matchPlayed) {
-      return _buildMatchCellContent(
-        categoryId: categoryId,
-        allianceId: allianceId,
-        opponentId: opponentId,
-        matchNumber: matchNumber,
-        roundNumber: roundNumber,
-        matchPosition: matchPosition,
-        allianceName: allianceName,
-        opponentName: opponentName,
-        bracketSide: bracketSide,
-        result: result,
-        onRefresh: onRefresh,
-        matchPlayed: matchPlayed,
-        matchWon: matchWon,
-        seriesCompleted: seriesCompleted,
-        match3Available: match3Available,
-        match3NotNeeded: match3NotNeeded,
-        winsA: winsA,
-        winsO: winsO,
-        seriesTied: seriesTied,
-        readOnly: true,
-      );
-    }
-
-    return _buildMatchCellContent(
-      categoryId: categoryId,
-      allianceId: allianceId,
-      opponentId: opponentId,
-      matchNumber: matchNumber,
-      roundNumber: roundNumber,
-      matchPosition: matchPosition,
-      allianceName: allianceName,
-      opponentName: opponentName,
-      bracketSide: bracketSide,
-      result: result,
-      onRefresh: onRefresh,
-      matchPlayed: matchPlayed,
-      matchWon: matchWon,
-      seriesCompleted: seriesCompleted,
-      match3Available: match3Available,
-      match3NotNeeded: match3NotNeeded,
-      winsA: winsA,
-      winsO: winsO,
-      seriesTied: seriesTied,
-      readOnly: false,
+  }
+  
+  final bool seriesCompleted = (allianceWins >= 2) || (opponentWins >= 2);
+  final bool seriesTied = (allianceWins == 1 && opponentWins == 1);
+  final bool match3Available = (matchNumber == 3) && seriesTied && !seriesCompleted;
+  final bool match3NotNeeded = (matchNumber == 3) && (allianceWins >= 2 || opponentWins >= 2);
+  
+  // If match is completed, show score with "Total in Mx"
+  if (thisMatchCompleted) {
+    return Expanded(
+      flex: 2,
+      child: GestureDetector(
+        onTap: () {
+          _showBestOf3MatchDialog(
+            categoryId: categoryId,
+            allianceId: allianceId,
+            opponentAllianceId: opponentId,
+            matchNumber: matchNumber,
+            roundNumber: roundNumber,
+            matchPosition: matchPosition,
+            bracketSide: bracketSide,
+            allianceName: allianceName,
+            opponentName: opponentName,
+            existingResult: result,
+            onRefresh: onRefresh,
+            readOnly: true,
+          );
+        },
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.03),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: allianceWins > opponentWins ? Colors.green.withOpacity(0.5) : Colors.red.withOpacity(0.5),
+              width: 1.5,
+            ),
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                '$allianceWins-$opponentWins',
+                style: TextStyle(
+                  color: allianceWins > opponentWins ? Colors.green : Colors.red,
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                'Total in M$matchNumber',
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 8,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
+  
+  // For pending matches - show original UI
+  return Expanded(
+    flex: 2,
+    child: GestureDetector(
+      onTap: () {
+        _showBestOf3MatchDialog(
+          categoryId: categoryId,
+          allianceId: allianceId,
+          opponentAllianceId: opponentId,
+          matchNumber: matchNumber,
+          roundNumber: roundNumber,
+          matchPosition: matchPosition,
+          bracketSide: bracketSide,
+          allianceName: allianceName,
+          opponentName: opponentName,
+          existingResult: result,
+          onRefresh: onRefresh,
+          readOnly: false,
+        );
+      },
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.03),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.white.withOpacity(0.15), width: 1),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (match3Available) ...[
+              const Text(
+                'READY',
+                style: TextStyle(
+                  color: Color(0xFFFFD700),
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ] else if (match3NotNeeded) ...[
+              const Text(
+                'N/A',
+                style: TextStyle(
+                  color: Colors.orange,
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ] else ...[
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFD700).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Icon(
+                  Icons.sports_esports_rounded,
+                  color: Color(0xFFFFD700),
+                  size: 16,
+                ),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'PENDING',
+                style: TextStyle(
+                  color: Colors.white38,
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              if (matchNumber == 3 && allianceWins == 1 && opponentWins == 1 && !seriesCompleted) ...[
+                const SizedBox(height: 2),
+                const Text(
+                  'Need 1-1',
+                  style: TextStyle(
+                    color: Colors.white38,
+                    fontSize: 8,
+                  ),
+                ),
+              ],
+            ],
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 
 Widget _buildStarterMatchCell({
   required int categoryId,
@@ -3591,7 +3443,7 @@ Widget _buildChampionshipTable(int categoryId) {
   // ============================================================
   // FIX: Check if we have alliances first
   // ============================================================
-  final bool hasAlliances = _alliances.isNotEmpty;
+ final bool hasAlliances = standings.isNotEmpty;
   
   // If no alliances exist yet, show appropriate message
   if (!hasAlliances && !isLoading) {
