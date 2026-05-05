@@ -4247,7 +4247,7 @@ Widget _buildChampionshipTable(int categoryId) {
   );
 }
 
-  Widget _buildChampionRow({
+Widget _buildChampionRow({
   required ChampionshipAllianceStanding standing,
   required int categoryId,
   required Map<int, List<BestOf3MatchResult>> results,
@@ -4278,69 +4278,38 @@ Widget _buildChampionshipTable(int categoryId) {
   // Sort by round number
   alliancePairings.sort((a, b) => a.roundNumber.compareTo(b.roundNumber));
   
+  // ============================================================
+  // FIX: Find the LATEST incomplete series for this alliance
+  // ============================================================
   AllianceMatchPair? currentPair;
   
-  if (losses >= 1) {
-    // For Loser's Bracket, find the NEXT match that is NOT yet completed
-    for (final pair in alliancePairings) {
-      if (pair.bracketSide == 'losers') {
-        final matchResults = allianceCompletedResults.where((r) => 
-            r.matchRound == pair.roundNumber && 
-            r.matchPosition == pair.matchPosition &&
-            r.bracketSide == pair.bracketSide).toList();
-        
-        int wins = 0;
-        for (final r in matchResults) {
-          if (r.winnerAllianceId == standing.allianceId) {
-            wins++;
-          }
-        }
-        
-        final bool seriesComplete = (wins >= 2) || (matchResults.length >= 3);
-        
-        if (!seriesComplete) {
-          currentPair = pair;
-          break;
-        }
+  // Try to find the highest round that is NOT complete
+  for (final pair in alliancePairings.reversed) {
+    final matchResults = allianceCompletedResults.where((r) => 
+        r.matchRound == pair.roundNumber && 
+        r.matchPosition == pair.matchPosition &&
+        r.bracketSide == pair.bracketSide).toList();
+    
+    // Count wins in this series
+    int winsInSeries = 0;
+    for (final r in matchResults) {
+      if (r.winnerAllianceId == standing.allianceId) {
+        winsInSeries++;
       }
     }
     
-    if (currentPair == null && alliancePairings.isNotEmpty) {
-      for (final pair in alliancePairings.reversed) {
-        if (pair.bracketSide == 'losers') {
-          currentPair = pair;
-          break;
-        }
-      }
-    }
-  } else {
-    // For Winner's Bracket, find the next incomplete match
-    for (final pair in alliancePairings) {
-      if (pair.bracketSide == 'winners') {
-        final matchResults = allianceCompletedResults.where((r) => 
-            r.matchRound == pair.roundNumber && 
-            r.matchPosition == pair.matchPosition &&
-            r.bracketSide == pair.bracketSide).toList();
-        
-        int wins = 0;
-        for (final r in matchResults) {
-          if (r.winnerAllianceId == standing.allianceId) {
-            wins++;
-          }
-        }
-        
-        final bool seriesComplete = (wins >= 2) || (matchResults.length >= 3);
-        
-        if (!seriesComplete) {
-          currentPair = pair;
-          break;
-        }
-      }
-    }
+    // Series is incomplete if not yet won 2 matches and not all 3 matches played
+    final bool seriesComplete = (winsInSeries >= 2) || (matchResults.length >= 3);
     
-    if (currentPair == null && alliancePairings.isNotEmpty) {
-      currentPair = alliancePairings.last;
+    if (!seriesComplete) {
+      currentPair = pair;
+      break;
     }
+  }
+  
+  // If all series are complete, fall back to the highest round
+  if (currentPair == null && alliancePairings.isNotEmpty) {
+    currentPair = alliancePairings.last;
   }
   
   if (currentPair == null && alliancePairings.isNotEmpty) {
@@ -4486,26 +4455,25 @@ Widget _buildChampionshipTable(int categoryId) {
           ),
         ),
         // MATCH 1 column
-        // For Explorer categories - keep as is (still needs opponentId)
-_buildBestOf3MatchCell(
-  categoryId: categoryId,
-  allianceId: standing.allianceId,
-  opponentId: opponentId,  // This is FINE for Explorer
-  matchNumber: 1,
-  roundNumber: roundNumber,
-  matchPosition: matchPosition,
-  allianceName: '${standing.captainName} / ${standing.partnerName}',
-  opponentName: opponentName,
-  bracketSide: bracketSide,
-  result: match1Result,
-  onRefresh: () async {
-    await _loadBestOf3Results(categoryId);
-    await _loadChampionshipStandings(categoryId);
-    await _reorderChampionshipStandings(categoryId);
-    if (mounted) setState(() {});
-  },
-),
-// MATCH 2 column
+        _buildBestOf3MatchCell(
+          categoryId: categoryId,
+          allianceId: standing.allianceId,
+          opponentId: opponentId,
+          matchNumber: 1,
+          roundNumber: roundNumber,
+          matchPosition: matchPosition,
+          allianceName: '${standing.captainName} / ${standing.partnerName}',
+          opponentName: opponentName,
+          bracketSide: bracketSide,
+          result: match1Result,
+          onRefresh: () async {
+            await _loadBestOf3Results(categoryId);
+            await _loadChampionshipStandings(categoryId);
+            await _reorderChampionshipStandings(categoryId);
+            if (mounted) setState(() {});
+          },
+        ),
+        // MATCH 2 column
         _buildBestOf3MatchCell(
           categoryId: categoryId,
           allianceId: standing.allianceId,
@@ -4585,13 +4553,54 @@ Widget _buildChampionshipRow({
   final isEven = index % 2 == 0;
   final allianceResults = results[standing.allianceId] ?? [];
   
-  // Find the pairing for this alliance from the pre-loaded pairings
-  AllianceMatchPair? currentPair;
+  // Find ALL pairings for this alliance
+  final List<AllianceMatchPair> alliancePairings = [];
   for (final pair in pairings.values) {
-    if (pair.alliance1Id == standing.allianceId || pair.alliance2Id == standing.allianceId) {
+    if (pair.alliance1Id == standing.allianceId ||
+        pair.alliance2Id == standing.allianceId) {
+      alliancePairings.add(pair);
+    }
+  }
+  
+  // Sort by round number
+  alliancePairings.sort((a, b) => a.roundNumber.compareTo(b.roundNumber));
+  
+  // Get all completed results for this alliance to determine incomplete series
+  final allResultsForAlliance = _bestOf3Results[categoryId] ?? {};
+  final allianceCompletedResults = allResultsForAlliance[standing.allianceId] ?? [];
+  
+  // ============================================================
+  // FIX: Find the LATEST incomplete series for this alliance
+  // ============================================================
+  AllianceMatchPair? currentPair;
+  
+  // Try to find the highest round that is NOT complete
+  for (final pair in alliancePairings.reversed) {
+    final matchResults = allianceCompletedResults.where((r) => 
+        r.matchRound == pair.roundNumber && 
+        r.matchPosition == pair.matchPosition &&
+        r.bracketSide == pair.bracketSide).toList();
+    
+    // Count wins in this series
+    int winsInSeries = 0;
+    for (final r in matchResults) {
+      if (r.winnerAllianceId == standing.allianceId) {
+        winsInSeries++;
+      }
+    }
+    
+    // Series is incomplete if not yet won 2 matches and not all 3 matches played
+    final bool seriesComplete = (winsInSeries >= 2) || (matchResults.length >= 3);
+    
+    if (!seriesComplete) {
       currentPair = pair;
       break;
     }
+  }
+  
+  // If all series are complete, fall back to the highest round
+  if (currentPair == null && alliancePairings.isNotEmpty) {
+    currentPair = alliancePairings.last;
   }
   
   // If no pairing found, show loading state
