@@ -3805,16 +3805,37 @@ static Future<void> autoCompleteMatchIfBothScored({
     final categoryId = int.parse(categoryResult.rows.first.assoc()['category_id'].toString());
     final categoryType = categoryResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? '';
     final bool isStarter = categoryType.contains('starter');
+    final bool isExplorer = categoryType.contains('explorer');
     final String teamScheduleTable = isStarter ? 'tbl_starter_teamschedule' : 'tbl_explorer_teamschedule';
+    final String scoreTable = isStarter
+      ? 'tbl_starter_score'
+      : (isExplorer ? 'tbl_explorer_score' : 'tbl_score');
     
     print("📋 Category: ${isStarter ? 'STARTER' : 'EXPLORER'}, Table: $teamScheduleTable");
     
-    // Get ALL teams in this match for this round
+    // Resolve the real schedule match_id using round_id + team_id
+    final scheduleMatchResult = await conn.execute("""
+      SELECT match_id FROM $teamScheduleTable
+      WHERE round_id = :roundId AND team_id = :teamId
+      LIMIT 1
+    """, {
+      "roundId": roundId,
+      "teamId": teamId,
+    });
+
+    if (scheduleMatchResult.rows.isEmpty) {
+      print("❌ No schedule match found for team $teamId, round $roundId in $teamScheduleTable");
+      return;
+    }
+
+    final realMatchId = int.parse(scheduleMatchResult.rows.first.assoc()['match_id'].toString());
+
+    // Get ALL teams in this schedule match for this round
     final teamsResult = await conn.execute("""
       SELECT team_id FROM $teamScheduleTable
       WHERE match_id = :matchId AND round_id = :roundId
     """, {
-      "matchId": matchId,
+      "matchId": realMatchId,
       "roundId": roundId,
     });
     
@@ -3822,7 +3843,7 @@ static Future<void> autoCompleteMatchIfBothScored({
       int.parse(r.assoc()['team_id'].toString())
     ).toList();
     
-    print("📋 Teams in match $matchId (from $teamScheduleTable): $teamIds");
+    print("📋 Teams in match $realMatchId (from $teamScheduleTable): $teamIds");
     
     // For Explorer, we need 4 teams (2 in RED + 2 in BLUE)
     // For Starter, we need 2 teams
@@ -3833,33 +3854,46 @@ static Future<void> autoCompleteMatchIfBothScored({
       return;
     }
     
-    // Check if each team has a score entry for this round
-    // IMPORTANT: Use the correct match_id and round_id
+    // Check if each team has a score entry for this round (ignore match_id in score table)
     bool allTeamsScored = true;
     final List<int> teamsWithScores = [];
     final List<int> teamsWithoutScores = [];
-    
-    for (final tid in teamIds) {
-      final scoreCheck = await conn.execute("""
-        SELECT COUNT(*) as cnt, score_totalscore 
-        FROM tbl_score
-        WHERE match_id = :matchId AND round_id = :roundId AND team_id = :teamId
-      """, {
-        "matchId": matchId,
-        "roundId": roundId,
-        "teamId": tid,
-      });
-      
-      final count = int.parse(scoreCheck.rows.first.assoc()['cnt']?.toString() ?? '0');
-      final score = int.parse(scoreCheck.rows.first.assoc()['score_totalscore']?.toString() ?? '0');
-      
-      if (count == 0) {
-        allTeamsScored = false;
-        teamsWithoutScores.add(tid);
-        print("   ❌ Team $tid has NO score yet");
-      } else {
-        teamsWithScores.add(tid);
-        print("   ✅ Team $tid has score: $score");
+
+    if (teamIds.isNotEmpty) {
+      final placeholders = <String>[];
+      final params = <String, dynamic>{"roundId": roundId};
+      for (var i = 0; i < teamIds.length; i++) {
+        final key = "tid$i";
+        placeholders.add(":$key");
+        params[key] = teamIds[i];
+      }
+
+      final scoreCheck = await conn.execute(
+        """
+        SELECT DISTINCT team_id, score_totalscore
+        FROM $scoreTable
+        WHERE round_id = :roundId AND team_id IN (${placeholders.join(',')})
+        """,
+        params,
+      );
+
+      final scoredMap = <int, int>{};
+      for (final row in scoreCheck.rows) {
+        final assoc = row.assoc();
+        final tid = int.parse(assoc['team_id'].toString());
+        final score = int.parse(assoc['score_totalscore']?.toString() ?? '0');
+        scoredMap[tid] = score;
+      }
+
+      for (final tid in teamIds) {
+        if (scoredMap.containsKey(tid)) {
+          teamsWithScores.add(tid);
+          print("   ✅ Team $tid has score: ${scoredMap[tid]}");
+        } else {
+          allTeamsScored = false;
+          teamsWithoutScores.add(tid);
+          print("   ❌ Team $tid has NO score yet");
+        }
       }
     }
     
@@ -3869,21 +3903,21 @@ static Future<void> autoCompleteMatchIfBothScored({
     
     // If all teams have scores, mark the match as completed
     if (allTeamsScored) {
-      print("🎉 ALL $requiredTeamCount TEAMS HAVE SCORES! Auto-completing match $matchId");
+      print("🎉 ALL $requiredTeamCount TEAMS HAVE SCORES! Auto-completing match $realMatchId");
       
       // Update the appropriate team schedule table
       await executeDual("""
         UPDATE $teamScheduleTable 
         SET status = 'completed'
         WHERE match_id = :matchId AND round_id = :roundId
-      """, {"matchId": matchId, "roundId": roundId});
+      """, {"matchId": realMatchId, "roundId": roundId});
       
       // Also update the main match table
       await executeDual("""
         UPDATE tbl_match 
         SET status = 'completed'
         WHERE match_id = :matchId
-      """, {"matchId": matchId});
+      """, {"matchId": realMatchId});
       
       // Update the main teamschedule table if it exists
       try {
@@ -3891,7 +3925,7 @@ static Future<void> autoCompleteMatchIfBothScored({
           UPDATE tbl_teamschedule 
           SET status = 'completed'
           WHERE match_id = :matchId AND round_id = :roundId
-        """, {"matchId": matchId, "roundId": roundId});
+        """, {"matchId": realMatchId, "roundId": roundId});
       } catch (e) {
         print("⚠️ Could not update tbl_teamschedule: $e");
       }
@@ -3901,7 +3935,7 @@ static Future<void> autoCompleteMatchIfBothScored({
         SELECT status FROM $teamScheduleTable
         WHERE match_id = :matchId AND round_id = :roundId
         LIMIT 1
-      """, {"matchId": matchId, "roundId": roundId});
+      """, {"matchId": realMatchId, "roundId": roundId});
       
       if (verifyResult.rows.isNotEmpty) {
         final newStatus = verifyResult.rows.first.assoc()['status']?.toString();
@@ -3913,7 +3947,7 @@ static Future<void> autoCompleteMatchIfBothScored({
         bracketUpdateController.add(categoryId);
       } catch (_) {}
       
-      print("✅✅✅ Match $matchId marked as completed in $teamScheduleTable");
+      print("✅✅✅ Match $realMatchId marked as completed in $teamScheduleTable");
       
     } else {
       print("⏳ Waiting for ${teamsWithoutScores.length} more team(s) to enter scores: $teamsWithoutScores");
@@ -3925,29 +3959,112 @@ static Future<void> autoCompleteMatchIfBothScored({
   }
 }
 
+static Future<void> reconcileExplorerQualificationStatus({int? categoryId}) async {
+  final conn = await getConnection();
+
+  try {
+    final List<int> categoryIds = [];
+    if (categoryId != null && categoryId > 0) {
+      categoryIds.add(categoryId);
+    } else {
+      final cats = await conn.execute(
+        "SELECT category_id FROM tbl_category WHERE LOWER(category_type) LIKE '%explorer%'",
+      );
+      for (final row in cats.rows) {
+        final id = int.tryParse(row.assoc()['category_id']?.toString() ?? '0') ?? 0;
+        if (id > 0) categoryIds.add(id);
+      }
+    }
+
+    for (final catId in categoryIds) {
+      final matches = await conn.execute(
+        """
+        SELECT ts.match_id, ts.round_id, GROUP_CONCAT(ts.team_id) AS team_ids
+        FROM tbl_explorer_teamschedule ts
+        JOIN tbl_team t ON ts.team_id = t.team_id
+        WHERE t.category_id = :catId
+        GROUP BY ts.match_id, ts.round_id
+        """,
+        {"catId": catId},
+      );
+
+      for (final row in matches.rows) {
+        final assoc = row.assoc();
+        final matchId = int.tryParse(assoc['match_id']?.toString() ?? '0') ?? 0;
+        final roundId = int.tryParse(assoc['round_id']?.toString() ?? '0') ?? 0;
+        final teamIdsCsv = assoc['team_ids']?.toString() ?? '';
+
+        if (matchId == 0 || roundId == 0 || teamIdsCsv.isEmpty) {
+          continue;
+        }
+
+        final teamIds = teamIdsCsv
+            .split(',')
+            .map((v) => int.tryParse(v.trim()) ?? 0)
+            .where((v) => v > 0)
+            .toList();
+
+        if (teamIds.isEmpty) continue;
+
+        final placeholders = <String>[];
+        final params = <String, dynamic>{"roundId": roundId};
+        for (var i = 0; i < teamIds.length; i++) {
+          final key = "tid$i";
+          placeholders.add(":$key");
+          params[key] = teamIds[i];
+        }
+
+        final scoreCheck = await conn.execute(
+          """
+          SELECT COUNT(DISTINCT team_id) AS cnt
+          FROM tbl_explorer_score
+          WHERE round_id = :roundId AND team_id IN (${placeholders.join(',')})
+          """,
+          params,
+        );
+
+        final scoredCount = int.tryParse(
+              scoreCheck.rows.first.assoc()['cnt']?.toString() ?? '0',
+            ) ??
+            0;
+
+        if (scoredCount == teamIds.length) {
+          await executeDual(
+            """
+            UPDATE tbl_explorer_teamschedule
+            SET status = 'completed'
+            WHERE match_id = :matchId AND round_id = :roundId
+            """,
+            {"matchId": matchId, "roundId": roundId},
+          );
+        }
+      }
+    }
+  } catch (e) {
+    print("❌ Error reconciling Explorer schedule status: $e");
+  }
+}
+
 /// Check if a match should be marked as pending (when scores are missing)
 /// Call this after deleting scores
 static Future<void> checkAndRevertMatchStatusIfNeeded({
   required int matchId,
   required int roundId,
+  required int teamId,
 }) async {
   final conn = await getConnection();
   
   try {
     print("🔍 Checking if match $matchId should be reverted from completed to pending");
     
-    // Get category info first
+    // Get category info from team_id
     final categoryResult = await conn.execute("""
-      SELECT t.category_id, t.team_id, c.category_type
-      FROM tbl_teamschedule ts
-      JOIN tbl_team t ON ts.team_id = t.team_id
+      SELECT c.category_id, c.category_type
+      FROM tbl_team t
       JOIN tbl_category c ON t.category_id = c.category_id
-      WHERE ts.match_id = :matchId AND ts.round_id = :roundId
+      WHERE t.team_id = :teamId
       LIMIT 1
-    """, {
-      "matchId": matchId,
-      "roundId": roundId,
-    });
+    """, {"teamId": teamId});
     
     if (categoryResult.rows.isEmpty) {
       print("⚠️ Could not find match $matchId, round $roundId");
@@ -3956,15 +4073,35 @@ static Future<void> checkAndRevertMatchStatusIfNeeded({
     
     final categoryType = categoryResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? '';
     final bool isStarter = categoryType.contains('starter');
+    final bool isExplorer = categoryType.contains('explorer');
     final String teamScheduleTable = isStarter ? 'tbl_starter_teamschedule' : 'tbl_explorer_teamschedule';
-    final int requiredTeamCount = isStarter ? 2 : 4;
+    final String scoreTable = isStarter
+      ? 'tbl_starter_score'
+      : (isExplorer ? 'tbl_explorer_score' : 'tbl_score');
     
-    // Get all teams in this match
+    // Resolve the real schedule match_id using round_id + team_id
+    final scheduleMatchResult = await conn.execute("""
+      SELECT match_id FROM $teamScheduleTable
+      WHERE round_id = :roundId AND team_id = :teamId
+      LIMIT 1
+    """, {
+      "roundId": roundId,
+      "teamId": teamId,
+    });
+
+    if (scheduleMatchResult.rows.isEmpty) {
+      print("⚠️ Could not find schedule match for team $teamId, round $roundId");
+      return;
+    }
+
+    final actualMatchId = int.parse(scheduleMatchResult.rows.first.assoc()['match_id'].toString());
+
+    // Get all teams in this schedule match
     final teamsResult = await conn.execute("""
       SELECT team_id FROM $teamScheduleTable
       WHERE match_id = :matchId AND round_id = :roundId
     """, {
-      "matchId": matchId,
+      "matchId": actualMatchId,
       "roundId": roundId,
     });
     
@@ -3972,8 +4109,9 @@ static Future<void> checkAndRevertMatchStatusIfNeeded({
       int.parse(r.assoc()['team_id'].toString())
     ).toList();
     
-    if (teamIds.length < requiredTeamCount) {
-      print("⚠️ Match $matchId has ${teamIds.length} teams, need $requiredTeamCount");
+    final requiredTeamCount = teamIds.length;
+    if (requiredTeamCount == 0) {
+      print("⚠️ Match has no teams for round $roundId");
       return;
     }
     
@@ -3981,21 +4119,33 @@ static Future<void> checkAndRevertMatchStatusIfNeeded({
     bool allTeamsStillScored = true;
     final List<int> teamsWithScores = [];
     
-    for (final tid in teamIds) {
-      final scoreCheck = await conn.execute("""
-        SELECT COUNT(*) as cnt FROM tbl_score
-        WHERE match_id = :matchId AND round_id = :roundId AND team_id = :teamId
-      """, {
-        "matchId": matchId,
-        "roundId": roundId,
-        "teamId": tid,
-      });
-      
-      final count = int.parse(scoreCheck.rows.first.assoc()['cnt']?.toString() ?? '0');
-      if (count > 0) {
-        teamsWithScores.add(tid);
-      } else {
-        allTeamsStillScored = false;
+    if (teamIds.isNotEmpty) {
+      final placeholders = <String>[];
+      final params = <String, dynamic>{"roundId": roundId};
+      for (var i = 0; i < teamIds.length; i++) {
+        final key = "tid$i";
+        placeholders.add(":$key");
+        params[key] = teamIds[i];
+      }
+
+      final scoreCheck = await conn.execute(
+        """
+        SELECT DISTINCT team_id FROM $scoreTable
+        WHERE round_id = :roundId AND team_id IN (${placeholders.join(',')})
+        """,
+        params,
+      );
+
+      final scoredSet = scoreCheck.rows.map((r) =>
+        int.parse(r.assoc()['team_id'].toString())
+      ).toSet();
+
+      for (final tid in teamIds) {
+        if (scoredSet.contains(tid)) {
+          teamsWithScores.add(tid);
+        } else {
+          allTeamsStillScored = false;
+        }
       }
     }
     
@@ -4003,21 +4153,21 @@ static Future<void> checkAndRevertMatchStatusIfNeeded({
     
     // If NOT all teams have scores, revert status to pending
     if (!allTeamsStillScored && teamsWithScores.length < requiredTeamCount) {
-      print("⚠️ Not all teams have scores - reverting match $matchId to pending");
+      print("⚠️ Not all teams have scores - reverting match $actualMatchId to pending");
       
       // Update the team schedule table
       await executeDual("""
         UPDATE $teamScheduleTable 
         SET status = 'pending'
         WHERE match_id = :matchId AND round_id = :roundId
-      """, {"matchId": matchId, "roundId": roundId});
+      """, {"matchId": actualMatchId, "roundId": roundId});
       
       // Update the main match table
       await executeDual("""
         UPDATE tbl_match 
         SET status = 'pending'
         WHERE match_id = :matchId
-      """, {"matchId": matchId});
+      """, {"matchId": actualMatchId});
       
       // Update main teamschedule if it exists
       try {
@@ -4025,12 +4175,12 @@ static Future<void> checkAndRevertMatchStatusIfNeeded({
           UPDATE tbl_teamschedule 
           SET status = 'pending'
           WHERE match_id = :matchId AND round_id = :roundId
-        """, {"matchId": matchId, "roundId": roundId});
+        """, {"matchId": actualMatchId, "roundId": roundId});
       } catch (e) {
         // Table might not have status column
       }
       
-      print("✅ Match $matchId reverted to pending");
+      print("✅ Match $actualMatchId reverted to pending");
       
       // Get category ID to emit update
       final catIdResult = await conn.execute("""
@@ -4039,7 +4189,7 @@ static Future<void> checkAndRevertMatchStatusIfNeeded({
         JOIN tbl_team t ON ts.team_id = t.team_id
         WHERE ts.match_id = :matchId
         LIMIT 1
-      """, {"matchId": matchId});
+      """, {"matchId": actualMatchId});
       
       if (catIdResult.rows.isNotEmpty) {
         final categoryId = int.parse(catIdResult.rows.first.assoc()['category_id'].toString());
@@ -4078,6 +4228,7 @@ static Future<void> deleteScore({
     await checkAndRevertMatchStatusIfNeeded(
       matchId: matchId,
       roundId: roundId,
+      teamId: teamId,
     );
     
   } catch (e) {

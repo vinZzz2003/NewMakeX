@@ -1131,7 +1131,16 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         JOIN tbl_category c ON t.category_id = c.category_id
         JOIN tbl_match m ON ts.match_id = m.match_id
         JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
-        ORDER BY c.category_id, s.schedule_start, ts.match_id
+        WHERE LOWER(c.category_type) NOT LIKE '%explorer%'
+        UNION ALL
+        SELECT c.category_id, ts.match_id, t.team_name, s.schedule_start
+        FROM tbl_explorer_teamschedule ts
+        JOIN tbl_team t ON ts.team_id = t.team_id
+        JOIN tbl_category c ON t.category_id = c.category_id
+        JOIN tbl_match m ON ts.match_id = m.match_id
+        JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
+        WHERE LOWER(c.category_type) LIKE '%explorer%'
+        ORDER BY category_id, schedule_start, match_id
       """);
       final rows = result.rows.map((r) => r.assoc()).toList();
       final signature = _buildSignature(rows);
@@ -1181,7 +1190,27 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       JOIN tbl_category c ON t.category_id = c.category_id
       JOIN tbl_match m ON ts.match_id = m.match_id
       JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
-      ORDER BY c.category_id, s.schedule_start, ts.match_id, ts.arena_number
+      WHERE LOWER(c.category_type) NOT LIKE '%explorer%'
+      UNION ALL
+      SELECT 
+        c.category_id, 
+        c.category_type,
+        ts.match_id, 
+        ts.round_id,
+        s.schedule_id,
+        s.schedule_start,
+        s.schedule_end,
+        ts.arena_number,
+        ts.status as match_status,
+        t.team_id,
+        t.team_name
+      FROM tbl_explorer_teamschedule ts
+      JOIN tbl_team t ON ts.team_id = t.team_id
+      JOIN tbl_category c ON t.category_id = c.category_id
+      JOIN tbl_match m ON ts.match_id = m.match_id
+      JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
+      WHERE LOWER(c.category_type) LIKE '%explorer%'
+      ORDER BY category_id, schedule_start, match_id, arena_number
     """);
 
     final rows = result.rows.map((r) => r.assoc()).toList();

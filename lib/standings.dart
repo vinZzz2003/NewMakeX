@@ -284,6 +284,10 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
   Timer? _autoRefreshTimer;
   String _lastDataSignature = '';
 
+   // ADD THESE TWO LINES:
+  Timer? _championshipRefreshTimer;
+  int? _currentChampionshipCategoryId;
+
   @override
   void initState() {
     super.initState();
@@ -305,20 +309,67 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
     return rows.map((r) => r.toString()).join('|');
   }
 
-  Future<void> _silentRefresh() async {
-  try {
-    // Just reload all data - this will fetch fresh Explorer scores
-    await _loadData(initial: false);
-    
-    if (mounted) {
-      setState(() {
-        _lastUpdated = DateTime.now();
-      });
+   Future<void> _silentRefresh() async {
+    try {
+      // Just reload all data - this will fetch fresh Explorer scores
+      await _loadData(initial: false);
+      
+      // Also refresh championship data for the currently selected Explorer category
+      if (_currentChampionshipCategoryId != null) {
+        await _refreshChampionshipData(_currentChampionshipCategoryId!);
+      }
+      
+      if (mounted) {
+        setState(() {
+          _lastUpdated = DateTime.now();
+        });
+      }
+    } catch (e) {
+      print("Silent refresh error: $e");
     }
-  } catch (e) {
-    print("Silent refresh error: $e");
   }
-}
+
+    Future<void> _refreshChampionshipData(int categoryId) async {
+    try {
+      print("🔄 Auto-refreshing Explorer championship data for category $categoryId");
+      
+      // Check if this is an Explorer category
+      final conn = await DBHelper.getConnection();
+      final catResult = await conn.execute(
+        "SELECT category_type FROM tbl_category WHERE category_id = :catId LIMIT 1",
+        {"catId": categoryId},
+      );
+      final categoryType = catResult.rows.isNotEmpty 
+          ? catResult.rows.first.assoc()['category_type']?.toString().toLowerCase() ?? ''
+          : '';
+      final bool isExplorer = categoryType.contains('explorer');
+      
+      if (!isExplorer) {
+        print("ℹ️ Not an Explorer category, skipping championship refresh");
+        return;
+      }
+      
+      // Reload Best-of-3 results
+      await _loadBestOf3Results(categoryId);
+      
+      // Reload match pairings
+      await _loadMatchPairings(categoryId);
+      
+      // Reload championship standings
+      await _loadChampionshipStandings(categoryId);
+      
+      // Reorder standings based on latest data
+      await _reorderChampionshipStandings(categoryId);
+      
+      if (mounted) {
+        setState(() {});
+      }
+      
+      print("✅ Explorer championship data refreshed for category $categoryId");
+    } catch (e) {
+      print("❌ Error refreshing championship data: $e");
+    }
+  }
 
   Future<void> _loadMatchPairings(int categoryId) async {
   try {
@@ -5578,10 +5629,11 @@ Widget _buildChampionshipRow({
 
     // Get all matches that will be affected
     final matchesResult = await conn.execute("""
-      SELECT DISTINCT ts.match_id, ts.round_id
+      SELECT ts.match_id, ts.round_id, MIN(ts.team_id) as team_id
       FROM tbl_teamschedule ts
       JOIN tbl_team t ON ts.team_id = t.team_id
       WHERE t.category_id = :catId
+      GROUP BY ts.match_id, ts.round_id
     """, {"catId": categoryId});
 
     // First, delete existing scores from both tables
@@ -5627,10 +5679,12 @@ Widget _buildChampionshipRow({
     for (final row in matchesResult.rows) {
       final matchId = int.parse(row.assoc()['match_id'].toString());
       final roundId = int.parse(row.assoc()['round_id'].toString());
+      final teamId = int.parse(row.assoc()['team_id'].toString());
       
       await DBHelper.checkAndRevertMatchStatusIfNeeded(
         matchId: matchId,
         roundId: roundId,
+        teamId: teamId,
       );
     }
 
@@ -5714,10 +5768,11 @@ Widget _buildChampionshipRow({
     
     // Get all matches that will be affected
     final matchesResult = await conn.execute("""
-      SELECT DISTINCT ts.match_id, ts.round_id
+      SELECT ts.match_id, ts.round_id, MIN(ts.team_id) as team_id
       FROM tbl_teamschedule ts
       JOIN tbl_team t ON ts.team_id = t.team_id
       WHERE t.category_id = :catId
+      GROUP BY ts.match_id, ts.round_id
     """, {"catId": categoryId});
     
     // Delete scores from the appropriate table
@@ -5744,10 +5799,12 @@ Widget _buildChampionshipRow({
     for (final row in matchesResult.rows) {
       final matchId = int.parse(row.assoc()['match_id'].toString());
       final roundId = int.parse(row.assoc()['round_id'].toString());
+      final teamId = int.parse(row.assoc()['team_id'].toString());
       
       await DBHelper.checkAndRevertMatchStatusIfNeeded(
         matchId: matchId,
         roundId: roundId,
+        teamId: teamId,
       );
     }
     
@@ -6556,6 +6613,10 @@ Widget _buildDurationField({
       
       print("📊 Loading category $catId (isExplorer: $isExplorer)");
 
+      if (isExplorer) {
+        await DBHelper.reconcileExplorerQualificationStatus(categoryId: catId);
+      }
+
       final conn = await DBHelper.getConnection();
       
       String sql;
@@ -6782,7 +6843,7 @@ Widget _buildDurationField({
     );
   }
 
-  Widget _buildStandingsView(
+   Widget _buildStandingsView(
   Map<String, dynamic> category,
   int categoryId,
   List<Map<String, dynamic>> rows,
@@ -6839,6 +6900,21 @@ Widget _buildDurationField({
 
   StandingType selectedType =
       _selectedTypeByCategory[categoryId] ?? StandingType.qualification;
+
+  // ADD THIS BLOCK - Track when championship tab is selected for Explorer
+  if (selectedType == StandingType.championship && isExplorer) {
+    if (_currentChampionshipCategoryId != categoryId) {
+      _currentChampionshipCategoryId = categoryId;
+      // Initial load of championship data
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _loadMatchPairings(categoryId);
+        _loadBestOf3Results(categoryId);
+        _loadChampionshipStandings(categoryId);
+      });
+    }
+  } else if (_currentChampionshipCategoryId == categoryId) {
+    _currentChampionshipCategoryId = null;
+  }
 
   return Column(
     children: [
