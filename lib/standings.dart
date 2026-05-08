@@ -423,91 +423,161 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
       hasData = false;
     }
 
-    if (!hasData) {
-      print("ℹ️ No bracket data found for category $categoryId");
-      if (mounted) {
-        setState(() {
-          _allianceMatchPairings[categoryId] = {};
-          _championshipPairingsByMatch[categoryId] = {};
-          _isLoadingAllianceByCategory[categoryId] = false;
-        });
-      }
-      return;
-    }
-
-    // Execute the query and store the result
-    final queryResult = await conn.execute(
-      """
-      SELECT 
-        de.match_id,
-        de.round_number,
-        de.match_position,
-        de.bracket_side,
-        de.alliance1_id,
-        de.alliance2_id,
-        a1.selection_round as alliance1_rank,
-        a2.selection_round as alliance2_rank,
-        COALESCE(t1.team_name, 'Unknown') as captain1_name,
-        COALESCE(t2.team_name, 'Unknown') as partner1_name,
-        COALESCE(t3.team_name, 'Unknown') as captain2_name,
-        COALESCE(t4.team_name, 'Unknown') as partner2_name
-      FROM $doubleTable de
-      LEFT JOIN tbl_alliance_selections a1 ON de.alliance1_id = a1.alliance_id
-      LEFT JOIN tbl_alliance_selections a2 ON de.alliance2_id = a2.alliance_id
-      LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
-      LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
-      LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
-      LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
-      WHERE de.category_id = :catId
-      ORDER BY 
-        CASE de.bracket_side WHEN 'winners' THEN 1 WHEN 'losers' THEN 2 WHEN 'grand' THEN 3 END,
-        de.round_number, de.match_position
-    """,
-      {"catId": categoryId},
-    );
-
     final Map<int, AllianceMatchPair> pairings = {};
     final Map<int, AllianceMatchPair> pairByMatch = {};
-    
-    // Track seen matches by (round, position, side) to deduplicate
-    final Set<String> seenMatches = {};
 
-    for (final row in queryResult.rows) {
-      final data = row.assoc();
-      final matchId = int.parse(data['match_id'].toString());
-      final roundNumber = int.parse(data['round_number']?.toString() ?? '1');
-      final matchPosition = int.parse(data['match_position']?.toString() ?? '1');
-      final bracketSide = data['bracket_side']?.toString() ?? 'winners';
-      
-      // Create unique key
-      final key = '${roundNumber}_${matchPosition}_${bracketSide}';
-      
-      // Get alliance IDs
-      final alliance1Id = int.parse(data['alliance1_id']?.toString() ?? '0');
-      final alliance2Id = int.parse(data['alliance2_id']?.toString() ?? '0');
-      
-      // If we've seen this match before, check if current entry is better
-      if (seenMatches.contains(key)) {
-        final existing = pairByMatch[matchId];
-        
-        // Keep the entry with actual alliances, skip TBD entries if we have a better one
-        if ((alliance1Id == 0 || alliance2Id == 0) && 
-            existing != null && 
-            existing.alliance1Id != 0 && 
-            existing.alliance2Id != 0) {
-          continue; // Skip this TBD entry
+    if (hasData) {
+      // Execute the query and store the result
+      final queryResult = await conn.execute(
+        """
+        SELECT 
+          de.match_id,
+          de.round_number,
+          de.match_position,
+          de.bracket_side,
+          de.alliance1_id,
+          de.alliance2_id,
+          a1.selection_round as alliance1_rank,
+          a2.selection_round as alliance2_rank,
+          COALESCE(t1.team_name, 'Unknown') as captain1_name,
+          COALESCE(t2.team_name, 'Unknown') as partner1_name,
+          COALESCE(t3.team_name, 'Unknown') as captain2_name,
+          COALESCE(t4.team_name, 'Unknown') as partner2_name
+        FROM $doubleTable de
+        LEFT JOIN tbl_alliance_selections a1 ON de.alliance1_id = a1.alliance_id
+        LEFT JOIN tbl_alliance_selections a2 ON de.alliance2_id = a2.alliance_id
+        LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
+        LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
+        LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
+        LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
+        WHERE de.category_id = :catId
+        ORDER BY 
+          CASE de.bracket_side WHEN 'winners' THEN 1 WHEN 'losers' THEN 2 WHEN 'grand' THEN 3 END,
+          de.round_number, de.match_position
+      """,
+        {"catId": categoryId},
+      );
+
+      // Track seen matches by (round, position, side) to deduplicate
+      final Set<String> seenMatches = {};
+
+      for (final row in queryResult.rows) {
+        final data = row.assoc();
+        final matchId = int.parse(data['match_id'].toString());
+        final roundNumber = int.parse(data['round_number']?.toString() ?? '1');
+        final matchPosition = int.parse(data['match_position']?.toString() ?? '1');
+        final bracketSide = data['bracket_side']?.toString() ?? 'winners';
+
+        // Create unique key
+        final key = '${roundNumber}_${matchPosition}_${bracketSide}';
+
+        // Get alliance IDs
+        final alliance1Id = int.parse(data['alliance1_id']?.toString() ?? '0');
+        final alliance2Id = int.parse(data['alliance2_id']?.toString() ?? '0');
+
+        // If we've seen this match before, check if current entry is better
+        if (seenMatches.contains(key)) {
+          final existing = pairByMatch[matchId];
+
+          // Keep the entry with actual alliances, skip TBD entries if we have a better one
+          if ((alliance1Id == 0 || alliance2Id == 0) &&
+              existing != null &&
+              existing.alliance1Id != 0 &&
+              existing.alliance2Id != 0) {
+            continue; // Skip this TBD entry
+          }
+        }
+
+        seenMatches.add(key);
+
+        // Only store matches that have at least one alliance (for display purposes)
+        if (alliance1Id != 0 && alliance2Id != 0) {
+          final alliance1Rank = int.parse(data['alliance1_rank']?.toString() ?? '0');
+          final alliance2Rank = int.parse(data['alliance2_rank']?.toString() ?? '0');
+          final alliance1Name = '${data['captain1_name']} / ${data['partner1_name']}';
+          final alliance2Name = '${data['captain2_name']} / ${data['partner2_name']}';
+
+          final pair = AllianceMatchPair(
+            matchId: matchId,
+            alliance1Id: alliance1Id,
+            alliance2Id: alliance2Id,
+            alliance1Rank: alliance1Rank,
+            alliance2Rank: alliance2Rank,
+            alliance1Name: alliance1Name,
+            alliance2Name: alliance2Name,
+            roundNumber: roundNumber,
+            matchPosition: matchPosition,
+            bracketSide: bracketSide,
+          );
+
+          pairings[matchId] = pair;
+          pairByMatch[matchId] = pair;
+
+          print("📊 Loaded match: Round $roundNumber, Pos $matchPosition, Side $bracketSide");
         }
       }
-      
-      seenMatches.add(key);
-      
-      // Only store matches that have at least one alliance (for display purposes)
-      if (alliance1Id != 0 && alliance2Id != 0) {
+    }
+
+    // Fall back to the schedule table for missing or not-yet-synced rounds
+    try {
+      final scheduleTable = await _resolveScheduleTable(categoryId);
+      final scheduleResult = await conn.execute(
+        """
+        SELECT
+          cs.match_id,
+          cs.match_round as round_number,
+          cs.match_position,
+          cs.bracket_side,
+          cs.alliance1_id,
+          cs.alliance2_id,
+          a1.selection_round as alliance1_rank,
+          a2.selection_round as alliance2_rank,
+          COALESCE(t1.team_name, 'Unknown') as captain1_name,
+          COALESCE(t2.team_name, 'Unknown') as partner1_name,
+          COALESCE(t3.team_name, 'Unknown') as captain2_name,
+          COALESCE(t4.team_name, 'Unknown') as partner2_name
+        FROM $scheduleTable cs
+        LEFT JOIN tbl_alliance_selections a1 ON cs.alliance1_id = a1.alliance_id
+        LEFT JOIN tbl_alliance_selections a2 ON cs.alliance2_id = a2.alliance_id
+        LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
+        LEFT JOIN tbl_team t2 ON a1.partner_team_id = t2.team_id
+        LEFT JOIN tbl_team t3 ON a2.captain_team_id = t3.team_id
+        LEFT JOIN tbl_team t4 ON a2.partner_team_id = t4.team_id
+        WHERE cs.category_id = :catId
+        ORDER BY
+          CASE cs.bracket_side WHEN 'winners' THEN 1 WHEN 'losers' THEN 2 WHEN 'grand' THEN 3 END,
+          cs.match_round, cs.match_position
+      """,
+        {"catId": categoryId},
+      );
+
+      final Set<String> existingKeys = pairings.values
+          .map((p) => '${p.roundNumber}_${p.matchPosition}_${p.bracketSide}')
+          .toSet();
+
+      for (final row in scheduleResult.rows) {
+        final data = row.assoc();
+        final matchId = int.parse(data['match_id'].toString());
+        final roundNumber = int.parse(data['round_number']?.toString() ?? '1');
+        final matchPosition = int.parse(data['match_position']?.toString() ?? '1');
+        final bracketSide = data['bracket_side']?.toString() ?? 'winners';
+
+        final key = '${roundNumber}_${matchPosition}_${bracketSide}';
+        if (existingKeys.contains(key)) {
+          continue;
+        }
+
+        final alliance1Id = int.parse(data['alliance1_id']?.toString() ?? '0');
+        final alliance2Id = int.parse(data['alliance2_id']?.toString() ?? '0');
+        if (alliance1Id == 0 || alliance2Id == 0) {
+          continue;
+        }
+
         final alliance1Rank = int.parse(data['alliance1_rank']?.toString() ?? '0');
         final alliance2Rank = int.parse(data['alliance2_rank']?.toString() ?? '0');
         final alliance1Name = '${data['captain1_name']} / ${data['partner1_name']}';
         final alliance2Name = '${data['captain2_name']} / ${data['partner2_name']}';
-        
+
         final pair = AllianceMatchPair(
           matchId: matchId,
           alliance1Id: alliance1Id,
@@ -520,12 +590,25 @@ class _StandingsState extends State<Standings> with TickerProviderStateMixin {
           matchPosition: matchPosition,
           bracketSide: bracketSide,
         );
-        
+
         pairings[matchId] = pair;
         pairByMatch[matchId] = pair;
-        
-        print("📊 Loaded match: Round $roundNumber, Pos $matchPosition, Side $bracketSide");
+        existingKeys.add(key);
       }
+    } catch (e) {
+      print("⚠️ Schedule fallback failed: $e");
+    }
+
+    if (!hasData && pairings.isEmpty) {
+      print("ℹ️ No bracket or schedule data found for category $categoryId");
+      if (mounted) {
+        setState(() {
+          _allianceMatchPairings[categoryId] = {};
+          _championshipPairingsByMatch[categoryId] = {};
+          _isLoadingAllianceByCategory[categoryId] = false;
+        });
+      }
+      return;
     }
 
     if (mounted) {

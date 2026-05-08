@@ -141,7 +141,18 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
       return;
     }
     
-    // For Explorer: Check bracket data as before
+    // For Explorer schedule view: force schedule table
+    if (_isExplorer && _currentView == ChampionshipView.schedule) {
+      final matches = await _getMatchesFromSchedule();
+      setState(() {
+        _matches = matches;
+        _isLoading = false;
+      });
+      print("🏆 ChampionshipSchedule: Loaded ${matches.length} matches from schedule table (Explorer)");
+      return;
+    }
+
+    // For Explorer bracket view: check bracket data as before
     bool hasBracketData = false;
     
     try {
@@ -547,10 +558,12 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
   Future<List<Map<String, dynamic>>> _getMatchesFromSchedule() async {
   final conn = await DBHelper.getConnection();
   
+  // Decide schedule table based on category
+  final String scheduleTable = _isExplorer ? 'tbl_explorer_championship_schedule' : 'tbl_championship_schedule';
   try {
-    await conn.execute("SELECT 1 FROM tbl_championship_schedule LIMIT 1");
+    await conn.execute("SELECT 1 FROM $scheduleTable LIMIT 1");
   } catch (e) {
-    print("⚠️ tbl_championship_schedule doesn't exist yet");
+    print("⚠️ $scheduleTable doesn't exist yet");
     return [];
   }
   
@@ -589,7 +602,7 @@ class _ChampionshipScheduleState extends State<ChampionshipSchedule> {
       t4.team_name as partner2_name,
       a1.selection_round as alliance1_rank,
       a2.selection_round as alliance2_rank
-    FROM tbl_championship_schedule cs
+    FROM $scheduleTable cs
     LEFT JOIN $allianceTable a1 ON cs.alliance1_id = a1.alliance_id
     LEFT JOIN $allianceTable a2 ON cs.alliance2_id = a2.alliance_id
     LEFT JOIN tbl_team t1 ON a1.captain_team_id = t1.team_id
