@@ -2203,6 +2203,13 @@ static Future<dynamic> executeDual(
       } catch (e) {
         print("ℹ️ Column check for explorer championship schedule: $e");
       }
+
+      // Rebuild the mirrored explorer schedule so repeated syncs do not
+      // accumulate duplicate rows for the same series/match number.
+      await conn.execute(
+        "DELETE FROM tbl_explorer_championship_schedule WHERE category_id = :catId",
+        {"catId": categoryId},
+      );
       
       await conn.execute("""
         INSERT INTO tbl_explorer_championship_schedule 

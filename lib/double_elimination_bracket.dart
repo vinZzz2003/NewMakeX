@@ -544,36 +544,9 @@ String _getAllianceRank(int allianceId) {
             int.tryParse(rd['match_position']?.toString() ?? '0') ?? 0;
 
         if (roundNum > 0 && matchPos > 0) {
-          final scheduleMatch = await conn.execute(
-            """
-            SELECT match_id, status FROM tbl_championship_schedule
-            WHERE category_id = :catId AND match_round = :roundNum AND match_position = :matchPos
-          """,
-            {
-              "catId": widget.categoryId,
-              "roundNum": roundNum,
-              "matchPos": matchPos,
-            },
+          print(
+            "ℹ️ Skipping direct schedule completion sync for match $matchId (round $roundNum pos $matchPos); best-of-3 sync handles schedule status per match_number.",
           );
-
-          if (scheduleMatch.rows.isNotEmpty) {
-            await DBHelper.executeDual(
-              """
-                UPDATE tbl_championship_schedule 
-                SET status = 'completed', winner_alliance_id = :winnerId
-                WHERE category_id = :catId AND match_round = :roundNum AND match_position = :matchPos
-              """,
-              {
-                "winnerId": winnerId,
-                "catId": widget.categoryId,
-                "roundNum": roundNum,
-                "matchPos": matchPos,
-              },
-            );
-            print(
-              "✅ Synced with schedule tab: Match $matchId completed (round $roundNum pos $matchPos)",
-            );
-          }
         }
       }
     } catch (e) {
@@ -2801,6 +2774,38 @@ if (roundName == 'GF1' && bracketSide == 'grand') {
                 0;
 
         return hasWinner1 && hasWinner2;
+      }
+
+      // If the bracket table is still catching up, allow the schedule mirror
+      // to decide readiness as long as both alliances are present there.
+      final scheduleResult = await conn.execute(
+        """
+        SELECT alliance1_id, alliance2_id, status
+        FROM tbl_explorer_championship_schedule
+        WHERE category_id = :catId
+          AND match_round = :roundNum
+          AND match_position = :matchPos
+          AND bracket_side = 'winners'
+        ORDER BY match_number ASC
+        LIMIT 1
+      """,
+        {
+          "catId": widget.categoryId,
+          "roundNum": round,
+          "matchPos": pos,
+        },
+      );
+
+      if (scheduleResult.rows.isNotEmpty) {
+        final scheduleData = scheduleResult.rows.first.assoc();
+        final scheduleA1 = int.tryParse(scheduleData['alliance1_id']?.toString() ?? '0') ?? 0;
+        final scheduleA2 = int.tryParse(scheduleData['alliance2_id']?.toString() ?? '0') ?? 0;
+        final scheduleStatus = scheduleData['status']?.toString() ?? '';
+
+        if (scheduleA1 > 0 && scheduleA2 > 0 &&
+            scheduleStatus != 'completed' && scheduleStatus != 'break') {
+          return true;
+        }
       }
     } else if (roundName.startsWith('L')) {
       final parts = roundName.split('_');
