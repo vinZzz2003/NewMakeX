@@ -2,7 +2,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 
 class AdminApiService {
-  static const String baseUrl = 'http://175.20.0.19/roboventure_api';
+  static const String baseUrl = 'http:// 192.168.1.14/roboventure_api';
   
   static Future<List<Map<String, dynamic>>> getQualifiedTeams(int categoryId) async {
     final url = Uri.parse('$baseUrl/admin_alliance_selection.php?action=get_qualified_teams&category_id=$categoryId');

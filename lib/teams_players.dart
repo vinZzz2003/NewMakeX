@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'db_helper.dart';
+import 'constants.dart';
 
 // ── Accent palette per category index ────────────────────────────────────────
 const _kCatColors = [
@@ -523,6 +524,7 @@ Expanded(
                 catIndex: widget.catIndex,
                 isPresent: true,
                 onTeamUpdated: widget.onRefresh,  // Add this
+                categoryType: widget.category['category_type'] ?? '',
               ),
             ),
             // Divider
@@ -541,6 +543,7 @@ Expanded(
                 catIndex: widget.catIndex,
                 isPresent: false,
                 onTeamUpdated: widget.onRefresh,  // Add this
+                categoryType: widget.category['category_type'] ?? '',
               ),
             ),
           ],
@@ -705,7 +708,8 @@ class _TeamColumn extends StatelessWidget {
   final String emptyLabel;
   final int catIndex;
   final bool isPresent;
-  final VoidCallback onTeamUpdated;  // Add this
+  final VoidCallback onTeamUpdated;
+  final String categoryType;  // ADD THIS FIELD
 
   const _TeamColumn({
     required this.teams,
@@ -715,7 +719,8 @@ class _TeamColumn extends StatelessWidget {
     required this.emptyLabel,
     required this.catIndex,
     required this.isPresent,
-    required this.onTeamUpdated,  // Add this
+    required this.onTeamUpdated,
+    required this.categoryType,  // ADD THIS PARAMETER
   });
 
   @override
@@ -754,7 +759,8 @@ class _TeamColumn extends StatelessWidget {
             catIndex: catIndex,
             cardIndex: index,
             isPresent: isPresent,
-            onTeamUpdated: onTeamUpdated,  // Pass it down
+            onTeamUpdated: onTeamUpdated,
+            categoryType: categoryType,  // USE THE FIELD, NOT widget.categoryType
           ),
         );
       },
@@ -773,6 +779,7 @@ class _TeamCard extends StatefulWidget {
   final int cardIndex;
   final bool isPresent;
   final VoidCallback onTeamUpdated;
+  final String categoryType;
 
   const _TeamCard({
     required this.team,
@@ -782,6 +789,7 @@ class _TeamCard extends StatefulWidget {
     required this.cardIndex,
     required this.isPresent,
     required this.onTeamUpdated,
+    required this.categoryType,
   });
 
   @override
@@ -1474,10 +1482,10 @@ class _TeamCardState extends State<_TeamCard> with SingleTickerProviderStateMixi
                             ),
                             child: Center(
                               child: Text(
-                                '#$teamId',
-                                style: TextStyle(
-                                    color: accent, fontWeight: FontWeight.w900, fontSize: 11),
-                              ),
+  formatTeamId(int.parse(teamId), widget.categoryType),
+  style: TextStyle(
+      color: accent, fontWeight: FontWeight.w900, fontSize: 11),
+),
                             ),
                           ),
                           // Status indicator dot on badge

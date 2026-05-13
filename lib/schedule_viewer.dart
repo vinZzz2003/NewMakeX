@@ -306,73 +306,45 @@ class _EnhancedMatchCardState extends State<_EnhancedMatchCard>
   }
 
   Widget _buildCompactAllianceCard({
-    required String name,
-    required List<Map<String, String>> teams,
-    required Color color,
-  }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            color.withOpacity(0.12),
-            color.withOpacity(0.04),
-          ],
-        ),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: color.withOpacity(0.25),
-          width: 0.5,
-        ),
-      ),
-      child: Column(
-        children: [
-          Text(
-            name,
-            style: TextStyle(
-              color: color,
-              fontWeight: FontWeight.bold,
-              fontSize: 9,
-              letterSpacing: 0.5,
-            ),
-          ),
-          const SizedBox(height: 4),
-          ...teams.take(2).map((team) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 1),
-                child: Column(
-                  children: [
-                    Text(
-                      team['team_name']!,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w500,
-                        fontSize: 10,
-                      ),
-                      textAlign: TextAlign.center,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    Text(
-                      'ID: ${team['team_id']}',
-                      style: TextStyle(
-                        color: Colors.white.withOpacity(0.4),
-                        fontSize: 7,
-                      ),
-                    ),
-                  ],
-                ),
-              )),
-          if (teams.isEmpty)
-            const Text(
-              '—',
-              style: TextStyle(color: Colors.white24, fontSize: 12),
-            ),
+  required String name,
+  required List<Map<String, String>> teams,
+  required Color color,
+}) {
+  // Build the team names string
+  final String teamNames = teams.map((team) => team['team_name']!).join(' / ');
+  
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+    decoration: BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          color.withOpacity(0.1),
+          color.withOpacity(0.03),
         ],
       ),
-    );
-  }
+      borderRadius: BorderRadius.circular(8),
+      border: Border.all(
+        color: color.withOpacity(0.2),
+        width: 0.5,
+      ),
+    ),
+    child: Center(
+      child: Text(
+        teamNames.isNotEmpty ? teamNames : '—',
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.w600,
+          fontSize: 16,  // Changed from 11 to 14 for better readability
+        ),
+        textAlign: TextAlign.center,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
+    ),
+  );
+}
 }
 
 // ── Soccer match score model ─────────────────────────────────────────────────

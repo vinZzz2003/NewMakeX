@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'db_helper.dart';
 import 'teams_players.dart';
+import 'constants.dart';
+import 'overall_standings.dart';
 
 enum StandingType { qualification, championship, battleOfChampions }
 
@@ -6450,22 +6452,41 @@ _buildDurationField(
       if (refereeId == 0) refereeId = null;
     }
 
-    int previousAlliance = 0;
-int previousViolation = 0;  // ADD THIS
+int previousAlliance = 0;
+int previousViolation = 0;
 int previousIndividual = 0;
 try {
-  final prevRes = await conn.execute(
-    """
-    SELECT score_alliance, score_violation, score_individual FROM tbl_score
-    WHERE team_id = :teamId AND round_id = :roundId
-    LIMIT 1
-    """,
-    {"teamId": teamId, "roundId": roundId},
-  );
-  if (prevRes.rows.isNotEmpty) {
-    previousAlliance = int.tryParse(prevRes.rows.first.assoc()['score_alliance']?.toString() ?? '0') ?? 0;
-    previousViolation = int.tryParse(prevRes.rows.first.assoc()['score_violation']?.toString() ?? '0') ?? 0;  // ADD THIS
-    previousIndividual = int.tryParse(prevRes.rows.first.assoc()['score_individual']?.toString() ?? '0') ?? 0;
+  if (isExplorer) {
+    // For Explorer: Read from tbl_explorer_score, using score_independentscore for alliance
+    final prevRes = await conn.execute(
+      """
+      SELECT score_independentscore as alliance_score, score_violation, score_individual 
+      FROM tbl_explorer_score
+      WHERE team_id = :teamId AND round_id = :roundId
+      LIMIT 1
+      """,
+      {"teamId": teamId, "roundId": roundId},
+    );
+    if (prevRes.rows.isNotEmpty) {
+      previousAlliance = int.tryParse(prevRes.rows.first.assoc()['alliance_score']?.toString() ?? '0') ?? 0;
+      previousViolation = int.tryParse(prevRes.rows.first.assoc()['score_violation']?.toString() ?? '0') ?? 0;
+      previousIndividual = int.tryParse(prevRes.rows.first.assoc()['score_individual']?.toString() ?? '0') ?? 0;
+    }
+  } else {
+    // For Starter: Read from tbl_score
+    final prevRes = await conn.execute(
+      """
+      SELECT score_alliance, score_violation, score_individual FROM tbl_score
+      WHERE team_id = :teamId AND round_id = :roundId
+      LIMIT 1
+      """,
+      {"teamId": teamId, "roundId": roundId},
+    );
+    if (prevRes.rows.isNotEmpty) {
+      previousAlliance = int.tryParse(prevRes.rows.first.assoc()['score_alliance']?.toString() ?? '0') ?? 0;
+      previousViolation = int.tryParse(prevRes.rows.first.assoc()['score_violation']?.toString() ?? '0') ?? 0;
+      previousIndividual = int.tryParse(prevRes.rows.first.assoc()['score_individual']?.toString() ?? '0') ?? 0;
+    }
   }
 } catch (e) {
   print("⚠️ Could not read previous scores: $e");
@@ -6704,6 +6725,7 @@ Widget _buildDurationField({
       
       String sql;
       if (isExplorer) {
+        // UPDATED: Read from all columns to properly reconstruct scores
         sql = """
           SELECT 
             s.team_id, 
@@ -6711,7 +6733,8 @@ Widget _buildDurationField({
             s.score_independentscore as alliance_score,
             s.score_violation as violation,
             s.score_totalscore as total_score,
-            s.score_totalduration as duration
+            s.score_totalduration as duration,
+            s.score_individual as individual_score
           FROM tbl_explorer_score s
           JOIN tbl_team t ON s.team_id = t.team_id
           WHERE t.category_id = :catId
@@ -6766,9 +6789,13 @@ Widget _buildDurationField({
         int violation;
         
         if (isExplorer) {
+          // For Explorer: Use the correct column mapping matching Scoring App
+          // Scoring App stores alliance score in score_independentscore
           allianceScore = int.tryParse(row['alliance_score']?.toString() ?? '0') ?? 0;
           violation = int.tryParse(row['violation']?.toString() ?? '0') ?? 0;
-          individualScore = allianceScore - violation;
+          // Try to read individual_score if available, otherwise calculate
+          final storedIndividual = int.tryParse(row['individual_score']?.toString() ?? '0') ?? 0;
+          individualScore = storedIndividual > 0 ? storedIndividual : (allianceScore - violation);
         } else {
           individualScore = int.tryParse(row['individual_score']?.toString() ?? '0') ?? 0;
           allianceScore = int.tryParse(row['alliance_score']?.toString() ?? '0') ?? 0;
@@ -6926,7 +6953,7 @@ Widget _buildDurationField({
     );
   }
 
-   Widget _buildStandingsView(
+  Widget _buildStandingsView(
   Map<String, dynamic> category,
   int categoryId,
   List<Map<String, dynamic>> rows,
@@ -7162,6 +7189,8 @@ Widget _buildDurationField({
                   ),
 
                 _buildLiveIndicator(),
+                
+                // Teams & Players button
                 IconButton(
                   tooltip: 'Teams & Players',
                   icon: const Icon(
@@ -7178,6 +7207,28 @@ Widget _buildDurationField({
                     );
                   },
                 ),
+                
+                // ============================================================
+                // ADD THIS NEW BUTTON HERE - Overall Standings
+                // ============================================================
+                IconButton(
+                  tooltip: 'Overall Standings',
+                  icon: const Icon(
+                    Icons.leaderboard_rounded,
+                    color: Color(0xFFFFD700),
+                  ),
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (context) => OverallStandings(
+                          onBack: () => Navigator.of(context).pop(),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+                
+                // Back to Homepage button
                 IconButton(
                   tooltip: 'Back to Homepage',
                   icon: const Icon(
@@ -7228,7 +7279,7 @@ Widget _buildDurationField({
       ),
 
       if (selectedType == StandingType.qualification)
-        _buildQualificationTable(rows, maxRounds, isExplorer)
+        _buildQualificationTable(rows, maxRounds, isExplorer, categoryName)
       else if (selectedType == StandingType.championship)
         isExplorer
             ? _buildChampionshipTable(categoryId)
@@ -7243,6 +7294,7 @@ Widget _buildDurationField({
   List<Map<String, dynamic>> rows,
   int maxRounds,
   bool isExplorer,
+   String categoryType,
 ) {
     return Expanded(
       child: Column(
@@ -7390,7 +7442,7 @@ Widget _buildDurationField({
                             Expanded(
                               flex: 2,
                               child: Text(
-                                'C${teamId.toString().padLeft(3, '0')}R',
+                                formatTeamId(teamId, categoryType),
                                 style: const TextStyle(
                                   color: Colors.white,
                                   fontWeight: FontWeight.bold,
@@ -8938,7 +8990,7 @@ void _showBattleScoreEditDialog({
           ),
           Image.asset(
             'assets/images/CenterLogo.png',
-            height: 80,
+            height: 100,
             fit: BoxFit.contain,
           ),
           const Text(

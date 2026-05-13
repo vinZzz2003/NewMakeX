@@ -57,3 +57,8 @@ Color getCategoryColor(int index) {
   ];
   return colors[index % colors.length];
 }
+
+String formatTeamId(int teamId, String categoryType) {
+  final suffix = categoryType.toLowerCase().contains('starter') ? 'S' : 'E';
+  return 'C${teamId.toString().padLeft(3, '0')}$suffix';
+}
