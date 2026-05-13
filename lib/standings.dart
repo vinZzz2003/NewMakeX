@@ -48,27 +48,36 @@ class RoundScore {
   int individualScore;
   int allianceScore;
   int violation;
+  int? opponentTotal;
   String duration;
 
   RoundScore({
     this.individualScore = 0,
     this.allianceScore = 0,
     this.violation = 0,
+    this.opponentTotal,
     this.duration = '00:00',
   });
 
   int get totalScore => individualScore + allianceScore - violation;
 
+  int? get pointDifferential {
+    if (opponentTotal == null) return null;
+    return totalScore - opponentTotal!;
+  }
+
   RoundScore copyWith({
     int? individualScore,
     int? allianceScore,
     int? violation,
+    int? opponentTotal,
     String? duration,
   }) {
     return RoundScore(
       individualScore: individualScore ?? this.individualScore,
       allianceScore: allianceScore ?? this.allianceScore,
       violation: violation ?? this.violation,
+      opponentTotal: opponentTotal ?? this.opponentTotal,
       duration: duration ?? this.duration,
     );
   }
@@ -5216,7 +5225,7 @@ Widget _buildChampionshipRow({
                     flex: 1,
                     child: Center(
                       child: Text(
-                        'VIO',
+                        'VIOLATION',
                         style: TextStyle(
                           color: Colors.redAccent.withOpacity(0.9),
                           fontSize: 11,
@@ -6116,6 +6125,9 @@ Widget _buildChampionshipRow({
   final allianceController = TextEditingController(
     text: currentScore?.allianceScore.toString() ?? '0',
   );
+  final manualController = TextEditingController(
+    text: currentScore?.individualScore.toString() ?? '0',
+  );
   final violationController = TextEditingController(
     text: currentScore?.violation.toString() ?? '0',
   );
@@ -6123,27 +6135,28 @@ Widget _buildChampionshipRow({
     text: currentScore?.duration ?? '00:00',
   );
 
-  // Helper to calculate individual for Explorer
-  int getCalculatedIndividual() {
+  // Helper to calculate total for Explorer
+  int getCalculatedTotal() {
     final alliance = int.tryParse(allianceController.text) ?? 0;
+    final manual = int.tryParse(manualController.text) ?? 0;
     final violation = int.tryParse(violationController.text) ?? 0;
-    return alliance - violation;
+    return alliance + manual - violation;
   }
 
   showDialog(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setDialogState) {
-        // For Explorer, calculate individual on every rebuild
-        final int displayIndividual = isExplorer 
-            ? getCalculatedIndividual() 
-            : (int.tryParse(individualController.text) ?? 0);
-        
+        // For Explorer, calculate total on every rebuild
+        final int displayTotal = isExplorer 
+          ? getCalculatedTotal() 
+          : (int.tryParse(individualController.text) ?? 0);
+
         final int alliance = int.tryParse(allianceController.text) ?? 0;
         final int violation = int.tryParse(violationController.text) ?? 0;
         final int total = isExplorer 
-            ? displayIndividual  // For Explorer: Total = Individual (which = Alliance - Violation)
-            : displayIndividual + alliance - violation;  // For Starter: Total = IND + ALL - VIO
+          ? displayTotal  // For Explorer: Total = Auto + Manual - Violation
+          : displayTotal + alliance - violation;  // For Starter: Total = IND + ALL - VIO
 
         return Dialog(
           backgroundColor: Colors.transparent,
@@ -6262,16 +6275,26 @@ Widget _buildChampionshipRow({
                 // FOR EXPLORER: Show ALL | VIO | IND layout with IND read-only
                 // FOR STARTER: Show original IND | ALL | VIO layout
                 if (isExplorer) ...[
-                  // EXPLORER LAYOUT: ALLIANCE first
+                  // EXPLORER LAYOUT: AUTOMATIC (ALLIANCE) first
                   _buildScoreField(
-                    label: 'ALLIANCE SCORE',
+                    label: 'AUTOMATIC SCORE',
                     controller: allianceController,
                     color: const Color(0xFFFFD700),
                     hint: '0',
                     onChanged: (_) => setDialogState(() {}),
                   ),
-                  const SizedBox(height: 16),
-                  
+                  const SizedBox(height: 12),
+
+                  // MANUAL SCORE (separate, saved but not used in calculation)
+                  _buildScoreField(
+                    label: 'MANUAL SCORE',
+                    controller: manualController,
+                    color: const Color(0xFF00CFFF),
+                    hint: '0',
+                    onChanged: (_) => setDialogState(() {}),
+                  ),
+                  const SizedBox(height: 12),
+
                   // VIOLATION
                   _buildScoreField(
                     label: 'VIOLATION (-)',
@@ -6282,7 +6305,7 @@ Widget _buildChampionshipRow({
                   ),
                   const SizedBox(height: 16),
                   
-                  // INDIVIDUAL (calculated, read-only)
+                  // TOTAL (calculated, read-only)
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
@@ -6296,7 +6319,7 @@ Widget _buildChampionshipRow({
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         const Text(
-                          'INDIVIDUAL SCORE',
+                          'TOTAL SCORE',
                           style: TextStyle(
                             color: Color(0xFF00CFFF),
                             fontWeight: FontWeight.bold,
@@ -6304,7 +6327,7 @@ Widget _buildChampionshipRow({
                           ),
                         ),
                         Text(
-                          '$displayIndividual',
+                          '$displayTotal',
                           style: const TextStyle(
                             color: Color(0xFF00CFFF),
                             fontSize: 20,
@@ -6374,8 +6397,8 @@ _buildDurationField(
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          isExplorer
-                              ? 'Individual = Alliance - Violation\nTotal Score = Individual Score'
+                            isExplorer
+                              ? 'Total = Automatic + Manual - Violation'
                               : 'Total = Individual + Alliance - Violation',
                           style: const TextStyle(color: Colors.white70, fontSize: 11),
                         ),
@@ -6409,14 +6432,15 @@ _buildDurationField(
   int total;
   
   if (isExplorer) {
-    // EXPLORER: Individual = Alliance - Violation, Total = Individual
-    individual = alliance - violation;
-    total = individual;
-    
-    if (individual < 0) {
+    // EXPLORER: Total = Automatic + Manual - Violation
+    final manual = int.tryParse(manualController.text.trim()) ?? 0;
+    individual = manual;
+    total = alliance + manual - violation;
+
+    if (total < 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Individual score cannot be negative (Alliance must be >= Violation)'),
+          content: Text('Total score cannot be negative (Automatic + Manual must be >= Violation)'),
           backgroundColor: Colors.orange,
         ),
       );
@@ -6455,12 +6479,13 @@ _buildDurationField(
 int previousAlliance = 0;
 int previousViolation = 0;
 int previousIndividual = 0;
-try {
+int previousManual = 0;
+  try {
   if (isExplorer) {
     // For Explorer: Read from tbl_explorer_score, using score_independentscore for alliance
     final prevRes = await conn.execute(
       """
-      SELECT score_independentscore as alliance_score, score_violation, score_individual 
+      SELECT score_independentscore as alliance_score, score_violation, score_manualscore as manual_score
       FROM tbl_explorer_score
       WHERE team_id = :teamId AND round_id = :roundId
       LIMIT 1
@@ -6470,7 +6495,10 @@ try {
     if (prevRes.rows.isNotEmpty) {
       previousAlliance = int.tryParse(prevRes.rows.first.assoc()['alliance_score']?.toString() ?? '0') ?? 0;
       previousViolation = int.tryParse(prevRes.rows.first.assoc()['score_violation']?.toString() ?? '0') ?? 0;
-      previousIndividual = int.tryParse(prevRes.rows.first.assoc()['score_individual']?.toString() ?? '0') ?? 0;
+      final manualPrev = int.tryParse(prevRes.rows.first.assoc()['manual_score']?.toString() ?? '0') ?? 0;
+      manualController.text = manualPrev.toString();
+      previousIndividual = manualPrev;
+      previousManual = manualPrev;
     }
   } else {
     // For Starter: Read from tbl_score
@@ -6493,6 +6521,8 @@ try {
 }
 
     // In _showQualificationScoreDialog, after saving scores:
+final manual = int.tryParse(manualController.text.trim()) ?? 0;
+
 await DBHelper.upsertScore(
   teamId: teamId,
   roundId: roundId,
@@ -6500,6 +6530,7 @@ await DBHelper.upsertScore(
   refereeId: refereeId,
   independentScore: individual,
   allianceScore: alliance,
+  manualScore: manual,
   violation: violation,
   totalScore: total,
   totalDuration: duration,
@@ -6511,8 +6542,9 @@ if (matchId > 0) {
     // EXPLORER: Propagate BOTH Alliance AND Violation
     final allianceDelta = alliance - previousAlliance;
     final violationDelta = violation - previousViolation;
+    final manualDelta = manual - previousManual;
     
-    if (allianceDelta != 0 || violationDelta != 0) {
+    if (allianceDelta != 0 || violationDelta != 0 || manualDelta != 0) {
       await DBHelper.propagateExplorerScoreForMatch(
         matchId: matchId,
         roundId: roundId,
@@ -6725,16 +6757,20 @@ Widget _buildDurationField({
       
       String sql;
       if (isExplorer) {
-        // UPDATED: Read from all columns to properly reconstruct scores
+        // ============================================================
+        // FIX: Read ALL columns from explorer_score
+        // ============================================================
         sql = """
           SELECT 
             s.team_id, 
             s.round_id,
-            s.score_independentscore as alliance_score,
+            s.score_independentscore as auto_score,
             s.score_violation as violation,
             s.score_totalscore as total_score,
             s.score_totalduration as duration,
-            s.score_individual as individual_score
+            s.score_manualscore as manual_score,
+            s.score_individual as individual_score,
+            s.score_alliance as alliance_score
           FROM tbl_explorer_score s
           JOIN tbl_team t ON s.team_id = t.team_id
           WHERE t.category_id = :catId
@@ -6760,6 +6796,85 @@ Widget _buildDurationField({
       final scoreResult = await conn.execute(sql, {"catId": catId});
       final rows = scoreResult.rows.map((r) => r.assoc()).toList();
       print("   Found ${rows.length} score rows");
+
+      final Map<String, int> totalByTeamRound = {};
+      for (final row in rows) {
+        final teamId = int.tryParse(row['team_id'].toString()) ?? 0;
+        final roundId = int.tryParse(row['round_id']?.toString() ?? '0') ?? 0;
+        if (teamId == 0 || roundId == 0) continue;
+
+        int totalScore;
+        if (isExplorer) {
+          // ============================================================
+          // FIX: Use the actual stored total_score from database
+          // DO NOT recalculate here - trust what the scoring app saved
+          // ============================================================
+          totalScore = int.tryParse(row['total_score']?.toString() ?? '0') ?? 0;
+          print("   Explorer - Team $teamId, Round $roundId: total=$totalScore");
+        } else {
+          totalScore = int.tryParse(row['total_score']?.toString() ?? '0') ?? 0;
+        }
+
+        totalByTeamRound['$teamId:$roundId'] = totalScore;
+      }
+
+      final Map<String, int> opponentTotalByTeamRound = {};
+      if (isExplorer) {
+        try {
+          final scheduleResult = await conn.execute(
+            """
+            SELECT ts.team_id, ts.round_id, ts.match_id, ts.arena_number
+            FROM tbl_explorer_teamschedule ts
+            JOIN tbl_team t ON ts.team_id = t.team_id
+            WHERE t.category_id = :catId
+          """,
+            {"catId": catId},
+          );
+
+          final Map<String, List<int>> teamsByMatchArena = {};
+          for (final row in scheduleResult.rows) {
+            final data = row.assoc();
+            final teamId = int.tryParse(data['team_id']?.toString() ?? '0') ?? 0;
+            final roundId = int.tryParse(data['round_id']?.toString() ?? '0') ?? 0;
+            final matchId = int.tryParse(data['match_id']?.toString() ?? '0') ?? 0;
+            final arena = int.tryParse(data['arena_number']?.toString() ?? '0') ?? 0;
+            if (teamId == 0 || roundId == 0 || matchId == 0 || arena == 0) {
+              continue;
+            }
+            final key = '$matchId:$roundId:$arena';
+            teamsByMatchArena.putIfAbsent(key, () => []).add(teamId);
+          }
+
+          for (final row in scheduleResult.rows) {
+            final data = row.assoc();
+            final teamId = int.tryParse(data['team_id']?.toString() ?? '0') ?? 0;
+            final roundId = int.tryParse(data['round_id']?.toString() ?? '0') ?? 0;
+            final matchId = int.tryParse(data['match_id']?.toString() ?? '0') ?? 0;
+            final arena = int.tryParse(data['arena_number']?.toString() ?? '0') ?? 0;
+            if (teamId == 0 || roundId == 0 || matchId == 0 || arena == 0) {
+              continue;
+            }
+
+            final opponentArena = arena == 1 ? 2 : 1;
+            final opponentKey = '$matchId:$roundId:$opponentArena';
+            final opponentTeams = teamsByMatchArena[opponentKey] ?? [];
+            int? opponentTotal;
+            for (final opponentId in opponentTeams) {
+              final key = '$opponentId:$roundId';
+              if (totalByTeamRound.containsKey(key)) {
+                opponentTotal = totalByTeamRound[key];
+                break;
+              }
+            }
+
+            if (opponentTotal != null) {
+              opponentTotalByTeamRound['$teamId:$roundId'] = opponentTotal;
+            }
+          }
+        } catch (e) {
+          print("⚠️ Could not compute opponent totals: $e");
+        }
+      }
 
       final Map<int, Map<String, dynamic>> teamMap = {};
 
@@ -6787,19 +6902,37 @@ Widget _buildDurationField({
         int individualScore;
         int allianceScore;
         int violation;
+        int? opponentTotal;
         
         if (isExplorer) {
-          // For Explorer: Use the correct column mapping matching Scoring App
-          // Scoring App stores alliance score in score_independentscore
-          allianceScore = int.tryParse(row['alliance_score']?.toString() ?? '0') ?? 0;
-          violation = int.tryParse(row['violation']?.toString() ?? '0') ?? 0;
-          // Try to read individual_score if available, otherwise calculate
-          final storedIndividual = int.tryParse(row['individual_score']?.toString() ?? '0') ?? 0;
-          individualScore = storedIndividual > 0 ? storedIndividual : (allianceScore - violation);
+          // ============================================================
+          // FIX: Use the actual stored values from database
+          // For Explorer:
+          // - auto_score = automatic score (from scoring app)
+          // - manual_score = manual score (0 from scoring app, >0 from Flutter)
+          // - violation = violation score
+          // - total_score = already stored correctly by the API
+          // ============================================================
+          final autoScore = int.tryParse(row['auto_score']?.toString() ?? '0') ?? 0;
+          final manualScore = int.tryParse(row['manual_score']?.toString() ?? '0') ?? 0;
+          final violationScore = int.tryParse(row['violation']?.toString() ?? '0') ?? 0;
+          
+          // For display in the standings table, we need to show:
+          // - Alliance score (auto) = autoScore
+          // - Individual score (manual) = manualScore  
+          // - Violation = violationScore
+          allianceScore = autoScore;
+          individualScore = manualScore;
+          violation = violationScore;
+          opponentTotal = opponentTotalByTeamRound['$teamId:$roundId'];
+          
+          print("   Explorer - Team $teamId, Round $roundId: "
+              "AUTO=$autoScore, MAN=$manualScore, VIO=$violationScore, TOTAL=$totalScore");
         } else {
           individualScore = int.tryParse(row['individual_score']?.toString() ?? '0') ?? 0;
           allianceScore = int.tryParse(row['alliance_score']?.toString() ?? '0') ?? 0;
           violation = int.tryParse(row['violation']?.toString() ?? '0') ?? 0;
+          opponentTotal = null;
         }
 
         if (teamMap.containsKey(teamId)) {
@@ -6807,10 +6940,12 @@ Widget _buildDurationField({
             individualScore: individualScore,
             allianceScore: allianceScore,
             violation: violation,
+            opponentTotal: opponentTotal,
             duration: duration,
           );
 
           teamMap[teamId]!['rounds'][roundId] = roundScore;
+          // Accumulate total score across rounds
           teamMap[teamId]!['totalScore'] = (teamMap[teamId]!['totalScore'] as int) + totalScore;
 
           if (roundId > maxRoundFound) maxRoundFound = roundId;
@@ -7310,16 +7445,16 @@ Widget _buildDurationField({
                 ...List.generate(
   maxRounds,
   (i) => Expanded(
-    flex: 4,
+    flex: isExplorer ? 8 : 6,
     child: Row(
       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-      children: isExplorer
+              children: isExplorer
           ? [
-              // EXPLORER: ALL | VIO | IND
+              // EXPLORER: AUTO | MANUAL | VIOLATION | TOTAL | POINT DIFF
               Expanded(
                 child: Center(
                   child: Text(
-                    'ALL',
+                    'AUTO',
                     style: TextStyle(
                       color: const Color(0xFFFFD700).withOpacity(0.9),
                       fontSize: 10,
@@ -7331,7 +7466,19 @@ Widget _buildDurationField({
               Expanded(
                 child: Center(
                   child: Text(
-                    'VIO',
+                    'MANUAL',
+                    style: TextStyle(
+                      color: const Color(0xFF00CFFF).withOpacity(0.9),
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Center(
+                  child: Text(
+                    'VIOLATION',
                     style: TextStyle(
                       color: Colors.redAccent.withOpacity(0.9),
                       fontSize: 10,
@@ -7343,7 +7490,7 @@ Widget _buildDurationField({
               Expanded(
                 child: Center(
                   child: Text(
-                    'IND',
+                    'TOTAL',
                     style: TextStyle(
                       color: const Color(0xFF00CFFF).withOpacity(0.9),
                       fontSize: 10,
@@ -7352,11 +7499,23 @@ Widget _buildDurationField({
                   ),
                 ),
               ),
-            ]
-          : [
-              // STARTER: IND | ALL | VIO (original)
               Expanded(
                 child: Center(
+                  child: Text(
+                    'POINT DIFF',
+                    style: TextStyle(
+                      color: Colors.white70.withOpacity(0.95),
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+            ]
+          : [
+                // STARTER: IND | ALL | VIO (original)
+              Expanded(
+                    child: Center(
                   child: Text(
                     'IND',
                     style: TextStyle(
@@ -7382,7 +7541,7 @@ Widget _buildDurationField({
               Expanded(
                 child: Center(
                   child: Text(
-                    'VIO',
+                    'VIOLATION',
                     style: TextStyle(
                       color: Colors.redAccent.withOpacity(0.9),
                       fontSize: 10,
@@ -7462,9 +7621,9 @@ Widget _buildDurationField({
   final hasScore = rounds.containsKey(i + 1);
 
   return Expanded(
-    flex: 4,
+    flex: isExplorer ? 8 : 6,
     child: Container(
-      margin: const EdgeInsets.symmetric(horizontal: 2),
+      margin: EdgeInsets.symmetric(horizontal: isExplorer ? 6 : 2),
       decoration: BoxDecoration(
         border: Border.all(
           color: hasScore ? const Color(0xFFFFD700).withOpacity(0.3) : Colors.white.withOpacity(0.1),
@@ -7476,8 +7635,7 @@ Widget _buildDurationField({
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: isExplorer
             ? [
-                // EXPLORER: ALL (editable) | VIO (editable) | IND (read-only)
-                // ALLIANCE - Editable
+                // EXPLORER: AUTO (alliance) - Editable
                 Expanded(
                   child: GestureDetector(
                     onTap: () => _showQualificationScoreDialog(
@@ -7487,7 +7645,7 @@ Widget _buildDurationField({
                       currentScore: roundScore,
                     ),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      padding: EdgeInsets.symmetric(vertical: isExplorer ? 8 : 6),
                       decoration: BoxDecoration(
                         color: hasScore && roundScore.allianceScore > 0
                             ? const Color(0xFFFFD700).withOpacity(0.15)
@@ -7504,6 +7662,43 @@ Widget _buildDurationField({
                           style: TextStyle(
                             color: roundScore.allianceScore > 0 || hasScore
                                 ? const Color(0xFFFFD700)
+                                : Colors.white24,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                // MANUAL (individual/manual input) - Editable
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => _showQualificationScoreDialog(
+                      teamId: teamId,
+                      teamName: teamName,
+                      roundId: i + 1,
+                      currentScore: roundScore,
+                    ),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      decoration: BoxDecoration(
+                        color: hasScore && roundScore.individualScore > 0
+                            ? const Color(0xFF00CFFF).withOpacity(0.15)
+                            : null,
+                        border: const Border(
+                          left: BorderSide(color: Colors.white10, width: 1),
+                          right: BorderSide(color: Colors.white10, width: 1),
+                        ),
+                      ),
+                      child: Center(
+                        child: Text(
+                          roundScore.individualScore > 0
+                              ? '${roundScore.individualScore}'
+                              : (hasScore ? '0' : '—'),
+                          style: TextStyle(
+                            color: roundScore.individualScore > 0 || hasScore
+                                ? const Color(0xFF00CFFF)
                                 : Colors.white24,
                             fontWeight: FontWeight.bold,
                             fontSize: 13,
@@ -7550,13 +7745,13 @@ Widget _buildDurationField({
                     ),
                   ),
                 ),
-                // INDIVIDUAL - Read-only (calculated)
+                // TOTAL - Read-only (calculated)
                 Expanded(
                   child: Container(
                     padding: const EdgeInsets.symmetric(vertical: 6),
                     decoration: BoxDecoration(
-                      color: hasScore && roundScore.individualScore > 0
-                          ? const Color(0xFF00CFFF).withOpacity(0.15)
+                      color: hasScore && roundScore.totalScore > 0
+                          ? const Color(0xFFFFD700).withOpacity(0.08)
                           : null,
                       borderRadius: const BorderRadius.horizontal(
                         right: Radius.circular(3),
@@ -7564,13 +7759,38 @@ Widget _buildDurationField({
                     ),
                     child: Center(
                       child: Text(
-                        roundScore.individualScore > 0
-                            ? '${roundScore.individualScore}'
+                        roundScore.totalScore != 0
+                            ? '${roundScore.totalScore}'
                             : (hasScore ? '0' : '—'),
                         style: TextStyle(
-                          color: roundScore.individualScore > 0 || hasScore
-                              ? const Color(0xFF00CFFF)
+                          color: roundScore.totalScore != 0 || hasScore
+                              ? const Color(0xFFFFD700)
                               : Colors.white24,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                // POINT DIFF - read-only (vs opponent total)
+                Expanded(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    decoration: BoxDecoration(
+                      border: const Border(
+                        left: BorderSide(color: Colors.white10, width: 1),
+                      ),
+                    ),
+                    child: Center(
+                      child: Text(
+                        (() {
+                          final diff = roundScore.pointDifferential;
+                          if (!hasScore || diff == null) return '—';
+                          return diff >= 0 ? '+$diff' : '$diff';
+                        })(),
+                        style: TextStyle(
+                          color: hasScore ? Colors.white70 : Colors.white24,
                           fontWeight: FontWeight.bold,
                           fontSize: 13,
                         ),
@@ -7703,13 +7923,6 @@ Widget _buildDurationField({
                                         color: Color(0xFFFFD700),
                                         fontWeight: FontWeight.bold,
                                         fontSize: 18,
-                                      ),
-                                    ),
-                                    Text(
-                                      _bestDuration(rounds),
-                                      style: const TextStyle(
-                                        color: Colors.white60,
-                                        fontSize: 10,
                                       ),
                                     ),
                                   ],
@@ -8042,7 +8255,7 @@ Widget _buildBattleOfChampionsView(int categoryId) {
                                   children: [
                                     const Text('PTS', style: TextStyle(color: Color(0xFF00CFFF), fontSize: 8)),
                                     const Text('/', style: TextStyle(color: Colors.white24, fontSize: 8)),
-                                    const Text('VIO', style: TextStyle(color: Colors.redAccent, fontSize: 8)),
+                                    const Text('VIOLATION', style: TextStyle(color: Colors.redAccent, fontSize: 8)),
                                   ],
                                 ),
                               ],

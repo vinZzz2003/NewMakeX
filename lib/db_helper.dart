@@ -155,11 +155,13 @@ class DBHelper {
         INSERT INTO $targetTable 
           (score_id, score_independentscore, score_violation, score_totalscore,
            score_totalduration, score_isapproved, match_id, round_id, team_id,
-           referee_id, score_individual, score_alliance, created_at, updated_at)
+           referee_id, score_individual, score_alliance, score_manualscore,
+           created_at, updated_at)
         SELECT 
           score_id, score_independentscore, score_violation, score_totalscore,
           score_totalduration, score_isapproved, match_id, round_id, team_id,
-          referee_id, score_individual, score_alliance, created_at, updated_at
+          referee_id, score_individual, score_alliance, score_manualscore,
+          created_at, updated_at
         FROM $sourceTable
         WHERE team_id = :teamId
       """,
@@ -217,11 +219,13 @@ class DBHelper {
         INSERT INTO $targetTable 
           (score_id, score_independentscore, score_violation, score_totalscore,
            score_totalduration, score_isapproved, match_id, round_id, team_id,
-           referee_id, score_individual, score_alliance, created_at, updated_at)
+           referee_id, score_individual, score_alliance, score_manualscore,
+           created_at, updated_at)
         SELECT 
           score_id, score_independentscore, score_violation, score_totalscore,
           score_totalduration, score_isapproved, match_id, round_id, team_id,
-          referee_id, score_individual, score_alliance, created_at, updated_at
+          referee_id, score_individual, score_alliance, score_manualscore,
+          created_at, updated_at
         FROM tbl_score
         WHERE team_id = :teamId
       """,
@@ -255,6 +259,7 @@ class DBHelper {
         referee_id INT DEFAULT NULL,
         score_individual INT DEFAULT 0,
         score_alliance INT DEFAULT 0,
+        score_manualscore INT DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_team_round (team_id, round_id),
@@ -859,6 +864,7 @@ class DBHelper {
     referee_id INT DEFAULT NULL,
     score_individual INT DEFAULT 0,
     score_alliance INT DEFAULT 0,
+    score_manualscore INT DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
   )
@@ -1013,6 +1019,26 @@ class DBHelper {
       print("✅ Added individual and alliance score columns to tbl_score");
     } catch (e) {
       print("ℹ️ Score columns may already exist: $e");
+    }
+
+    try {
+      await conn.execute("""
+      ALTER TABLE tbl_score
+      ADD COLUMN score_manualscore INT DEFAULT 0
+    """);
+      print("✅ Added manual score column to tbl_score");
+    } catch (e) {
+      print("ℹ️ Manual score column may already exist in tbl_score: $e");
+    }
+
+    try {
+      await conn.execute("""
+      ALTER TABLE tbl_explorer_score
+      ADD COLUMN score_manualscore INT DEFAULT 0
+    """);
+      print("✅ Added manual score column to tbl_explorer_score");
+    } catch (e) {
+      print("ℹ️ Manual score column may already exist in tbl_explorer_score: $e");
     }
 
     // Create alliance selections table
@@ -4013,54 +4039,70 @@ class DBHelper {
   // ── SCORES ────────────────────────────────────────────────────────────────
 
   static Future<List<Map<String, dynamic>>> getScoresByCategory(
-    int categoryId,
-  ) async {
-    final conn = await getConnection();
+  int categoryId,
+) async {
+  final conn = await getConnection();
 
-    // ✅ Check category type to use correct table
-    final catResult = await conn.execute(
-      "SELECT category_type FROM tbl_category WHERE category_id = :catId",
-      {"catId": categoryId},
-    );
+  // ✅ Check category type to use correct table
+  final catResult = await conn.execute(
+    "SELECT category_type FROM tbl_category WHERE category_id = :catId",
+    {"catId": categoryId},
+  );
 
-    final isExplorer =
-        catResult.rows.isNotEmpty &&
-        catResult.rows.first
-                .assoc()['category_type']
-                ?.toString()
-                .toLowerCase()
-                .contains('explorer') ==
-            true;
+  final isExplorer =
+      catResult.rows.isNotEmpty &&
+      catResult.rows.first
+              .assoc()['category_type']
+              ?.toString()
+              .toLowerCase()
+              .contains('explorer') ==
+          true;
 
-    final scoreTable = isExplorer ? 'tbl_explorer_score' : 'tbl_score';
+  final scoreTable = isExplorer ? 'tbl_explorer_score' : 'tbl_score';
+  
+  print("📊 getScoresByCategory: Using table $scoreTable for category $categoryId");
 
-    final result = await conn.execute(
-      """
+  // ============================================================
+  // FIX: Read ALL score columns, not just totalscore
+  // ============================================================
+  final result = await conn.execute(
+    """
     SELECT
       t.team_id,
       t.team_name,
       COALESCE(s.round_id, 0) as round_id,
       COALESCE(s.score_totalscore, 0) as score_totalscore,
-      COALESCE(s.score_totalduration, '00:00') as score_totalduration
+      COALESCE(s.score_totalduration, '00:00') as score_totalduration,
+      COALESCE(s.score_independentscore, 0) as score_independentscore,
+      COALESCE(s.score_manualscore, 0) as score_manualscore,
+      COALESCE(s.score_violation, 0) as score_violation,
+      COALESCE(s.score_individual, 0) as score_individual,
+      COALESCE(s.score_alliance, 0) as score_alliance
     FROM tbl_team t
     LEFT JOIN $scoreTable s ON s.team_id = t.team_id
     WHERE t.category_id = :categoryId
     ORDER BY t.team_id, s.round_id
-  """,
-      {"categoryId": categoryId},
-    );
+    """,
+    {"categoryId": categoryId},
+  );
 
-    final rows = result.rows.map((r) => r.assoc()).toList();
-    print(
-      "📊 getScoresByCategory for category $categoryId returned ${rows.length} rows",
-    );
-    for (var row in rows) {
-      print(
-        "   Row: team_id=${row['team_id']}, round_id=${row['round_id']}, score=${row['score_totalscore']}",
-      );
+  final rows = result.rows.map((r) => r.assoc()).toList();
+  
+  print("📊 getScoresByCategory for category $categoryId returned ${rows.length} rows");
+  for (var row in rows) {
+    if (isExplorer) {
+      print("   Row: team_id=${row['team_id']}, round_id=${row['round_id']}, "
+          "auto=${row['score_independentscore']}, "
+          "manual=${row['score_manualscore']}, "
+          "vio=${row['score_violation']}, "
+          "total=${row['score_totalscore']}");
+    } else {
+      print("   Row: team_id=${row['team_id']}, round_id=${row['round_id']}, "
+          "score=${row['score_totalscore']}");
     }
-    return rows;
   }
+  return rows;
+}
 
   // In db_helper.dart, modify the upsertScore method (around line 1800-1900)
 
@@ -4070,8 +4112,9 @@ class DBHelper {
   required int matchId,
   int? refereeId,
   required int independentScore,
+  required int allianceScore,
+  int manualScore = 0,
   required int violation,
-  int allianceScore = 0,
   required int totalScore,
   required String totalDuration,
 }) async {
@@ -4082,6 +4125,10 @@ class DBHelper {
   print("   teamId: $teamId");
   print("   roundId: $roundId");
   print("   matchId: $matchId");
+  print("   allianceScore (auto): $allianceScore");
+  print("   manualScore: $manualScore");
+  print("   violation: $violation");
+  print("   totalScore: $totalScore");
 
   // Get category type for this team
   int? categoryId;
@@ -4106,15 +4153,42 @@ class DBHelper {
   }
 
   final bool isExplorer = categoryType?.contains('explorer') ?? false;
-  final bool isStarter = categoryType?.contains('starter') ?? false;
   
   // Determine which table to use
   final String scoreTable = isExplorer ? 'tbl_explorer_score' : 'tbl_score';
   
-  print("📊 Category type: ${isExplorer ? 'EXPLORER' : (isStarter ? 'STARTER' : 'UNKNOWN')}");
+  print("📊 Category type: ${isExplorer ? 'EXPLORER' : 'STARTER'}");
   print("📊 Using table: $scoreTable");
 
-  // Check if record exists in the appropriate table
+  // ============================================================
+  // CRITICAL FIX: For Explorer, if manualScore is 0 but totalScore
+  // is provided, calculate manualScore from the data
+  // ============================================================
+  int finalManualScore = manualScore;
+  int finalAllianceScore = allianceScore;
+  int finalViolation = violation;
+  int finalTotalScore = totalScore;
+  
+  if (isExplorer) {
+    // Check if this appears to be a scoring app save (manualScore is 0 but we have totalScore)
+    if (manualScore == 0 && totalScore > 0) {
+      // The scoring app formula: totalScore = allianceScore - violation
+      // So we need to save manualScore as 0 and recalc total if needed
+      finalTotalScore = allianceScore - violation;
+      finalManualScore = 0;
+      print("🔧 Detected scoring app save mode - using manual=0, total=$finalTotalScore");
+    } else if (manualScore > 0) {
+      // Flutter app save mode - use manual score in calculation
+      finalTotalScore = allianceScore + manualScore - violation;
+      print("🔧 Detected Flutter app save mode - total=$finalTotalScore");
+    } else {
+      // Fallback: calculate total from alliance and violation only
+      finalTotalScore = allianceScore - violation;
+      print("🔧 Fallback calculation - total=$finalTotalScore");
+    }
+  }
+
+  // Check if record exists
   final checkResult = await conn.execute(
     """
     SELECT COUNT(*) as cnt FROM $scoreTable 
@@ -4130,10 +4204,6 @@ class DBHelper {
     print("🔄 Updating existing score record in $scoreTable");
     
     if (isExplorer) {
-      // FOR EXPLORER: Match the Scoring App's column mapping
-      // Scoring App uses: score_independentscore for ALLIANCE score
-      //                    score_alliance is NOT used (kept as 0)
-      //                    score_individual is NOT used (kept as 0)
       await executeDual(
         """
         UPDATE $scoreTable
@@ -4146,16 +4216,18 @@ class DBHelper {
           referee_id = :ref,
           score_individual = 0,
           score_alliance = 0,
+          score_manualscore = :manual,
           updated_at = NOW()
         WHERE team_id = :team AND round_id = :round
         """,
         {
-          "alliance": allianceScore,
-          "viol": violation,
-          "total": totalScore,
+          "alliance": finalAllianceScore,
+          "viol": finalViolation,
+          "total": finalTotalScore,
           "duration": totalDuration,
           "match": matchParam,
           "ref": refereeId,
+          "manual": finalManualScore,
           "team": teamId,
           "round": roundId,
         },
@@ -4178,9 +4250,9 @@ class DBHelper {
         """,
         {
           "indep": independentScore,
-          "alliance": allianceScore,
-          "viol": violation,
-          "total": totalScore,
+          "alliance": finalAllianceScore,
+          "viol": finalViolation,
+          "total": finalTotalScore,
           "duration": totalDuration,
           "match": matchParam,
           "ref": refereeId,
@@ -4194,31 +4266,30 @@ class DBHelper {
     print("➕ Inserting new score record into $scoreTable");
     
     if (isExplorer) {
-      // FOR EXPLORER: Insert matching Scoring App's column mapping
       await executeDual(
         """
         INSERT INTO $scoreTable
           (team_id, round_id, match_id, referee_id,
            score_independentscore, score_violation, score_totalscore, score_totalduration,
-           score_individual, score_alliance, score_isapproved, created_at, updated_at)
+           score_individual, score_alliance, score_manualscore, score_isapproved, created_at, updated_at)
         VALUES
           (:team, :round, :match, :ref,
            :alliance, :viol, :total, :duration,
-           0, 0, 0, NOW(), NOW())
+           0, 0, :manual, 0, NOW(), NOW())
         """,
         {
           "team": teamId,
           "round": roundId,
           "match": matchParam,
           "ref": refereeId,
-          "alliance": allianceScore,
-          "viol": violation,
-          "total": totalScore,
+          "alliance": finalAllianceScore,
+          "viol": finalViolation,
+          "total": finalTotalScore,
           "duration": totalDuration,
+          "manual": finalManualScore,
         },
       );
     } else {
-      // STARTER: Keep original logic
       await executeDual(
         """
         INSERT INTO $scoreTable
@@ -4236,9 +4307,9 @@ class DBHelper {
           "match": matchParam,
           "ref": refereeId,
           "indep": independentScore,
-          "alliance": allianceScore,
-          "viol": violation,
-          "total": totalScore,
+          "alliance": finalAllianceScore,
+          "viol": finalViolation,
+          "total": finalTotalScore,
           "duration": totalDuration,
         },
       );
@@ -4247,9 +4318,7 @@ class DBHelper {
 
   print("✅ Score saved successfully for team $teamId, round $roundId");
 
-  // ============================================================
   // Auto-complete match if both teams have scores
-  // ============================================================
   if (matchId > 0) {
     await autoCompleteMatchIfBothScored(
       matchId: matchId,
@@ -4258,8 +4327,7 @@ class DBHelper {
     );
   }
 
-  // AFTER saving to tbl_score, mirror to category-specific table if needed
-  // Only mirror for Starter, Explorer already has its own table
+  // Mirror to category-specific table if needed
   if (categoryId != null && !isExplorer) {
     await mirrorScoresToCategorySpecificTable(categoryId);
   }
@@ -4956,11 +5024,13 @@ class DBHelper {
   try {
     print("🔍 EXPLORER PROPAGATION STARTED");
     print("   matchId: $matchId, roundId: $roundId, sourceTeamId: $sourceTeamId");
+    print("   allianceDelta: $allianceDelta, violationDelta: $violationDelta");
 
     // Get the source team's arena number and scores
     final sourceInfo = await conn.execute(
       """
-      SELECT ts.arena_number, es.score_independentscore, es.score_violation, es.score_totalscore
+      SELECT ts.arena_number, es.score_independentscore, es.score_violation, es.score_totalscore,
+        es.score_manualscore
       FROM tbl_teamschedule ts
       JOIN tbl_explorer_score es ON ts.team_id = es.team_id AND ts.round_id = es.round_id
       WHERE ts.match_id = :matchId 
@@ -4980,10 +5050,13 @@ class DBHelper {
     final sourceArena = int.parse(sourceData['arena_number'].toString());
     final sourceAlliance = int.parse(sourceData['score_independentscore']?.toString() ?? '0');
     final sourceViolation = int.parse(sourceData['score_violation']?.toString() ?? '0');
-    final sourceTotal = int.parse(sourceData['score_totalscore']?.toString() ?? '0');
+    final sourceManual = int.parse(sourceData['score_manualscore']?.toString() ?? '0');
+    
+    // For Explorer: Total = sourceAlliance + sourceManual - sourceViolation
+    final sourceTotal = sourceAlliance + sourceManual - sourceViolation;
 
     print("   Source arena: $sourceArena");
-    print("   Source scores: ALL=$sourceAlliance, VIO=$sourceViolation, TOTAL=$sourceTotal");
+    print("   Source scores: AUTO=$sourceAlliance, MAN=$sourceManual, VIO=$sourceViolation, TOTAL=$sourceTotal");
 
     // Find partner in SAME arena
     final partnerResult = await conn.execute(
@@ -5011,13 +5084,13 @@ class DBHelper {
     final partnerTeamId = int.parse(partnerResult.rows.first.assoc()['team_id'].toString());
     print("   Partner team ID: $partnerTeamId");
 
-    // Calculate partner's scores (should MATCH source team)
+    // Partner should have EXACTLY the same scores as source team
     final partnerAlliance = sourceAlliance;
     final partnerViolation = sourceViolation;
-    final partnerIndividual = partnerAlliance - partnerViolation;
-    final partnerTotal = partnerIndividual;
+    final partnerManual = sourceManual;
+    final partnerTotal = partnerAlliance + partnerManual - partnerViolation;
 
-    print("   Setting partner: ALL=$partnerAlliance, VIO=$partnerViolation, IND=$partnerIndividual, TOTAL=$partnerTotal");
+    print("   Setting partner: AUTO=$partnerAlliance, MAN=$partnerManual, VIO=$partnerViolation, TOTAL=$partnerTotal");
 
     // Check if partner already has a record
     final partnerExists = await conn.execute(
@@ -5031,8 +5104,8 @@ class DBHelper {
     final hasRecord = int.parse(partnerExists.rows.first.assoc()['cnt']?.toString() ?? '0') > 0;
 
     if (hasRecord) {
-      // UPDATE partner - using CORRECT Explorer columns
-      final updateResult = await executeDual(
+      // UPDATE partner
+      await executeDual(
         """
         UPDATE tbl_explorer_score 
         SET 
@@ -5041,6 +5114,7 @@ class DBHelper {
           score_totalscore = :total,
           score_individual = 0,
           score_alliance = 0,
+          score_manualscore = :manual,
           updated_at = NOW()
         WHERE team_id = :teamId AND round_id = :roundId
         """,
@@ -5048,11 +5122,12 @@ class DBHelper {
           "alliance": partnerAlliance,
           "violation": partnerViolation,
           "total": partnerTotal,
+          "manual": partnerManual,
           "teamId": partnerTeamId,
           "roundId": roundId,
         },
       );
-      print("✅ Updated partner $partnerTeamId - affected rows: ${updateResult.affectedRows}");
+      print("✅ Updated partner $partnerTeamId");
     } else {
       // INSERT new record for partner
       await executeDual(
@@ -5060,11 +5135,11 @@ class DBHelper {
         INSERT INTO tbl_explorer_score
           (team_id, round_id, match_id, referee_id,
            score_independentscore, score_violation, score_totalscore, score_totalduration,
-           score_individual, score_alliance, score_isapproved, created_at, updated_at)
+           score_individual, score_alliance, score_manualscore, score_isapproved, created_at, updated_at)
         VALUES
           (:teamId, :roundId, :matchId, NULL,
            :alliance, :violation, :total, '00:00',
-           0, 0, 0, NOW(), NOW())
+           0, 0, :manual, 0, NOW(), NOW())
         """,
         {
           "teamId": partnerTeamId,
@@ -5073,6 +5148,7 @@ class DBHelper {
           "alliance": partnerAlliance,
           "violation": partnerViolation,
           "total": partnerTotal,
+          "manual": partnerManual,
         },
       );
       print("✅ Inserted new record for partner $partnerTeamId");
@@ -5081,7 +5157,8 @@ class DBHelper {
     // VERIFY the update worked
     final verifyResult = await conn.execute(
       """
-      SELECT score_independentscore, score_violation, score_totalscore, score_individual, score_alliance
+      SELECT score_independentscore, score_violation, score_totalscore, score_individual,
+        score_alliance, score_manualscore
       FROM tbl_explorer_score
       WHERE team_id = :partnerTeamId AND round_id = :roundId
       """,
@@ -5091,11 +5168,10 @@ class DBHelper {
     if (verifyResult.rows.isNotEmpty) {
       final verifyData = verifyResult.rows.first.assoc();
       print("✅ VERIFICATION - Partner now has:");
-      print("   score_independentscore (Alliance): ${verifyData['score_independentscore']}");
+      print("   score_independentscore (Auto): ${verifyData['score_independentscore']}");
       print("   score_violation: ${verifyData['score_violation']}");
       print("   score_totalscore: ${verifyData['score_totalscore']}");
-      print("   score_individual (should be 0): ${verifyData['score_individual']}");
-      print("   score_alliance (should be 0): ${verifyData['score_alliance']}");
+      print("   score_manualscore (Manual): ${verifyData['score_manualscore']}");
     }
 
   } catch (e) {
@@ -5103,6 +5179,7 @@ class DBHelper {
     rethrow;
   }
 }
+
   // Helper method to update a team's score
   static Future<void> _updateTeamScore(
     MySQLConnection conn,

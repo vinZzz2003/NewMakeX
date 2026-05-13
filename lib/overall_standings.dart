@@ -281,15 +281,28 @@ class _OverallStandingsState extends State<OverallStandings> with TickerProvider
           ),
         ),
         Expanded(
-          child: _buildTabContent(selectedType),
+          child: _buildTabContent(
+            selectedType,
+            categoryId,
+            isExplorer,
+            categoryName,
+          ),
         ),
       ],
     );
   }
 
-  Widget _buildTabContent(StandingType selectedType) {
+  Widget _buildTabContent(
+    StandingType selectedType,
+    int categoryId,
+    bool isExplorer,
+    String categoryName,
+  ) {
     switch (selectedType) {
       case StandingType.qualification:
+        if (isExplorer) {
+          return _buildQualificationOverallStandings(categoryId, categoryName);
+        }
         return _buildPlaceholderTab(
           title: 'QUALIFICATION ROUND',
           color: const Color(0xFF00CFFF),
@@ -308,6 +321,398 @@ class _OverallStandingsState extends State<OverallStandings> with TickerProvider
           icon: Icons.military_tech_rounded,
         );
     }
+  }
+
+  Widget _buildQualificationOverallStandings(
+    int categoryId,
+    String categoryName,
+  ) {
+    return FutureBuilder<List<Map<String, dynamic>>>(
+      future: _loadQualificationOverallExplorer(categoryId),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(
+            child: CircularProgressIndicator(color: Color(0xFF00CFFF)),
+          );
+        }
+
+        if (snapshot.hasError) {
+          return Center(
+            child: Text(
+              'Error loading standings: ${snapshot.error}',
+              style: const TextStyle(color: Colors.white54),
+            ),
+          );
+        }
+
+        final rows = snapshot.data ?? [];
+        if (rows.isEmpty) {
+          return const Center(
+            child: Text(
+              'No qualification data yet.',
+              style: TextStyle(color: Colors.white54),
+            ),
+          );
+        }
+
+        return Column(
+          children: [
+            Container(
+              color: const Color(0xFF5C2ECC),
+              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+              child: Row(
+                children: [
+                  _overallHeaderCell('RANK', flex: 1),
+                  _overallHeaderCell('TEAM ID', flex: 2),
+                  _overallHeaderCell('TEAM NAME', flex: 3, alignLeft: true),
+                  _overallHeaderCell('TOTAL WINS', flex: 2),
+                  _overallHeaderCell('TOTAL LOSE', flex: 2),
+                  _overallHeaderCell('TIE', flex: 1),
+                  _overallHeaderCell('SCORE', flex: 2),
+                  _overallHeaderCell('TOTAL POINT DIFF', flex: 3),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView.builder(
+                itemCount: rows.length,
+                itemBuilder: (context, index) {
+                  final row = rows[index];
+                  final isEven = index % 2 == 0;
+                  final totalDiff = row['total_point_diff'] as int;
+
+                  return Container(
+                    color: isEven
+                        ? const Color(0xFF1E0E5A)
+                        : const Color(0xFF160A42),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 8,
+                      horizontal: 16,
+                    ),
+                    child: Row(
+                      children: [
+                        _overallDataCell(
+                          '${row['rank']}',
+                          flex: 1,
+                          color: _rankColor(row['rank'] as int),
+                        ),
+                        _overallDataCell(
+                          formatTeamId(row['team_id'], categoryName),
+                          flex: 2,
+                        ),
+                        _overallDataCell(
+                          row['team_name'] as String,
+                          flex: 3,
+                          isName: true,
+                        ),
+                        _overallStatCell(
+                          '${row['total_wins']}',
+                          flex: 2,
+                          textColor: const Color(0xFF00FF88),
+                          backgroundColor:
+                              const Color(0xFF00FF88).withOpacity(0.12),
+                          borderColor:
+                              const Color(0xFF00FF88).withOpacity(0.35),
+                        ),
+                        _overallStatCell(
+                          '${row['total_losses']}',
+                          flex: 2,
+                          textColor: Colors.redAccent,
+                          backgroundColor: Colors.redAccent.withOpacity(0.12),
+                          borderColor: Colors.redAccent.withOpacity(0.35),
+                        ),
+                        _overallStatCell(
+                          '${row['total_ties']}',
+                          flex: 1,
+                          textColor: const Color(0xFFFFD700),
+                          backgroundColor:
+                            const Color(0xFFFFD700).withOpacity(0.12),
+                          borderColor:
+                            const Color(0xFFFFD700).withOpacity(0.35),
+                        ),
+                        _overallStatCell(
+                          '${row['total_score']}',
+                          flex: 2,
+                          textColor: const Color(0xFF00CFFF),
+                          backgroundColor:
+                            const Color(0xFF00CFFF).withOpacity(0.12),
+                          borderColor:
+                            const Color(0xFF00CFFF).withOpacity(0.35),
+                        ),
+                        _overallStatCell(
+                          _formatDiff(totalDiff),
+                          flex: 3,
+                          textColor:
+                              totalDiff > 0 ? const Color(0xFF00FF88) :
+                              (totalDiff < 0 ? Colors.redAccent : Colors.white70),
+                          borderColor:
+                              totalDiff > 0 ? const Color(0xFF00FF88).withOpacity(0.4) :
+                              (totalDiff < 0 ? Colors.redAccent.withOpacity(0.4) : Colors.white10),
+                          backgroundColor:
+                              totalDiff > 0 ? const Color(0xFF00FF88).withOpacity(0.12) :
+                              (totalDiff < 0 ? Colors.redAccent.withOpacity(0.12) : Colors.white.withOpacity(0.03)),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _loadQualificationOverallExplorer(
+    int categoryId,
+  ) async {
+    final conn = await DBHelper.getConnection();
+
+    final teamsRes = await conn.execute(
+      "SELECT team_id, team_name FROM tbl_team WHERE category_id = :catId",
+      {"catId": categoryId},
+    );
+
+    final Map<int, Map<String, dynamic>> teamStats = {};
+    for (final row in teamsRes.rows) {
+      final data = row.assoc();
+      final teamId = int.tryParse(data['team_id']?.toString() ?? '0') ?? 0;
+      if (teamId == 0) continue;
+      teamStats[teamId] = {
+        'team_id': teamId,
+        'team_name': data['team_name']?.toString() ?? '',
+        'total_auto': 0,
+        'total_manual': 0,
+        'total_violation': 0,
+        'total_score': 0,
+        'total_wins': 0,
+        'total_losses': 0,
+        'total_ties': 0,
+        'total_point_diff': 0,
+      };
+    }
+
+    final scoresRes = await conn.execute(
+      """
+      SELECT
+        s.team_id,
+        s.round_id,
+        s.score_independentscore as auto_score,
+        s.score_manualscore as manual_score,
+        s.score_violation as violation_score
+      FROM tbl_explorer_score s
+      JOIN tbl_team t ON s.team_id = t.team_id
+      WHERE t.category_id = :catId
+    """,
+      {"catId": categoryId},
+    );
+
+    final Map<String, int> totalByTeamRound = {};
+    for (final row in scoresRes.rows) {
+      final data = row.assoc();
+      final teamId = int.tryParse(data['team_id']?.toString() ?? '0') ?? 0;
+      final roundId = int.tryParse(data['round_id']?.toString() ?? '0') ?? 0;
+      if (teamId == 0 || roundId == 0) continue;
+
+      final autoScore =
+          int.tryParse(data['auto_score']?.toString() ?? '0') ?? 0;
+      final manualScore =
+          int.tryParse(data['manual_score']?.toString() ?? '0') ?? 0;
+      final violationScore =
+          int.tryParse(data['violation_score']?.toString() ?? '0') ?? 0;
+      final totalScore = autoScore + manualScore - violationScore;
+
+      totalByTeamRound['$teamId:$roundId'] = totalScore;
+
+      final stat = teamStats[teamId];
+      if (stat != null) {
+        stat['total_auto'] = (stat['total_auto'] as int) + autoScore;
+        stat['total_manual'] = (stat['total_manual'] as int) + manualScore;
+        stat['total_violation'] = (stat['total_violation'] as int) + violationScore;
+        stat['total_score'] = (stat['total_score'] as int) + totalScore;
+      }
+    }
+
+    final scheduleRes = await conn.execute(
+      """
+      SELECT ts.team_id, ts.round_id, ts.match_id, ts.arena_number
+      FROM tbl_explorer_teamschedule ts
+      JOIN tbl_team t ON ts.team_id = t.team_id
+      WHERE t.category_id = :catId
+    """,
+      {"catId": categoryId},
+    );
+
+    final Map<String, List<int>> teamsByMatchArena = {};
+    final List<Map<String, dynamic>> scheduleRows = [];
+    for (final row in scheduleRes.rows) {
+      final data = row.assoc();
+      final teamId = int.tryParse(data['team_id']?.toString() ?? '0') ?? 0;
+      final roundId = int.tryParse(data['round_id']?.toString() ?? '0') ?? 0;
+      final matchId = int.tryParse(data['match_id']?.toString() ?? '0') ?? 0;
+      final arena = int.tryParse(data['arena_number']?.toString() ?? '0') ?? 0;
+      if (teamId == 0 || roundId == 0 || matchId == 0 || arena == 0) {
+        continue;
+      }
+      final key = '$matchId:$roundId:$arena';
+      teamsByMatchArena.putIfAbsent(key, () => []).add(teamId);
+      scheduleRows.add({
+        'team_id': teamId,
+        'round_id': roundId,
+        'match_id': matchId,
+        'arena_number': arena,
+      });
+    }
+
+    for (final row in scheduleRows) {
+      final teamId = row['team_id'] as int;
+      final roundId = row['round_id'] as int;
+      final matchId = row['match_id'] as int;
+      final arena = row['arena_number'] as int;
+      final teamKey = '$teamId:$roundId';
+      if (!totalByTeamRound.containsKey(teamKey)) {
+        continue;
+      }
+
+      final opponentArena = arena == 1 ? 2 : 1;
+      final opponentKey = '$matchId:$roundId:$opponentArena';
+      final opponentTeams = teamsByMatchArena[opponentKey] ?? [];
+      int? opponentTotal;
+      for (final opponentId in opponentTeams) {
+        final oppKey = '$opponentId:$roundId';
+        if (totalByTeamRound.containsKey(oppKey)) {
+          opponentTotal = totalByTeamRound[oppKey];
+          break;
+        }
+      }
+
+      if (opponentTotal == null) continue;
+
+      final teamTotal = totalByTeamRound[teamKey] ?? 0;
+      final diff = teamTotal - opponentTotal;
+      final stat = teamStats[teamId];
+      if (stat == null) continue;
+
+      stat['total_point_diff'] =
+          (stat['total_point_diff'] as int) + diff;
+
+      if (diff > 0) {
+        stat['total_wins'] = (stat['total_wins'] as int) + 1;
+      } else if (diff < 0) {
+        stat['total_losses'] = (stat['total_losses'] as int) + 1;
+      } else {
+        stat['total_ties'] = (stat['total_ties'] as int) + 1;
+      }
+    }
+
+    final entries = teamStats.values.toList();
+    entries.sort((a, b) {
+      final totalA = a['total_score'] as int;
+      final totalB = b['total_score'] as int;
+      if (totalA != totalB) return totalB.compareTo(totalA);
+      final diffA = a['total_point_diff'] as int;
+      final diffB = b['total_point_diff'] as int;
+      return diffB.compareTo(diffA);
+    });
+
+    for (var i = 0; i < entries.length; i++) {
+      entries[i]['rank'] = i + 1;
+    }
+
+    return entries;
+  }
+
+  Widget _overallHeaderCell(
+    String label, {
+    int flex = 1,
+    bool alignLeft = false,
+  }) {
+    return Expanded(
+      flex: flex,
+      child: Text(
+        label,
+        textAlign: alignLeft ? TextAlign.left : TextAlign.center,
+        style: const TextStyle(
+          color: Colors.white70,
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  Widget _overallDataCell(
+    String value, {
+    int flex = 1,
+    bool isName = false,
+    Color? color,
+  }) {
+    return Expanded(
+      flex: flex,
+      child: Text(
+        value,
+        overflow: isName ? TextOverflow.ellipsis : TextOverflow.visible,
+        textAlign: isName ? TextAlign.left : TextAlign.center,
+        style: TextStyle(
+          color: color ?? Colors.white,
+          fontWeight: isName ? FontWeight.w600 : FontWeight.w500,
+          fontSize: 14,
+        ),
+      ),
+    );
+  }
+
+  Color _rankColor(int rank) {
+    switch (rank) {
+      case 1:
+        return const Color(0xFFFFD700);
+      case 2:
+        return const Color(0xFFC0C0C0);
+      case 3:
+        return const Color(0xFFCD7F32);
+      default:
+        return Colors.white;
+    }
+  }
+
+  Widget _overallStatCell(
+    String value, {
+    int flex = 1,
+    Color? textColor,
+    Color? borderColor,
+    Color? backgroundColor,
+  }) {
+    return Expanded(
+      flex: flex,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 2),
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        decoration: BoxDecoration(
+          color: backgroundColor,
+          border: Border.all(
+            color: borderColor ?? Colors.white10.withOpacity(0.2),
+            width: 0.8,
+          ),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Center(
+          child: Text(
+            value,
+            style: TextStyle(
+              color: textColor ?? Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: 13,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _formatDiff(int diff) {
+    if (diff == 0) return '0';
+    return diff > 0 ? '+$diff' : '$diff';
   }
 
   Widget _buildPlaceholderTab({
